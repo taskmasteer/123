@@ -1,4 +1,5 @@
 mod commands;
+mod secrets;
 mod worker;
 use tauri::Manager;
 pub fn run() {
@@ -9,7 +10,10 @@ pub fn run() {
             app.manage(std::sync::Mutex::new(worker::Worker::new(config)?));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![commands::dispatch])
+        .invoke_handler(tauri::generate_handler![
+            commands::dispatch,
+            commands::model_settings
+        ])
         .build(tauri::generate_context!())
         .expect("start desktop");
     app.run(|app, event| {

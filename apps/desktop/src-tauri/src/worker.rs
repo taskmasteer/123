@@ -1,4 +1,5 @@
 use crate::commands::{validate, AppError, DesktopRequest};
+use crate::secrets::{OsSecretStore, SavedModel, SecretStore, SettingsRequest, CREDENTIAL_NAME};
 use fs2::FileExt;
 use serde_json::Value;
 use std::fs::{File, OpenOptions};
@@ -93,6 +94,7 @@ pub struct Worker {
     process: Option<Process>,
     _lock: File,
     response_timeout: Duration,
+    secrets: Box<dyn SecretStore>,
 }
 impl Worker {
     pub fn new(config: LaunchConfig) -> Result<Self, AppError> {
@@ -111,6 +113,7 @@ impl Worker {
             process: None,
             _lock: lock,
             response_timeout: Duration::from_secs(30),
+            secrets: Box::new(OsSecretStore),
         };
         worker.start()?;
         Ok(worker)
@@ -123,6 +126,7 @@ impl Worker {
             .env_clear()
             .env("SITE_FACTORY_DATA_ROOT", &self.config.data)
             .env("SITE_FACTORY_SOURCE_ROOT", &self.config.source)
+            .env("SITE_FACTORY_NATIVE", "1")
             .env("NODE_ENV", "development")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -206,6 +210,7 @@ impl Worker {
             #[cfg(windows)]
             _job: job,
         });
+        self.bootstrap()?;
         Ok(())
     }
     pub fn request(&mut self, request: DesktopRequest) -> Result<Value, AppError> {
@@ -219,6 +224,65 @@ impl Worker {
             self.shutdown();
             self.start()?;
         }
+        self.exchange(request)
+    }
+    // This entry point is private Rust-to-worker; renderer dispatch never accepts model.configure.
+    fn configure(&mut self, params: Value) -> Result<(), AppError> {
+        self.exchange(DesktopRequest {
+            id: "native-model-configure".into(),
+            version: 1,
+            method: "model.configure".into(),
+            params,
+        })
+        .map(|_| ())
+    }
+    fn bootstrap(&mut self) -> Result<(), AppError> {
+        let saved = SavedModel::read(&self.config.data.join("model-settings.json"))
+            .unwrap_or(SavedModel::Blocked);
+        let mut params = serde_json::to_value(&saved)
+            .map_err(|_| AppError::new("Invalid model configuration"))?;
+        if matches!(saved, SavedModel::Live { .. }) {
+            match self.secrets.get(CREDENTIAL_NAME) {
+                Ok(Some(secret)) => params["apiKey"] = Value::String(secret),
+                _ => params = serde_json::json!({"mode":"blocked"}),
+            }
+        }
+        self.configure(params)
+    }
+    pub fn settings(&mut self, request: SettingsRequest) -> Result<Value, AppError> {
+        request.validate()?;
+        if !matches!(request, SettingsRequest::Status {}) {
+            // Stop old calls before rotating/deleting. A failed operation remains blocked on restart.
+            let path = self.config.data.join("model-settings.json");
+            SavedModel::Blocked.write(&path)?;
+            if self.process.is_some() {
+                self.configure(serde_json::json!({"mode":"blocked"}))?;
+            }
+            match request {
+                SettingsRequest::Save {
+                    api_key,
+                    model,
+                    image_model,
+                } => {
+                    self.secrets.put(CREDENTIAL_NAME, &api_key)?;
+                    SavedModel::Live { model, image_model }.write(&path)?;
+                }
+                SettingsRequest::Delete {} => self.secrets.delete(CREDENTIAL_NAME)?,
+                SettingsRequest::Demo {} => SavedModel::Demo.write(&path)?,
+                SettingsRequest::Status {} => {}
+            }
+            if self.process.is_some() {
+                self.bootstrap()?;
+            }
+        }
+        self.request(DesktopRequest {
+            id: "native-model-status".into(),
+            version: 1,
+            method: "device.status".into(),
+            params: serde_json::json!({}),
+        })
+    }
+    fn exchange(&mut self, request: DesktopRequest) -> Result<Value, AppError> {
         let bytes = serde_json::to_vec(&request).map_err(|_| AppError::new("Invalid request"))?;
         if bytes.len() > 64000 {
             return Err(AppError::new("Request too large"));
@@ -332,6 +396,96 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn private_settings_rotate_delete_and_reload_without_secret_in_public_results() {
+        use std::sync::{Arc, Mutex};
+        struct Memory(Arc<Mutex<Option<String>>>);
+        impl SecretStore for Memory {
+            fn put(&self, _: &str, value: &str) -> Result<(), AppError> {
+                *self.0.lock().unwrap() = Some(value.into());
+                Ok(())
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn delete(&self, _: &str) -> Result<(), AppError> {
+                *self.0.lock().unwrap() = None;
+                Ok(())
+            }
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let data = root.join(format!(
+            ".local-state/secret-pipe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut worker = Worker::new(LaunchConfig {
+            node: PathBuf::from(std::env::var_os("SITE_FACTORY_TEST_NODE").unwrap()),
+            script: root.join("dist/apps/worker/src/stdio.js"),
+            source: root,
+            data: data.clone(),
+        })
+        .unwrap();
+        let memory = Arc::new(Mutex::new(None));
+        worker.secrets = Box::new(Memory(memory.clone()));
+        for key in ["synthetic-first", "synthetic-rotated"] {
+            let result = worker
+                .settings(SettingsRequest::Save {
+                    api_key: key.into(),
+                    model: "explicit-model".into(),
+                    image_model: None,
+                })
+                .unwrap();
+            assert_eq!(result["mode"], "live");
+            assert_eq!(result["images"], "disabled");
+            assert!(!result.to_string().contains(key));
+            assert!(!std::fs::read_to_string(data.join("model-settings.json"))
+                .unwrap()
+                .contains(key));
+            assert_eq!(memory.lock().unwrap().as_deref(), Some(key));
+        }
+        worker.shutdown();
+        assert_eq!(
+            worker.settings(SettingsRequest::Status {}).unwrap()["mode"],
+            "live"
+        );
+        assert!(worker
+            .request(DesktopRequest {
+                id: "forged".into(),
+                version: 1,
+                method: "model.configure".into(),
+                params: json!({"mode":"demo"})
+            })
+            .is_err());
+        worker.process.as_mut().unwrap().child.kill().unwrap();
+        worker.process.as_mut().unwrap().child.wait().unwrap();
+        assert!(worker.settings(SettingsRequest::Delete {}).is_err());
+        assert!(matches!(
+            SavedModel::read(&data.join("model-settings.json")).unwrap(),
+            SavedModel::Blocked
+        ));
+        assert_eq!(
+            worker.settings(SettingsRequest::Status {}).unwrap()["mode"],
+            "blocked"
+        );
+        assert_eq!(
+            worker.settings(SettingsRequest::Delete {}).unwrap()["mode"],
+            "blocked"
+        );
+        assert!(memory.lock().unwrap().is_none());
+        assert_eq!(
+            worker.settings(SettingsRequest::Demo {}).unwrap()["mode"],
+            "demo"
+        );
+        worker.shutdown();
+        drop(worker);
+        std::fs::remove_dir_all(data).unwrap();
+    }
+    #[test]
     fn starts_real_node_and_restarts_after_shutdown() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -407,6 +561,7 @@ const lines = require('node:readline').createInterface({input:process.stdin});
 let tail=Promise.resolve();
 lines.on('line', line => { tail=tail.then(async()=>{
  const request = JSON.parse(line);
+ if(request.method==='model.configure'){process.stdout.write(JSON.stringify({id:request.id,result:{mode:request.params.mode}})+'\n');return;}
  fs.appendFileSync(path.join(process.env.SITE_FACTORY_DATA_ROOT,'requests.log'), request.id+'\n');
  const result = {id:request.id,result:{pid:process.pid}};
  switch(request.id){

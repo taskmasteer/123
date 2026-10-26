@@ -81,6 +81,20 @@ export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: str
 export interface ModelRequest {
   mode: 'generate' | 'edit'; site: Site; instruction: string; baseManifestId: string | null;
   conversation: ChatMessage[]; styleId: string; selectedElementId?: string;
+  operationId?: string; instructions?: string; continuation?: ModelContinuation;
 }
-export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; providerResponseId?: string }
-export interface ModelPort { run(request: ModelRequest, tools: FileTools, signal: AbortSignal): Promise<ModelResult> }
+/** Private, serializable provider replay. Never place this in public chat DTOs. */
+export interface ModelContinuation {
+  provider: 'openai-responses'; version: 1; binding: string;
+  items: Record<string, unknown>[]; turns: number; retries: number; retryAt: number; transportExhausted: boolean; requestPending:boolean;
+  inputTokens: number; outputTokens: number; responseId: string | null;
+  terminal: 'final' | 'refused' | 'incomplete' | 'failed' | 'cancelled' | 'stalled' | null;
+  summary: string; seen: Record<string, number>;
+}
+export interface ModelRunHooks { checkpoint(continuation: ModelContinuation): Promise<void> }
+export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; providerResponseId?: string; continuation?: ModelContinuation }
+export interface ModelPort {
+  readonly retryOwner?: 'adapter';
+  readonly identity?: string;
+  run(request: ModelRequest, tools: FileTools, signal: AbortSignal, hooks?: ModelRunHooks): Promise<ModelResult>;
+}

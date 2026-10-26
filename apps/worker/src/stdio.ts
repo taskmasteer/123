@@ -5,7 +5,7 @@ import {record} from '../../../packages/contracts/src/inputs.js';
 // Only the trusted Rust launch configuration supplies paths.
 const root=process.env.SITE_FACTORY_DATA_ROOT, source=process.env.SITE_FACTORY_SOURCE_ROOT;
 if(!root||!source)throw new Error('Trusted worker paths are required.');
-const runtime=await createDesktopRuntime(resolve(root),resolve(source));
+const runtime=await createDesktopRuntime(resolve(root),resolve(source),{native:process.env.SITE_FACTORY_NATIVE==='1'});
 let pending=Buffer.alloc(0),tail=Promise.resolve(),closing=false;
 function reply(value:unknown){process.stdout.write(JSON.stringify(value)+'\n');}
 process.stdin.on('data',(chunk:Buffer)=>{
@@ -14,7 +14,9 @@ process.stdin.on('data',(chunk:Buffer)=>{
  let end:number;
  while((end=pending.indexOf(10))>=0){
   const line=pending.subarray(0,end).toString('utf8');pending=pending.subarray(end+1);
-  tail=tail.then(async()=>{let value:unknown;try{value=JSON.parse(line);const result=await runtime.request(value);reply({id:record(value)?value.id:null,result});}
+  tail=tail.then(async()=>{let value:unknown;try{value=JSON.parse(line);
+   const privateConfig=record(value)&&value.method==='model.configure'&&value.version===1&&typeof value.id==='string'&&/^[a-zA-Z0-9-]{1,64}$/.test(value.id)&&Object.keys(value).every(key=>['id','version','method','params'].includes(key));
+   const result=privateConfig&&record(value)?await runtime.configure(value.params):await runtime.request(value);reply({id:record(value)?value.id:null,result});}
    catch(error){reply({id:record(value)&&typeof value.id==='string'?value.id:null,error:{code:error instanceof AppError?error.code:'NEEDS_ATTENTION',message:error instanceof AppError?error.message:'Исполнитель не смог выполнить операцию.'}});}});
  }
 });

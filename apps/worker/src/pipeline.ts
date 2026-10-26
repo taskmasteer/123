@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AppError } from '../../../packages/contracts/src/model.js';
-import type { ArtifactFile, ArtifactStore, ChatMessage, CheckpointStore, Clock, FileTools, Job, Lease, ModelPort, ModelResult, PublicationPort, Queue, RevisionRepository, SiteRepository, ValidationReport } from '../../../packages/contracts/src/model.js';
+import type { ArtifactFile, ArtifactStore, ChatMessage, CheckpointStore, Clock, FileTools, Job, Lease, ModelContinuation, ModelPort, ModelRequest, ModelResult, PublicationPort, Queue, RevisionRepository, SiteRepository, ValidationReport } from '../../../packages/contracts/src/model.js';
+import type { ImageHooks, ImageState } from '../../../packages/adapters/src/openai/images.js';
+import { generatePrompt } from './prompts/generate.js';
+import { editPrompt } from './prompts/edit.js';
 import { record } from '../../../packages/contracts/src/inputs.js';
 import { artifactMediaType, checkArtifacts } from '../../../packages/core/src/artifacts.js';
 import { createFileTools } from './files/tools.js';
@@ -16,6 +19,7 @@ export interface WorkerDeps {
   request?: { instruction: string; conversation: ChatMessage[]; selectedElementId?: string };
   validate?: (files: ArtifactFile[]) => Promise<ValidationReport>;
   delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  images?: (description:string,seed:number,signal:AbortSignal,hooks:ImageHooks)=>Promise<ArtifactFile|null>;
 }
 interface PipelineState extends Record<string, unknown> {
   schema: 1; jobId: string; siteId: string; baseRevision: number; selection: NonNullable<Job['generation']>;
@@ -24,6 +28,7 @@ interface PipelineState extends Record<string, unknown> {
   manifestId: string | null; intentId: string | null; instruction: string; conversation: ChatMessage[];
   baseManifestId: string | null; parentRevisionId: string | null; revisionId: string | null; revisionCreatedAt: number | null;
   selectedElementId?: string; pendingRepairInstruction?: string; error?: string;
+  continuation?: ModelContinuation; imageRun?: ImageState; modelIdentity?:string;
 }
 const stages = ['assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
 function validReport(value: unknown): value is ValidationReport {
@@ -80,6 +85,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       const saved = await deps.checkpoints.load(job.checkpointId);
       if (saved.checkpoint.jobId !== job.id || saved.checkpoint.id !== job.checkpointId || !stages.includes(saved.checkpoint.stage)) throw new AppError('INVALID_INPUT', 'Checkpoint identity or stage is invalid.');
       state = parseState(saved.state, job); files = saved.files; checkArtifacts(files); stage = saved.checkpoint.stage;
+      if((state.modelIdentity??'demo')!==(deps.model.identity??'demo'))throw new AppError('NEEDS_ATTENTION','The saved operation requires its originally configured model; no fallback was used.');
       if (state.pendingRepairInstruction !== undefined && stage !== 'validate') throw new AppError('INVALID_INPUT', 'A pending repair requires the validation stage.');
       if (['archive', 'publication', 'completed'].includes(stage) && (!validReport(state.validation) || !state.validation.ok)) throw new AppError('INVALID_INPUT', 'Validated stages require successful validation evidence.');
       if (['publication', 'completed'].includes(stage) && (!state.manifestId || state.intentId !== `${job.id}:${state.manifestId}` || state.manifestId !== saved.checkpoint.manifestId ||
@@ -103,7 +109,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       if (job.kind === 'generate' && !prepared?.generation && site.input.referenceId) throw new AppError('INVALID_INPUT', 'A catalog is required to resolve the selected reference.');
       const selection = prepared?.generation ?? (job.kind === 'edit' ? { seed, styleId: 'existing-site', templateVersion: 'existing' } : { seed, styleId: ['light-product', 'dark-tech', 'editorial', 'corporate', 'diagram'][seed % 5]!, templateVersion: '1.0.0' });
       const brief = site.input.about?.trim() || `${topics[selection.seed % topics.length]} for ${site.domain}`;
-      state = { schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief,
+      state = { schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief,modelIdentity:deps.model.identity??'demo',
         image: selection.seed % 100 < 10 ? 'assets/network.svg' : null, repairAttempts: 0, transportRetries: 0, transcript: [], toolTranscript: [], manifestId: null, intentId: null,
         baseManifestId: parent?.manifestId ?? null, parentRevisionId, revisionId: null, revisionCreatedAt: null,
         instruction: job.edit?.instruction ?? deps.request?.instruction ?? brief, conversation: job.edit?.conversation ?? deps.request?.conversation ?? [],
@@ -111,8 +117,15 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       parseState(state, job); await save('assets');
     }
     if (stage === 'assets') {
+      const cachedImage=files.find(file=>file.path==='assets/illustration.png');
       files = job.kind === 'edit' ? await deps.artifacts.read(state.baseManifestId!) : await deps.templates.load(state.selection.styleId, state.selection.templateVersion);
-      if (state.image && job.kind === 'generate') {
+      if(deps.images && job.kind==='generate') {
+        const image=await deps.images(state.brief,state.selection.seed,activeSignal,{
+          ...(state.imageRun?{state:state.imageRun}:{}),...(cachedImage?{file:cachedImage}:{}),
+          async checkpoint(imageRun,file){state!.imageRun=imageRun;if(file)files=[...files.filter(f=>f.path!==file.path),file];await save('assets');},
+        });
+        if(image){files=[...files.filter(f=>f.path!==image.path),image];const html=files.find(f=>f.path==='index.html');if(html)html.bytes=new TextEncoder().encode(new TextDecoder().decode(html.bytes).replace('</main>','<figure><img src="assets/illustration.png" alt="Thematic illustration" width="1024" height="1024"></figure></main>'));}
+      } else if (state.image && job.kind === 'generate') {
         files.push({ path: state.image, bytes: new TextEncoder().encode(illustration), mediaType: 'image/svg+xml' });
         const html = files.find((f) => f.path === 'index.html');
         if (html) html.bytes = new TextEncoder().encode(new TextDecoder().decode(html.bytes).replace('</main>', '<figure><img src="assets/network.svg" alt="Connected data processing stages" width="600" height="180"></figure></main>'));
@@ -148,20 +161,28 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
           replace: (path, oldText, newText) => traced('replace', path, () => tools.replace(path, oldText, newText)),
         };
         let result: ModelResult;
-        try { result = await deps.model.run({ mode: job.kind, site: { ...site!, input: { ...site!.input, about: state!.brief } }, instruction,
+        const request:ModelRequest={ mode: job.kind, site: { ...site!, input: { ...site!.input, about: state!.brief } }, instruction,
         baseManifestId: state!.baseManifestId, conversation: state!.conversation, styleId: state!.selection.styleId,
-          ...(state!.selectedElementId === undefined ? {} : { selectedElementId: state!.selectedElementId }) }, modelTools, activeSignal);
+          operationId:`${job.id}:${state!.repairAttempts}`,
+          ...(state!.continuation?{continuation:state!.continuation}:{}),
+          ...(state!.selectedElementId === undefined ? {} : { selectedElementId: state!.selectedElementId }) };
+        request.instructions=job.kind==='edit'?editPrompt(request):generatePrompt(request);
+        try { result = await deps.model.run(request, modelTools, activeSignal, {async checkpoint(continuation){
+          state!.continuation=continuation;await collect(tools);await save(stage);
+        }});
         } catch (error) {
           activeSignal.throwIfAborted();
           const transient = error instanceof Error && 'code' in error && ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(String(error.code));
-          if (!transient) throw error;
+          if (!transient || deps.model.retryOwner==='adapter') throw error;
           if (state!.transportRetries >= 3) throw new AppError('PROVIDER_WAIT', 'Model transport failed after three retries.', { cause: error });
           state!.transportRetries++; await save(stage);
           await (deps.delay ?? ((milliseconds, abort) => sleep(milliseconds, undefined, { signal: abort })))(1000 * 2 ** (state!.transportRetries - 1), activeSignal);
           continue;
         }
         if (!result || typeof result.summary !== 'string' || !Number.isSafeInteger(result.inputTokens) || result.inputTokens < 0 || !Number.isSafeInteger(result.outputTokens) || result.outputTokens < 0) throw new AppError('INVALID_INPUT', 'Invalid model result.');
-        state!.transportRetries = 0; state!.transcript.push(result); await collect(tools); return;
+        state!.transportRetries = 0;
+        const {continuation: _continuation,...summary}=result;state!.transcript.push(summary);
+        await collect(tools);delete state!.continuation;return;
       }
     }
     if (stage === 'generate') { await generate(state.instruction); await save('validate'); }

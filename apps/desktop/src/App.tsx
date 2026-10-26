@@ -6,9 +6,11 @@ import type { DesktopSite } from './features/sites/SiteList.js';
 import { ReferenceLibrary } from './features/references/ReferenceLibrary.js';
 import type { Catalog } from './features/references/ReferenceLibrary.js';
 import { SiteEditor } from './features/editor/SiteEditor.js';
+import {ModelSettings} from './features/settings/ModelSettings.js';
+import type {DeviceStatus} from './features/settings/ModelSettings.js';
 import './app.css';
 
-type Device = { available: boolean; activeJobs: number; maxJobs: number };
+type Device = DeviceStatus;
 export default function App() {
   const [section, setSection] = useState('Сайты');
   const [sites, setSites] = useState<DesktopSite[]>([]);
@@ -76,16 +78,16 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <span className={device ? 'device-dot online' : 'device-dot'} aria-hidden="true" />
-          <span>{device ? 'Исполнитель доступен' : 'Нет связи'}</span>
-          <p>Демо — без внешних сервисов</p>
+          <span className={device?.available ? 'device-dot online' : 'device-dot'} aria-hidden="true" />
+          <span>{device?.available ? 'Исполнитель доступен' : device?'Требуется настройка':'Нет связи'}</span>
+          <p>{device?.mode==='live'?'OpenAI · локальное хранение':device?.mode==='demo'?'Демо — без внешних сервисов':'Вызовы модели остановлены'}</p>
         </div>
       </aside>
       <main className={editedSite && section === 'Сайты' ? 'editing-main' : undefined}>
         <header className="topbar">
           <div>
             <h1>{section === 'Сайты' && editedSite ? editedSite.domain : section}</h1>
-            {section === 'Сайты' ? <span className="muted">{editedSite ? 'Правки сайта · локальное демо' : loaded ? `${sites.length} сайтов в локальном реестре` : 'Загрузка локального реестра'}</span> : null}
+            {section === 'Сайты' ? <span className="muted">{editedSite ? `Правки сайта · ${device?.mode==='live'?'OpenAI':'локальный режим'}` : loaded ? `${sites.length} сайтов в локальном реестре` : 'Загрузка локального реестра'}</span> : null}
           </div>
           {section === 'Сайты' ? editedSite ? <button onClick={() => setEditorId(null)}>← Сайты</button> : <button className="primary" onClick={() => setCreating(true)}>Создать сайт</button> : null}
         </header>
@@ -94,7 +96,7 @@ export default function App() {
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => {})}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
           {section === 'Сайты' ? editedSite ? (
-            <SiteEditor key={editedSite.id} site={editedSite} onChanged={next => {
+            <SiteEditor key={editedSite.id} site={editedSite} modelMode={device?.mode??'blocked'} onChanged={next => {
               if (next) setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
               setRefresh(value => value + 1);
             }} />
@@ -105,12 +107,12 @@ export default function App() {
               <p className="workspace-note">Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.</p>
             </>
           ) : section === 'Референсы' ? <ReferenceLibrary catalog={catalog} onChange={loadCatalog} /> : (
-            <section className="device-panel">
-              <h2>{device ? 'Исполнитель доступен' : 'Исполнитель недоступен'}</h2>
+            <><section className="device-panel">
+              <h2>{device?.available ? 'Исполнитель доступен' : 'Исполнитель недоступен'}</h2>
               <p>Это устройство создаёт и проверяет локальные сайты.</p>
-              <dl><dt>Режим</dt><dd>Локальное демо</dd><dt>Активные задания</dt><dd>{device ? `${device.activeJobs} из ${device.maxJobs}` : 'Нет связи'}</dd><dt>Модель и публикация</dt><dd>Демонстрационные адаптеры, без внешних запросов</dd></dl>
+              <dl><dt>Режим</dt><dd>{device?.mode==='live'?'Реальная модель · локальные данные':device?.mode==='demo'?'Локальное демо':'Требуется настройка'}</dd><dt>Активные задания</dt><dd>{device ? `${device.activeJobs} из ${device.maxJobs}` : 'Нет связи'}</dd></dl>
               <p className="hint">При закрытии приложения текущая работа сохраняется. После запуска исполнение продолжится.</p>
-            </section>
+            </section><ModelSettings device={device} onChanged={next=>{setDevice(next);setRefresh(value=>value+1);}}/></>
           )}
         </div>
       </main>

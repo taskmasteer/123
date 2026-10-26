@@ -13,15 +13,18 @@ import { createLocalArtifacts } from '../../../packages/adapters/src/local-artif
 import { createLocalCatalog } from '../../../packages/adapters/src/local-catalog.js';
 import { privateDirectory, readRegular, safeFile } from '../../../packages/adapters/src/safe-files.js';
 import { FakeModel } from '../../../packages/adapters/src/fake-model.js';
+import { createResponsesModel } from '../../../packages/adapters/src/openai/responses.js';
+import { createImageGenerator } from '../../../packages/adapters/src/openai/images.js';
 import { FakePublication } from '../../../packages/adapters/src/fake-publication.js';
 import { createCheckpointStore } from './checkpoints.js';
 import { runJob } from './pipeline.js';
-import { parseDesktopRequest } from './desktop-protocol.js';
+import type { WorkerDeps } from './pipeline.js';
+import { parseDesktopRequest, parseModelConfiguration } from './desktop-protocol.js';
 import { validateSite } from './validation/browser.js';
 import { serveFiles } from './preview/server.js';
 import type { Preview } from './preview/server.js';
 const principal = { userId: 'local-demo-admin', role: 'admin' } as const;
-export async function createDesktopRuntime(root: string, sourceRoot: string) {
+export async function createDesktopRuntime(root: string, sourceRoot: string, options: {native?:boolean;transport?:typeof fetch}={}) {
     const clock = { now: Date.now };
     const sites = await createLocalState(join(root, 'sites'), clock);
     const queue = await createLocalQueue(root, clock), artifacts = await createLocalArtifacts(join(root, 'artifacts'));
@@ -34,9 +37,19 @@ export async function createDesktopRuntime(root: string, sourceRoot: string) {
     }>();
     const workerId = randomUUID();
     let pumping: Promise<void> | null = null, closed = false;
-    const deps = { sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
+    let mode:'demo'|'live'|'blocked'=options.native?'blocked':'demo', modelName:string|null=null,imageModel:string|null=null;
+    let credentialsAbort=new AbortController(),configuring=false;
+    let usage:{inputTokens:number;outputTokens:number}|undefined;
+    const deps:WorkerDeps & {queue:typeof queue} = { sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
         workspace: join(root, 'attempts'), validate: (files: Parameters<typeof validateSite>[0]) => validateSite(files, { screenshotRoot: validationRoot }) };
     const editing = createEditing({ ...deps, store: await createLocalEditingStore(root), ids: { next: randomUUID } });
+    function ready(){return !closed&&!configuring&&mode!=='blocked';}
+    async function updateUsage(jobId:string){
+        const job=await queue.get(jobId);if(!job?.checkpointId)return;
+        const {state}=await checkpoints.load(job.checkpointId);
+        const records=[...(Array.isArray(state.transcript)?state.transcript:[]),state.continuation].filter(record);
+        if(records.length)usage=records.reduce<{inputTokens:number;outputTokens:number}>((total,item)=>({inputTokens:total.inputTokens+(Number.isSafeInteger(item.inputTokens)?Number(item.inputTokens):0),outputTokens:total.outputTokens+(Number.isSafeInteger(item.outputTokens)?Number(item.outputTokens):0)}),{inputTokens:0,outputTokens:0});
+    }
     async function allSites() {
         const items: Site[] = [];
         let cursor: string | undefined;
@@ -56,22 +69,22 @@ export async function createDesktopRuntime(root: string, sourceRoot: string) {
         return job;
     }
     function pump(): Promise<void> {
-        if (closed)
+        if (!ready())
             return Promise.resolve();
         if (pumping)
             return pumping;
         pumping = (async () => {
-            while (!closed && active.size < 2) {
+            while (ready() && active.size < 2) {
                 const claimed = await queue.claim(workerId);
                 if (!claimed)
                     break;
                 // Closing can race an in-flight claim. Release it before closing persistence.
-                if (closed) {
+                if (!ready()) {
                     await queue.finish(claimed.lease, 'paused');
                     break;
                 }
-                const work = runJob(claimed.job, claimed.lease, deps, abort.signal)
-                    .then(() => editing.recover(claimed.job.siteId))
+                const work = runJob(claimed.job, claimed.lease, deps, AbortSignal.any([abort.signal,credentialsAbort.signal]))
+                    .then(async() => {await editing.recover(claimed.job.siteId);await updateUsage(claimed.job.id);})
                     .catch(error => console.error('Worker job failed:', String(error)))
                     .finally(() => active.delete(work));
                 active.add(work);
@@ -83,6 +96,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string) {
         await ensureJob(site);
         await editing.recover(site.id);
         const job = await queue.current(site.id);
+        if(job)await updateUsage(job.id);
         if (job?.state === 'paused')
             await queue.retry(job.id);
     }
@@ -114,12 +128,28 @@ export async function createDesktopRuntime(root: string, sourceRoot: string) {
         return { site, revision, validation: saved.state.validation };
     }
     return {
+        async configure(value:unknown) {
+            const config=parseModelConfiguration(value);
+            configuring=true;credentialsAbort.abort();
+            await pumping;await Promise.allSettled([...active]);
+            mode='blocked';modelName=null;imageModel=null;delete deps.images;
+            try {
+                if(config.mode==='live') {
+                    deps.model=createResponsesModel(config,options.transport);modelName=config.model;imageModel=config.imageModel??null;
+                    deps.images=(description,seed,signal,hooks)=>createImageGenerator(config,options.transport,hooks,signal).generateImage(description,seed);
+                }else if(config.mode==='demo')deps.model=new FakeModel();
+                mode=config.mode;credentialsAbort=new AbortController();
+                if(mode!=='blocked')for(const site of await allSites()){const job=await queue.current(site.id);if(job?.state==='paused')await queue.retry(job.id);}
+            }finally{configuring=false;}
+            void pump();return {mode,model:modelName,images:imageModel?'enabled':'disabled'};
+        },
         async request(value: unknown): Promise<unknown> {
             if (closed)
                 throw new AppError('CONFLICT', 'Исполнитель остановлен.');
             const request = parseDesktopRequest(value), p = request.params;
+            if((mode==='blocked'||configuring)&&['site.create','edit.request','job.retry'].includes(request.method))throw new AppError('NEEDS_ATTENTION','Настройте модель или включите демонстрационный режим.');
             switch (request.method) {
-                case 'device.status': return { mode: 'demo', available: true, activeJobs: active.size, maxJobs: 2 };
+                case 'device.status': return { mode, available:mode!=='blocked'&&!configuring, activeJobs: active.size, maxJobs: 2,model:modelName,imageModel,images:imageModel?'enabled':'disabled',storage:'local',publication:'demo',...(usage?{usage}:{}) };
                 case 'site.list': {
                     const items = await allSites();
                     return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: null };

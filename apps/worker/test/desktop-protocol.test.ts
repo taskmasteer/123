@@ -23,3 +23,8 @@ it('enforces edit and publication request schemas without accepting role or arti
   ['preview.screenshot',{siteId,revisionId:candidateId,candidateId:'../private',width:375}],
  ] as const) expect(()=>parseDesktopRequest({id:'test',version:1,method,params})).toThrow();
 });
+import { parseModelConfiguration } from '../src/desktop-protocol.js';
+it('private model configuration rejects absent, non-string and injected secrets',()=>{
+ for(const apiKey of [undefined,null,123,{},'bad\nheader'])expect(()=>parseModelConfiguration({mode:'live',apiKey,model:'configured'})).toThrow();
+ expect(()=>parseDesktopRequest({id:'x',version:1,method:'model.configure',params:{mode:'demo'}})).toThrow();
+});

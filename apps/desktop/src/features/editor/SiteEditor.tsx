@@ -9,7 +9,7 @@ import { PreviewComparison } from './PreviewComparison.js';
 type Review = { candidates: Candidate[]; publication: PublishIntent | null };
 const statuses: Record<Candidate['status'], string> = { queued: 'В очереди', running: 'В работе', checking: 'Проверка', ready: 'Готов к проверке', accepted: 'Принят в черновик', rejected: 'Отклонён', conflict: 'Конфликт версий', failed: 'Правка не завершена' };
 
-export function SiteEditor({ site, onChanged }: { site: DesktopSite; onChanged: (site?: Site) => void }) {
+export function SiteEditor({ site, onChanged, modelMode }: { site: DesktopSite; onChanged: (site?: Site) => void;modelMode:'demo'|'live'|'blocked' }) {
   const [review, setReview] = useState<Review>({ candidates: [], publication: null });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [instruction, setInstruction] = useState('');
@@ -90,7 +90,7 @@ export function SiteEditor({ site, onChanged }: { site: DesktopSite; onChanged: 
             {selected?.status === 'conflict' || (selected?.status === 'ready' && !canReview) ? <button disabled={busy || active} onClick={retryCurrentBase}>Повторить на актуальном черновике</button> : null}
           </div>
         </div>
-        <ChatPanel messages={messages} instruction={instruction} setInstruction={setInstruction} busy={busy || active} refinement={!!refinementId} onResetBase={() => setRefinementId(null)} onSend={() => void act('edit.request', { instruction, expectedRevision: site.revision, ...(refinementId ? { candidateId: refinementId } : {}) })} />
+        <ChatPanel modelMode={modelMode} messages={messages} instruction={instruction} setInstruction={setInstruction} busy={busy || active} refinement={!!refinementId} onResetBase={() => setRefinementId(null)} onSend={() => void act('edit.request', { instruction, expectedRevision: site.revision, ...(refinementId ? { candidateId: refinementId } : {}) })} />
       </div>
     </section>
   );

@@ -171,6 +171,29 @@ pub async fn dispatch<R: tauri::Runtime>(
     .await
     .map_err(|_| AppError::new("Worker task failed"))?
 }
+#[tauri::command]
+pub async fn model_settings<R: tauri::Runtime>(
+    request: crate::secrets::SettingsRequest,
+    app: tauri::AppHandle<R>,
+    webview: tauri::WebviewWindow<R>,
+) -> Result<Value, AppError> {
+    use tauri::Manager;
+    if webview.label() != "main" {
+        return Err(AppError {
+            code: "FORBIDDEN".into(),
+            message: "Only the main webview may configure models.".into(),
+        });
+    }
+    request.validate()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<std::sync::Mutex<Worker>>()
+            .lock()
+            .map_err(|_| AppError::new("Worker lock failed"))?
+            .settings(request)
+    })
+    .await
+    .map_err(|_| AppError::new("Settings task failed"))?
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +269,11 @@ mod tests {
         for (version, method, params) in [
             (2, "site.list", json!({})),
             (1, "shell.exec", json!({})),
+            (
+                1,
+                "model.configure",
+                json!({"mode":"live","apiKey":"synthetic","model":"explicit"}),
+            ),
             (1, "site.list", json!({"path":"C:/secret"})),
             (1, "preview.open", json!({"siteId":"x","revisionId":"../x"})),
         ] {
@@ -281,7 +309,7 @@ mod acl_tests {
         .unwrap();
         let app = tauri::test::mock_builder()
             .manage(std::sync::Mutex::new(worker))
-            .invoke_handler(tauri::generate_handler![dispatch])
+            .invoke_handler(tauri::generate_handler![dispatch, model_settings])
             .build(tauri::generate_context!())
             .unwrap();
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -326,5 +354,32 @@ mod acl_tests {
             "ACL must deny before command label guard: {denied}"
         );
         assert!(invoke(&main, "https://example.test").is_err());
+        let invoke_settings = |window: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+                               url: &str| {
+            tauri::test::get_ipc_response(
+                window,
+                tauri::webview::InvokeRequest {
+                    cmd: "model_settings".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: url.parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(json!({"request":{"action":"status"}})),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+        };
+        assert_eq!(
+            invoke_settings(&main, local)
+                .unwrap()
+                .deserialize::<Value>()
+                .unwrap()["mode"],
+            "demo"
+        );
+        assert!(invoke_settings(&untrusted, local)
+            .unwrap_err()
+            .as_str()
+            .is_some_and(|message| message.contains("not allowed")));
+        assert!(invoke_settings(&main, "https://example.test").is_err());
     }
 }

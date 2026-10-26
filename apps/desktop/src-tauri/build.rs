@@ -1,6 +1,6 @@
 fn main() {
     let mut attributes = tauri_build::Attributes::new()
-        .app_manifest(tauri_build::AppManifest::new().commands(&["dispatch"]));
+        .app_manifest(tauri_build::AppManifest::new().commands(&["dispatch", "model_settings"]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {

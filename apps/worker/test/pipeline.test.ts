@@ -8,6 +8,8 @@ import { createLocalCatalog } from '../../../packages/adapters/src/local-catalog
 import { createLocalRevisions } from '../../../packages/adapters/src/local-revisions.js';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { FakeModel } from '../../../packages/adapters/src/fake-model.js';
+import { createResponsesModel } from '../../../packages/adapters/src/openai/responses.js';
+import { createImageGenerator } from '../../../packages/adapters/src/openai/images.js';
 import { ManualClock } from '../../../packages/testing/src/clock.js';
 import { validateStatic } from '../src/validation/static.js';
 import { runJob } from '../src/pipeline.js';
@@ -42,6 +44,26 @@ async function fixture(about = 'user supplied description: event streaming for r
   };
   return { job, lease, deps, snapshots, site };
 }
+
+test('checkpoints provider outputs and matching files before resuming without replaying replace',async()=>{
+ const f=await fixture();let calls=0;
+ const transport=(async(_url,init)=>{calls++;const body=JSON.parse(String(init?.body));expect(body.instructions).toContain('English');
+   if(calls===1)return Response.json({status:'completed',output:[{type:'function_call',call_id:'color',name:'replace',arguments:JSON.stringify({path:'style.css',oldText:'#111',newText:'#222'})}]});
+   expect(body.input.some((item:{type:string})=>item.type==='function_call_output')).toBe(true);
+   return Response.json({status:'completed',output:[{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Updated color.'}]}]});
+ }) as typeof fetch;
+ const live=createResponsesModel({apiKey:'synthetic',model:'configured'},transport);
+ f.deps.model={retryOwner:'adapter',identity:live.identity!,run:(request,tools,signal,hooks)=>live.run(request,tools,signal,{async checkpoint(state){await hooks!.checkpoint(state);if(state.items.some(item=>item.type==='function_call_output'))throw new AppError('PROVIDER_WAIT','simulated wait');}})};
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('waiting_provider');expect(calls).toBe(1);
+ const saved=await f.deps.checkpoints.load(f.job.checkpointId!);expect(saved.state.continuation).toMatchObject({provider:'openai-responses'});expect(new TextDecoder().decode(saved.files.find(file=>file.path==='style.css')!.bytes)).toContain('#222');
+ f.deps.model=live;await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');expect(calls).toBe(2);
+});
+test('live image selection persists in the existing pipeline and disables fallback SVG',async()=>{
+ const f=await fixture();f.job.generation!.seed=3;let imageCalls=0;
+ f.deps.images=async(description,seed,signal,hooks)=>createImageGenerator({apiKey:'synthetic',model:'configured'},(async()=>{imageCalls++;throw new Error('forbidden');}) as typeof fetch,hooks,signal).generateImage(description,seed);
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');
+ const saved=await f.deps.checkpoints.load(f.job.checkpointId!);expect(saved.state.imageRun).toMatchObject({status:'skipped'});expect(imageCalls).toBe(0);expect(saved.files.some(file=>file.path.endsWith('.svg'))).toBe(false);
+});
 
 // Catches skipped stages, discarded user briefs, private files accidentally published, and missing automatic publication.
 test('generates, validates and automatically publishes a fresh site using its manual brief', async () => {

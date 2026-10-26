@@ -1,5 +1,14 @@
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { parseSiteInput, record } from '../../../packages/contracts/src/inputs.js';
+import { validateModelConfig } from '../../../packages/adapters/src/openai/responses.js';
+import type { ResponsesConfig } from '../../../packages/adapters/src/openai/responses.js';
+export type PrivateModelConfiguration={mode:'demo'|'blocked'}|({mode:'live'}&ResponsesConfig);
+/** Only the private Rust pipe calls this parser; never part of renderer dispatch. */
+export function parseModelConfiguration(value:unknown):PrivateModelConfiguration {
+ if(!record(value)||!['demo','live','blocked'].includes(String(value.mode))||Object.keys(value).some(key=>!(value.mode==='live'?['mode','apiKey','model','imageModel']:['mode']).includes(key)))throw new AppError('INVALID_INPUT','Invalid private model configuration.');
+ if(value.mode==='live')validateModelConfig(value as unknown as ResponsesConfig);
+ return value as PrivateModelConfiguration;
+}
 export interface DesktopRequest { id: string; version: 1; method: string; params: Record<string, unknown> }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const methods: Record<string, string[]> = {
