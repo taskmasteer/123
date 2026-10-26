@@ -205,3 +205,35 @@ test('resume refuses publication without persisted successful validation evidenc
   await runJob(f.job, f.lease, f.deps, new AbortController().signal);
   expect(f.job.state).toBe('needs_attention'); expect(publications).toBe(0);
 });
+
+// A provider wait or abort must retry the same repair, not spend another validation repair attempt.
+test.each(['quota', 'abort'] as const)('resumes the same pending repair after repeated %s interruptions', async (interruption) => {
+  const f = await fixture(); let controller = new AbortController(); let repairCalls = 0; let validations = 0;
+  const instructions: string[] = [];
+  f.deps.validate = async (files) => { validations++; return validateStatic(files); };
+  f.deps.model = { async run(request, tools, signal) {
+    if (!request.instruction.includes('Validation issues:')) {
+      await tools.write('index.html', '<html lang="en"><head><title>Broken</title></head><body><form>Forbidden</form></body></html>');
+    } else {
+      repairCalls++; instructions.push(request.instruction);
+      if (repairCalls < 3) {
+        if (interruption === 'quota') throw new AppError('PROVIDER_WAIT', 'Quota wait during repair');
+        controller.abort(); signal.throwIfAborted();
+      }
+      await tools.write('index.html', new TextDecoder().decode(siteFiles('<h1>Recovered event processing</h1>')[0]!.bytes));
+    }
+    return { summary: 'Generated local test content', inputTokens: 0, outputTokens: 0 };
+  } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    controller = new AbortController(); await runJob(f.job, f.lease, f.deps, controller.signal);
+    expect(f.job.state).toBe(interruption === 'quota' ? 'waiting_provider' : 'paused');
+    const saved = await f.deps.checkpoints.load(f.job.checkpointId!);
+    expect(saved.state.repairAttempts).toBe(1);
+  }
+  controller = new AbortController(); await runJob(f.job, f.lease, f.deps, controller.signal);
+  expect(f.job.state).toBe('completed'); expect(repairCalls).toBe(3); expect(validations).toBe(2);
+  expect(new Set(instructions).size).toBe(1);
+  const completed = await f.deps.checkpoints.load(f.job.checkpointId!);
+  expect(completed.state.repairAttempts).toBe(1); expect(completed.state.pendingRepairInstruction).toBeUndefined();
+  expect((await f.deps.sites.get(f.site.id))!.publishedId).not.toBeNull();
+});

@@ -23,7 +23,7 @@ interface PipelineState extends Record<string, unknown> {
   toolTranscript: { operation: string; path?: string }[];
   manifestId: string | null; intentId: string | null; instruction: string; conversation: ChatMessage[];
   baseManifestId: string | null; parentRevisionId: string | null; revisionId: string | null; revisionCreatedAt: number | null;
-  selectedElementId?: string; error?: string;
+  selectedElementId?: string; pendingRepairInstruction?: string; error?: string;
 }
 const stages = ['assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
 function validReport(value: unknown): value is ValidationReport {
@@ -47,6 +47,7 @@ function parseState(value: Record<string, unknown>, job: Job): PipelineState {
       (value.revisionId !== null && typeof value.revisionId !== 'string') || (value.revisionCreatedAt !== null && !Number.isSafeInteger(value.revisionCreatedAt)) ||
       typeof value.instruction !== 'string' || !Array.isArray(value.conversation) || !value.conversation.every((m) => record(m) &&
         typeof m.id === 'string' && ['user', 'assistant'].includes(String(m.role)) && typeof m.text === 'string' && Number.isSafeInteger(m.createdAt)) ||
+      (value.pendingRepairInstruction !== undefined && (typeof value.pendingRepairInstruction !== 'string' || !value.pendingRepairInstruction || (value.repairAttempts as number) < 1)) ||
       (value.selectedElementId !== undefined && typeof value.selectedElementId !== 'string')) {
     throw new AppError('INVALID_INPUT', 'Private checkpoint does not match this job or is corrupt.');
   }
@@ -79,6 +80,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       const saved = await deps.checkpoints.load(job.checkpointId);
       if (saved.checkpoint.jobId !== job.id || saved.checkpoint.id !== job.checkpointId || !stages.includes(saved.checkpoint.stage)) throw new AppError('INVALID_INPUT', 'Checkpoint identity or stage is invalid.');
       state = parseState(saved.state, job); files = saved.files; checkArtifacts(files); stage = saved.checkpoint.stage;
+      if (state.pendingRepairInstruction !== undefined && stage !== 'validate') throw new AppError('INVALID_INPUT', 'A pending repair requires the validation stage.');
       if (['archive', 'publication', 'completed'].includes(stage) && (!validReport(state.validation) || !state.validation.ok)) throw new AppError('INVALID_INPUT', 'Validated stages require successful validation evidence.');
       if (['publication', 'completed'].includes(stage) && (!state.manifestId || state.intentId !== `${job.id}:${state.manifestId}` || state.manifestId !== saved.checkpoint.manifestId ||
           (job.kind === 'generate' && (!state.revisionId || state.revisionCreatedAt === null)))) throw new AppError('INVALID_INPUT', 'Publication checkpoint is incomplete or has a different intent.');
@@ -164,13 +166,19 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     if (stage === 'generate') { await generate(state.instruction); await save('validate'); }
     if (stage === 'validate') {
       while (true) {
+        // The attempt is charged when scheduled, not again when a provider wait or abort resumes it.
+        if (state.pendingRepairInstruction !== undefined) {
+          await generate(state.pendingRepairInstruction);
+          delete state.pendingRepairInstruction; await save('validate');
+        }
         await check(); const report = await (deps.validate ?? validateSite)(files); activeSignal.throwIfAborted();
         if (!validReport(report)) throw new AppError('INVALID_INPUT', 'Invalid validation report.');
         state.validation = report;
         if (report.ok) { await save('archive'); break; }
         if (state.repairAttempts >= 2) throw new AppError('NEEDS_ATTENTION', 'Validation failed after two repairs.');
-        state.repairAttempts++; await save('validate');
-        await generate(`${state.instruction}\nValidation issues:\n${JSON.stringify(report.issues)}`); await save('validate');
+        state.repairAttempts++;
+        state.pendingRepairInstruction = `${state.instruction}\nValidation issues:\n${JSON.stringify(report.issues)}`;
+        await save('validate');
       }
     }
     if (stage === 'archive') {
