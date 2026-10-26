@@ -22,7 +22,9 @@ function safeDiagnostic(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const text = value.slice(0, 8192)
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*/gi, '[скрыто]')
-    .replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie)\b["']?\s*[:=][^\r\n;]*/gi, '[скрыто]')
+    // Semicolons separate cookies/attributes within a header, not independent diagnostics.
+    .replace(/\b(?:cookie|set-cookie)\b["']?\s*[:=][^\r\n]*/gi, '[скрыто]')
+    .replace(/\b(?:authorization|proxy-authorization)\b["']?\s*[:=][^\r\n;]*/gi, '[скрыто]')
     .replace(/\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|passwd|secret)\b["']?\s*[:=]\s*(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^\s;,]+)/gi, '[скрыто]')
     .replace(/\b(?:Bearer|Basic)\s+[^\s;,]+/gi, '[скрыто]')
     .replace(/\b(?:sk-[\w-]+|AKIA[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+(?:\.[\w-]+)?|[A-Za-z0-9_+/=-]{40,})\b/g, '[скрыто]')

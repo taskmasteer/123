@@ -188,6 +188,23 @@ test('validation failure diagnostics differ from model errors and survive reopen
   } finally { await h.close(); }
 });
 
+test.each(['Cookie', 'Set-Cookie', '"Cookie"'])('redacts every authentication cookie in a %s header before persisting chat', async header => {
+  const h = await harness();
+  try {
+    await h.editor.requestEdit(admin, h.before.id, 'Cookie failure', 1);
+    const candidate = await h.run({ async run() {
+      throw new Error(`Provider refused request. ${header}: session=first-cookie; refresh_session=second-private-cookie; auth=third-private-cookie`);
+    } });
+    expect(candidate.summary).toContain('Provider refused request.');
+    expect(candidate.summary).toContain('[скрыто]');
+    expect(candidate.summary).not.toMatch(/first-cookie|second-private-cookie|third-private-cookie/);
+    expect(candidate.summary).toContain('Черновик и публикация сохранены.');
+    const reopened = h.reopen(await createLocalEditingStore(h.root));
+    expect((await reopened.getConversation(admin, h.before.id)).at(-1)?.text).toBe(candidate.summary);
+    expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
+  } finally { await h.close(); }
+});
+
 test.each(['checkpoint', 'job', 'site', 'base'] as const)('does not expose a failed diagnostic with a foreign %s binding', async mismatch => {
   const h = await harness();
   try {
