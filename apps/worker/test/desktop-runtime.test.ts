@@ -3,6 +3,25 @@ import {resolve} from 'node:path';
 import {createDesktopRuntime} from '../src/desktop-runtime.js';
 import {directory,cleanDirectories} from './fixtures.js';
 afterEach(cleanDirectories);
+it.each(['auth','quota','model'])('explicit Retry recovers %s for the same generation after correction',async(failure)=>{
+ const bodies:any[]=[];const headers:string[]=[];
+ const html='<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Saved research notes</title><style>body{font:20px sans-serif;margin:24px;color:#111;background:#fff}</style></head><body><h1>Manual research notes</h1><p>Preserve this completed content when account settings are corrected.</p></body></html>';
+ const transport=(async(_url,init)=>{const body=JSON.parse(String(init?.body));bodies.push(body);headers.push(new Headers(init?.headers).get('authorization')!);
+  if(bodies.length===1)return Response.json({status:'completed',output:[{type:'function_call',call_id:'saved-write',name:'write',arguments:JSON.stringify({path:'index.html',text:html})}],usage:{input_tokens:10,output_tokens:5}});
+  if(bodies.length===2)return Response.json({error:{code:failure==='quota'?'insufficient_quota':failure==='auth'?'invalid_api_key':'model_not_found'}},{status:failure==='quota'?429:failure==='auth'?401:404});
+  return Response.json({status:'completed',output:[{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Saved content preserved.'}]}],usage:{input_tokens:2,output_tokens:1}});
+ }) as typeof fetch;
+ const runtime=await createDesktopRuntime(await directory(),resolve('.'),{native:true,transport});const request=(method:string,params:unknown={}):Promise<any>=>runtime.request({id:'recover',version:1,method,params});
+ try{
+  await runtime.configure({mode:'live',apiKey:'old-key',model:'configured'});const created=await request('site.create',{domain:failure+'-recovery.test'});
+  await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state).toBe('needs_attention');expect(bodies).toHaveLength(2);
+  if(failure!=='quota')await runtime.configure({mode:'live',apiKey:'corrected-key',model:failure==='model'?'replacement':'configured'});expect(bodies).toHaveLength(2);
+  await request('job.retry',{siteId:created.site.id});await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('completed');
+  expect(bodies).toHaveLength(3);expect(headers[2]).toBe(failure==='quota'?'Bearer old-key':'Bearer corrected-key');expect(bodies[2].input.some((item:any)=>item.call_id==='saved-write')).toBe(failure!=='model');
+  await expect.poll(async()=>(await request('device.status')).usage).toEqual({inputTokens:12,outputTokens:6});
+  expect((await request('site.list')).items[0].publishedId).toBeTruthy();
+ }finally{await runtime.close();}
+},30000);
 it.each(['rotate','delete'])('%s during a live tool loop aborts old calls before the next request',async(action)=>{
  const headers:string[]=[];let waiting=false;
  const transport=(async(_url,init)=>{

@@ -3,14 +3,16 @@ import type { Clock, Job, Lease, Queue } from '../../contracts/src/model.js';
 import { record, nonemptyString } from '../../contracts/src/inputs.js';
 import { privateJson } from './private-json.js';
 import { validEditRequest } from '../../contracts/src/editing.js';
-export interface LocalQueue extends Queue { get(id: string): Promise<Job | null>; current(siteId: string): Promise<Job | null>; cancel(id: string): Promise<void>; retry(id: string): Promise<void>; close(): Promise<void> }
+export interface LocalQueue extends Queue { get(id: string): Promise<Job | null>; current(siteId: string): Promise<Job | null>; cancel(id: string): Promise<void>; retry(id: string,recovery?:Job['providerRecovery']): Promise<void>; close(): Promise<void> }
 interface Entry { job: Job; lease: Lease | null; generation: number }
 interface State { version: 1; entries: Entry[] }
+function validRecovery(value:unknown):value is NonNullable<Job['providerRecovery']>{return record(value)&&Object.keys(value).length===3&&['id','checkpointId','modelIdentity'].every(key=>nonemptyString(value[key])&&(value[key] as string).length<=160);}
 const states = ['queued', 'running', 'paused', 'waiting_provider', 'needs_attention', 'completed', 'cancelled'];
 export function validJob(value: unknown): value is Job {
   return record(value) && nonemptyString(value.id) && nonemptyString(value.siteId) && ['generate', 'edit'].includes(String(value.kind)) &&
     nonemptyString(value.stage) && states.includes(String(value.state)) && Number.isSafeInteger(value.baseRevision) && (value.baseRevision as number) >= 0 &&
     (value.edit === undefined || validEditRequest(value.edit)) &&
+    (value.providerRecovery===undefined||validRecovery(value.providerRecovery))&&
     (value.checkpointId === null || nonemptyString(value.checkpointId)) && (value.generation === undefined || (record(value.generation) &&
       Number.isSafeInteger(value.generation.seed) && (value.generation.seed as number) >= 0 && nonemptyString(value.generation.styleId) && nonemptyString(value.generation.templateVersion)));
 }
@@ -69,9 +71,13 @@ export async function createLocalQueue(directory: string, clock: Clock): Promise
       entry.job.state = 'cancelled'; entry.lease = null;
       return { value: state, result: undefined };
     }); },
-    retry(id) { return transaction((state) => {
+    retry(id,recovery) { return transaction((state) => {
       const entry = state.entries.find((e) => e.job.id === id); if (!entry) throw new AppError('NOT_FOUND', 'Job does not exist.');
       if (!['paused', 'waiting_provider', 'needs_attention'].includes(entry.job.state)) throw new AppError('CONFLICT', 'Job cannot be retried in its current state.');
+      if(recovery){
+        if(!validRecovery(recovery)||entry.job.kind!=='generate'||entry.job.state!=='needs_attention'||entry.job.checkpointId!==recovery.checkpointId)throw new AppError('CONFLICT','Provider recovery does not match the failed checkpoint.');
+        entry.job.providerRecovery=structuredClone(recovery);
+      }
       entry.job.state = 'queued'; return { value: state, result: undefined };
     }); },
     async close() { closed = true; await json.transaction(() => ({ result: undefined })); },

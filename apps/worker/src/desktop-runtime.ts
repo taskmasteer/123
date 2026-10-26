@@ -175,7 +175,15 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                     const job = await queue.current(p.siteId as string);
                     if (!job) throw new AppError('NOT_FOUND', 'Задание не найдено.');
                     if (job.kind === 'edit' && job.state === 'needs_attention') throw new AppError('CONFLICT', 'Отклоните неудачный вариант и отправьте новую правку.');
-                    await queue.retry(job.id);
+                    let recovery:typeof job.providerRecovery;
+                    if(job.kind==='generate'&&job.state==='needs_attention'&&job.checkpointId&&deps.model.identity&&deps.model.recover){
+                        const saved=await checkpoints.load(job.checkpointId);
+                        if(saved.checkpoint.jobId===job.id&&saved.state.jobId===job.id&&saved.state.siteId===job.siteId&&saved.state.baseRevision===job.baseRevision&&
+                            ['generate','validate'].includes(saved.checkpoint.stage)&&(!record(saved.state.imageRun)||saved.state.imageRun.status!=='pending')&&
+                            deps.model.canRecover?.(saved.state.continuation,typeof saved.state.error==='string'?saved.state.error:undefined))
+                            recovery={id:randomUUID(),checkpointId:job.checkpointId,modelIdentity:deps.model.identity};
+                    }
+                    await queue.retry(job.id,recovery);
                     void pump();
                     return { ok: true };
                 }

@@ -6,6 +6,7 @@ import { createLocalState } from '../../../packages/adapters/src/local-state.js'
 import { createLocalArtifacts } from '../../../packages/adapters/src/local-artifacts.js';
 import { createLocalCatalog } from '../../../packages/adapters/src/local-catalog.js';
 import { createLocalRevisions } from '../../../packages/adapters/src/local-revisions.js';
+import { createLocalQueue } from '../../../packages/adapters/src/local-queue.js';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { FakeModel } from '../../../packages/adapters/src/fake-model.js';
 import { createResponsesModel } from '../../../packages/adapters/src/openai/responses.js';
@@ -44,6 +45,46 @@ async function fixture(about = 'user supplied description: event streaming for r
   };
   return { job, lease, deps, snapshots, site };
 }
+
+test.each(['same','replacement'])('explicit recovery checkpoints once across interruption with %s model',async(identity)=>{
+ const f=await fixture();let calls=0;const bodies:any[]=[];
+ const transport=(async(_url,init)=>{calls++;bodies.push(JSON.parse(String(init?.body)));
+  if(calls===1)return Response.json({status:'completed',output:[{type:'reasoning',id:'reason',summary:[],encrypted_content:'private-opaque-history'},{type:'function_call',call_id:'replace-once',name:'replace',arguments:JSON.stringify({path:'style.css',oldText:'#111',newText:'#222'})}],usage:{input_tokens:10,output_tokens:5}});
+  if(calls===2)return Response.json({error:{code:'invalid_api_key'}},{status:401});
+  return Response.json({status:'completed',output:[{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Preserved completed changes.'}]}],usage:{input_tokens:2,output_tokens:1}});
+ }) as typeof fetch;
+ f.deps.model=createResponsesModel({apiKey:'fixture-key',model:'original'},transport);await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('needs_attention');
+ const failedCheckpoint=f.job.checkpointId!;const failed=await f.deps.checkpoints.load(failedCheckpoint);const originalHtml=new TextDecoder().decode(failed.files.find(file=>file.path==='index.html')!.bytes);
+ const next=createResponsesModel({apiKey:'new-fixture-key',model:identity==='same'?'original':'replacement'},transport);let recoveries=0;
+ f.deps.model={...next,recover(...args){recoveries++;return next.recover!(...args);}};
+ f.job.providerRecovery={id:randomUUID(),checkpointId:failedCheckpoint,modelIdentity:next.identity!};
+ const interrupted=new AbortController(),checkpoint=f.deps.queue.checkpoint;
+ f.deps.queue.checkpoint=async(lease,saved)=>{await checkpoint(lease,saved);if((await f.deps.checkpoints.load(saved.id)).state.providerRecoveryId===f.job.providerRecovery!.id)interrupted.abort();};
+ await runJob(f.job,f.lease,f.deps,interrupted.signal);expect(f.job.state).toBe('paused');expect(calls).toBe(2);expect(recoveries).toBe(1);
+ f.deps.queue.checkpoint=checkpoint;await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');expect(calls).toBe(3);expect(recoveries).toBe(1);
+ const saved=await f.deps.checkpoints.load(f.job.checkpointId!);expect(saved.state.providerRecoveries).toHaveLength(1);expect(saved.state.transcript).toMatchObject([{inputTokens:12,outputTokens:6}]);
+ expect(new TextDecoder().decode(saved.files.find(file=>file.path==='style.css')!.bytes)).toContain('#222');expect(new TextDecoder().decode(saved.files.find(file=>file.path==='index.html')!.bytes)).toBe(originalHtml);
+ expect(JSON.stringify(bodies[2].input).includes('private-opaque-history')).toBe(identity==='same');expect(JSON.stringify(failed.state)).toContain('replace-once');
+});
+
+test('explicit recovery ticket survives controller restart and stale tickets fail atomically',async()=>{
+ const root=await directory(),clock=new ManualClock(1000);let queue=await createLocalQueue(root,clock);
+ const job:Job={id:randomUUID(),siteId:randomUUID(),kind:'generate',stage:'generate',state:'queued',checkpointId:null,baseRevision:0};await queue.enqueue(job);
+ const claimed=(await queue.claim('worker'))!;const checkpoint:Checkpoint={id:randomUUID(),jobId:job.id,stage:'generate',manifestId:null,stateKey:'private',createdAt:1000};await queue.checkpoint(claimed.lease,checkpoint);await queue.finish(claimed.lease,'needs_attention');
+ const ticket={id:randomUUID(),checkpointId:checkpoint.id,modelIdentity:'openai:configured'};
+ await expect(queue.retry(job.id,{...ticket,checkpointId:'foreign'})).rejects.toMatchObject({code:'CONFLICT'});expect((await queue.get(job.id))!.state).toBe('needs_attention');
+ await queue.retry(job.id,ticket);await queue.close();queue=await createLocalQueue(root,clock);
+ expect((await queue.claim('restarted'))!.job.providerRecovery).toEqual(ticket);await queue.close();
+});
+
+test('a pending ambiguous image cannot be bypassed by an account-recovery ticket',async()=>{
+ const f=await fixture();let calls=0;f.deps.model=createResponsesModel({apiKey:'fixture-key',model:'configured'},(async()=>{calls++;return Response.json({}, {status:401});}) as typeof fetch);
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('needs_attention');
+ f.snapshots.get(f.job.checkpointId!)!.state.imageRun={key:'saved-image-selection',status:'pending'};
+ f.job.providerRecovery={id:randomUUID(),checkpointId:f.job.checkpointId!,modelIdentity:f.deps.model.identity!};
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('needs_attention');expect(calls).toBe(1);
+ expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.imageRun).toMatchObject({status:'pending'});
+});
 
 test('checkpoints provider outputs and matching files before resuming without replaying replace',async()=>{
  const f=await fixture();let calls=0;

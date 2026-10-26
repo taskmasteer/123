@@ -29,6 +29,8 @@ interface PipelineState extends Record<string, unknown> {
   baseManifestId: string | null; parentRevisionId: string | null; revisionId: string | null; revisionCreatedAt: number | null;
   selectedElementId?: string; pendingRepairInstruction?: string; error?: string;
   continuation?: ModelContinuation; imageRun?: ImageState; modelIdentity?:string;
+  providerRecoveryId?:string;
+  providerRecoveries?: (NonNullable<Job['providerRecovery']>&{previousIdentity:string})[];
 }
 const stages = ['assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
 function validReport(value: unknown): value is ValidationReport {
@@ -53,6 +55,8 @@ function parseState(value: Record<string, unknown>, job: Job): PipelineState {
       typeof value.instruction !== 'string' || !Array.isArray(value.conversation) || !value.conversation.every((m) => record(m) &&
         typeof m.id === 'string' && ['user', 'assistant'].includes(String(m.role)) && typeof m.text === 'string' && Number.isSafeInteger(m.createdAt)) ||
       (value.pendingRepairInstruction !== undefined && (typeof value.pendingRepairInstruction !== 'string' || !value.pendingRepairInstruction || (value.repairAttempts as number) < 1)) ||
+      (value.providerRecoveryId!==undefined&&typeof value.providerRecoveryId!=='string')||
+      (value.providerRecoveries!==undefined&&(!Array.isArray(value.providerRecoveries)||!value.providerRecoveries.every(item=>record(item)&&['id','checkpointId','modelIdentity','previousIdentity'].every(key=>typeof item[key]==='string'))))||
       (value.selectedElementId !== undefined && typeof value.selectedElementId !== 'string')) {
     throw new AppError('INVALID_INPUT', 'Private checkpoint does not match this job or is corrupt.');
   }
@@ -78,6 +82,12 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     const checkpoint = await deps.checkpoints.save({ ...job, stage: next }, lease, state!, files);
     await deps.queue.checkpoint(lease, checkpoint); job.checkpointId = checkpoint.id; job.stage = next; stage = next;
   }
+  function canApplyRecovery(){
+    const ticket=job.providerRecovery;
+    return !!(state&&ticket&&state.providerRecoveryId!==ticket.id&&ticket.checkpointId===job.checkpointId&&
+      ticket.modelIdentity===deps.model.identity&&deps.model.recover&&['generate','validate'].includes(stage)&&state.imageRun?.status!=='pending'&&
+      deps.model.canRecover?.(state.continuation,state.error));
+  }
   try {
     await check();
     const site = await deps.sites.get(job.siteId); if (!site) throw new AppError('NOT_FOUND', 'Site no longer exists.');
@@ -85,7 +95,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       const saved = await deps.checkpoints.load(job.checkpointId);
       if (saved.checkpoint.jobId !== job.id || saved.checkpoint.id !== job.checkpointId || !stages.includes(saved.checkpoint.stage)) throw new AppError('INVALID_INPUT', 'Checkpoint identity or stage is invalid.');
       state = parseState(saved.state, job); files = saved.files; checkArtifacts(files); stage = saved.checkpoint.stage;
-      if((state.modelIdentity??'demo')!==(deps.model.identity??'demo'))throw new AppError('NEEDS_ATTENTION','The saved operation requires its originally configured model; no fallback was used.');
+      if((state.modelIdentity??'demo')!==(deps.model.identity??'demo')&&!canApplyRecovery())throw new AppError('NEEDS_ATTENTION','The saved operation requires its originally configured model; no fallback was used.');
       if (state.pendingRepairInstruction !== undefined && stage !== 'validate') throw new AppError('INVALID_INPUT', 'A pending repair requires the validation stage.');
       if (['archive', 'publication', 'completed'].includes(stage) && (!validReport(state.validation) || !state.validation.ok)) throw new AppError('INVALID_INPUT', 'Validated stages require successful validation evidence.');
       if (['publication', 'completed'].includes(stage) && (!state.manifestId || state.intentId !== `${job.id}:${state.manifestId}` || state.manifestId !== saved.checkpoint.manifestId ||
@@ -147,6 +157,24 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       files = [...files.filter((file) => !['text/html', 'text/css', 'text/javascript', 'image/svg+xml'].includes(file.mediaType)), ...textFiles]; checkArtifacts(files);
     }
     async function generate(instruction: string) {
+      function modelRequest():ModelRequest{
+        const request:ModelRequest={mode:job.kind,site:{...site!,input:{...site!.input,about:state!.brief}},instruction,
+          baseManifestId:state!.baseManifestId,conversation:state!.conversation,styleId:state!.selection.styleId,
+          operationId:`${job.id}:${state!.repairAttempts}${state!.providerRecoveryId?':'+state!.providerRecoveryId:''}`,
+          ...(state!.continuation?{continuation:state!.continuation}:{}),
+          ...(state!.selectedElementId===undefined?{}:{selectedElementId:state!.selectedElementId})};
+        request.instructions=job.kind==='edit'?editPrompt(request):generatePrompt(request);return request;
+      }
+      if(job.providerRecovery&&state!.providerRecoveryId!==job.providerRecovery.id){
+        if(!canApplyRecovery())throw new AppError('NEEDS_ATTENTION','Provider recovery no longer matches the failed operation.');
+        const ticket=job.providerRecovery,previousIdentity=state!.modelIdentity!;
+        const continuation=deps.model.recover!(modelRequest(),state!.continuation!,{
+          previousIdentity,operationId:`${job.id}:${state!.repairAttempts}:${ticket.id}`,...(state!.error?{diagnostic:state!.error}:{})});
+        // The referenced immutable checkpoint retains all old output/call results even when model identity changes.
+        state!.providerRecoveries=[...(state!.providerRecoveries??[]),{...ticket,previousIdentity}];
+        state!.providerRecoveryId=ticket.id;state!.modelIdentity=ticket.modelIdentity;state!.continuation=continuation;delete state!.error;
+        await save(stage);
+      }
       while (true) {
         await check(); const tools = await freshTools();
         async function traced<T>(operation: string, path: string | undefined, action: () => Promise<T>): Promise<T> {
@@ -161,12 +189,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
           replace: (path, oldText, newText) => traced('replace', path, () => tools.replace(path, oldText, newText)),
         };
         let result: ModelResult;
-        const request:ModelRequest={ mode: job.kind, site: { ...site!, input: { ...site!.input, about: state!.brief } }, instruction,
-        baseManifestId: state!.baseManifestId, conversation: state!.conversation, styleId: state!.selection.styleId,
-          operationId:`${job.id}:${state!.repairAttempts}`,
-          ...(state!.continuation?{continuation:state!.continuation}:{}),
-          ...(state!.selectedElementId === undefined ? {} : { selectedElementId: state!.selectedElementId }) };
-        request.instructions=job.kind==='edit'?editPrompt(request):generatePrompt(request);
+        const request=modelRequest();
         try { result = await deps.model.run(request, modelTools, activeSignal, {async checkpoint(continuation){
           state!.continuation=continuation;await collect(tools);await save(stage);
         }});

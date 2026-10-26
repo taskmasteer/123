@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AppError } from '../../../contracts/src/model.js';
-import type { ModelContinuation, ModelPort } from '../../../contracts/src/model.js';
+import type { ModelContinuation, ModelPort, ModelRequest } from '../../../contracts/src/model.js';
 import { record } from '../../../contracts/src/inputs.js';
 import { digest, executeCall, toolsSchema, validateContinuation } from './tool-loop.js';
 export interface ResponsesConfig {
@@ -49,8 +49,31 @@ export async function readProviderJson(response: Response, maxBytes = 1000000): 
 }
 export function createResponsesModel(config: ResponsesConfig, transport: typeof fetch = fetch, timing = { now: Date.now, delay: (ms: number, signal: AbortSignal) => sleep(ms, undefined, { signal }) }): ModelPort {
     validateModelConfig(config);
-    return { retryOwner: 'adapter', identity: `openai:${config.model}`, async run(request, tools, signal, hooks) {
-            const binding = digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, config.model]);
+    const bindingFor=(request:ModelRequest,model:string)=>digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, model]);
+    const initialItems=(request:ModelRequest)=>[{type:'message',role:'user',content:JSON.stringify({domain:request.site.domain,about:request.site.input.about,conversation:request.conversation,instruction:request.instruction})}];
+    function canRecover(value:unknown,diagnostic?:string):boolean {
+        if(!record(value)||typeof value.binding!=='string')return false;
+        let state:ModelContinuation;try{state=validateContinuation(value,value.binding);}catch{return false;}
+        if(state.terminal!=='failed'||state.requestPending||state.transportExhausted)return false;
+        const finished=new Set(state.items.filter(item=>item.type==='function_call_output').map(item=>item.call_id));
+        if(state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return false;
+        // Exact legacy diagnostics allow existing a4af9de checkpoints to recover without reclassifying arbitrary failures.
+        return state.recoverable==='account'||state.recoverable==='configuration'||diagnostic==='Provider quota requires account attention.'||
+            /^Provider rejected the configured model request \(HTTP (400|401|402|403|404|422)\)\.$/.test(diagnostic??'');
+    }
+    return { retryOwner: 'adapter', identity: `openai:${config.model}`, canRecover,
+        recover(request,previous,context){
+            const previousModel=context.previousIdentity.startsWith('openai:')?context.previousIdentity.slice(7):'';
+            if(!validModel(previousModel)||!canRecover(previous,context.diagnostic))throw new AppError('NEEDS_ATTENTION','This provider outcome cannot be restarted by account recovery.');
+            const next=validateContinuation(previous,bindingFor(request,previousModel));
+            next.binding=bindingFor({...request,operationId:context.operationId},config.model);next.terminal=null;delete next.recoverable;
+            if(previousModel!==config.model){
+                next.items=[...initialItems(request),{type:'message',role:'user',content:'Continue from the saved current files. Completed changes are already present. Inspect those files and preserve completed work; do not replay earlier mutations.'}];
+                next.responseId=null;next.summary='';next.seen={};
+            }
+            return next;
+        }, async run(request, tools, signal, hooks) {
+            const binding = bindingFor(request,config.model);
             let state: ModelContinuation = request.continuation ? validateContinuation(request.continuation, binding) : {
                 provider: 'openai-responses', version: 1, binding, items: [{ type: 'message', role: 'user', content: JSON.stringify({ domain: request.site.domain, about: request.site.input.about, conversation: request.conversation, instruction: request.instruction }) }], turns: 0, retries: 0, retryAt: 0, transportExhausted: false, requestPending: false, inputTokens: 0, outputTokens: 0, responseId: null, terminal: null, summary: '', seen: {}
             };
@@ -129,6 +152,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                     if (response.status === 429 && /quota|billing|usage_limit|spend_limit/.test(code)) {
                         state.requestPending = false;
                         state.terminal = 'failed';
+                        state.recoverable='account';
                         await checkpoint();
                         throw new AppError('NEEDS_ATTENTION', 'Provider quota requires account attention.');
                     }
@@ -138,6 +162,8 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                     }
                     state.requestPending = false;
                     state.terminal = 'failed';
+                    if([401,402,403].includes(response.status))state.recoverable='account';
+                    else if([400,404,422].includes(response.status))state.recoverable='configuration';
                     await checkpoint();
                     throw new AppError('NEEDS_ATTENTION', `Provider rejected the configured model request (HTTP ${response.status}).`);
                 }

@@ -27,6 +27,8 @@ export interface Job {
   checkpointId: string | null; baseRevision: number;
   generation?: { seed: number; styleId: string; templateVersion: string };
   edit?: EditRequest;
+  /** Trusted explicit-retry ticket; never accepted from a renderer request. */
+  providerRecovery?: {id:string;checkpointId:string;modelIdentity:string};
 }
 export interface Lease { jobId: string; workerId: string; generation: number; expiresAt: number }
 export interface ValidationReport {
@@ -90,11 +92,14 @@ export interface ModelContinuation {
   inputTokens: number; outputTokens: number; responseId: string | null;
   terminal: 'final' | 'refused' | 'incomplete' | 'failed' | 'cancelled' | 'stalled' | null;
   summary: string; seen: Record<string, number>;
+  recoverable?: 'account'|'configuration';
 }
 export interface ModelRunHooks { checkpoint(continuation: ModelContinuation): Promise<void> }
 export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; providerResponseId?: string; continuation?: ModelContinuation }
 export interface ModelPort {
   readonly retryOwner?: 'adapter';
   readonly identity?: string;
+  canRecover?(continuation:unknown,diagnostic?:string):boolean;
+  recover?(request:ModelRequest,continuation:ModelContinuation,context:{previousIdentity:string;operationId:string;diagnostic?:string}):ModelContinuation;
   run(request: ModelRequest, tools: FileTools, signal: AbortSignal, hooks?: ModelRunHooks): Promise<ModelResult>;
 }

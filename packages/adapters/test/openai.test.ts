@@ -5,6 +5,20 @@ import { createFileTools } from '../../../apps/worker/src/files/tools.js';
 import { cleanDirectories, directory } from '../../../apps/worker/test/fixtures.js';
 afterEach(cleanDirectories);
 afterEach(() => vi.useRealTimers());
+test('only classified account/configuration failures admit explicit recovery and retain counters',async()=>{
+ const tools=await createFileTools(await directory());let saved:ModelContinuation|undefined;
+ const f=fixtureTransport([new Response('{}',{status:401}),{status:'completed',output:[final],usage:{input_tokens:2,output_tokens:1}}]);
+ const model=createResponsesModel({apiKey:secret,model:'configured-text'},f.transport);
+ await expect(model.run(request,tools,new AbortController().signal,{async checkpoint(s){saved=s;}})).rejects.toThrow('HTTP 401');
+ expect(model.canRecover!(saved)).toBe(true);await expect(model.run({...request,continuation:saved!},tools,new AbortController().signal)).rejects.toThrow('failed');expect(f.bodies).toHaveLength(1);
+ const previous={...saved!,inputTokens:10,outputTokens:5,retries:2};
+ for(const terminal of ['refused','incomplete','cancelled','stalled','final'] as const){const {recoverable:_reason,...state}=previous;expect(model.canRecover!({...state,terminal},'Provider quota requires account attention.')).toBe(false);}
+ expect(model.canRecover!({...previous,transportExhausted:true})).toBe(false);
+ const {recoverable:_reason,...legacy}=previous;expect(model.canRecover!(legacy,'Provider quota requires account attention.')).toBe(true);expect(model.canRecover!(legacy,'Unrelated model error')).toBe(false);
+ const recovered=model.recover!(request,previous,{previousIdentity:'openai:configured-text',operationId:'explicit-retry'});
+ expect(recovered.retries).toBe(2);expect(recovered.inputTokens).toBe(10);
+ const result=await model.run({...request,operationId:'explicit-retry',continuation:recovered},tools,new AbortController().signal);expect(result.inputTokens).toBe(12);expect(result.outputTokens).toBe(6);
+});
 test('rate_limit_exceeded is retryable and differs from exhausted quota',async()=>{
  const tools=await createFileTools(await directory());let now=1000;
  const f=fixtureTransport([new Response(JSON.stringify({error:{code:'rate_limit_exceeded'}}),{status:429}),{status:'completed',output:[final]}]);
