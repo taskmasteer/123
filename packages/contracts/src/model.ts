@@ -10,6 +10,11 @@ export interface Revision {
   id: string; siteId: string; parentId: string | null; manifestId: string;
   kind: 'draft' | 'candidate' | 'published'; createdAt: number;
 }
+/** Trusted immutable revision records; site draft/published pointers refer to Revision.id, never a manifest ID. */
+export interface RevisionRepository {
+  put(revision: Revision): Promise<void>;
+  get(id: string): Promise<Revision | null>;
+}
 export interface ArtifactFile { path: string; bytes: Uint8Array; mediaType: string }
 export interface Manifest {
   id: string; siteId: string; templateVersion: string; createdAt: number;
@@ -19,6 +24,7 @@ export interface Job {
   id: string; siteId: string; kind: 'generate' | 'edit'; stage: string;
   state: 'queued' | 'running' | 'paused' | 'waiting_provider' | 'needs_attention' | 'completed' | 'cancelled';
   checkpointId: string | null; baseRevision: number;
+  generation?: { seed: number; styleId: string; templateVersion: string };
 }
 export interface Lease { jobId: string; workerId: string; generation: number; expiresAt: number }
 export interface ValidationReport {
@@ -57,6 +63,7 @@ export interface Checkpoint {
 }
 export interface CheckpointStore {
   save(job: Job, lease: Lease, state: Record<string, unknown>, files: ArtifactFile[]): Promise<Checkpoint>;
+  load(id: string): Promise<{ checkpoint: Checkpoint; state: Record<string, unknown>; files: ArtifactFile[] }>;
 }
 export interface Queue {
   enqueue(job: Job): Promise<void>;
@@ -68,3 +75,10 @@ export interface Queue {
 export type PublicationState = 'pending' | 'uploading' | 'creating' | 'checking' | 'promoting' | 'reconciling' |
   'waiting_quota' | 'awaiting_dns' | 'published' | 'needs_attention';
 export interface PublicationPort { advance(intentId: string): Promise<PublicationState> }
+export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: string; createdAt: number }
+export interface ModelRequest {
+  mode: 'generate' | 'edit'; site: Site; instruction: string; baseManifestId: string | null;
+  conversation: ChatMessage[]; styleId: string; selectedElementId?: string;
+}
+export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; providerResponseId?: string }
+export interface ModelPort { run(request: ModelRequest, tools: FileTools, signal: AbortSignal): Promise<ModelResult> }

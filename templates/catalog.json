@@ -1,0 +1,7 @@
+[
+  {"id":"light-product","name":"Светлый продуктовый","version":"1.0.0","enabled":true,"referenceIds":["northstar","waymark","startix"],"files":["index.html","styles.css"]},
+  {"id":"dark-tech","name":"Тёмный технологичный","version":"1.0.0","enabled":true,"referenceIds":["evolv-ai","agent-ai","dasne-ai","upstart","folio"],"files":["index.html","styles.css"]},
+  {"id":"editorial","name":"Типографический агентский","version":"1.0.0","enabled":true,"referenceIds":["vorix","startix"],"files":["index.html","styles.css"]},
+  {"id":"corporate","name":"Классический корпоративный","version":"1.0.0","enabled":true,"referenceIds":["taxo","techlo","techbyte"],"files":["index.html","styles.css"]},
+  {"id":"diagram","name":"Информационный со схемой","version":"1.0.0","enabled":true,"referenceIds":["rayz-ai","next-elite"],"files":["index.html","styles.css"]}
+]
