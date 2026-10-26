@@ -46,6 +46,12 @@ export interface ArtifactStore {
   put(siteId: string, files: ArtifactFile[], templateVersion: string): Promise<Manifest>;
   read(manifestId: string): Promise<ArtifactFile[]>;
 }
+export interface FileTools {
+  list(): Promise<string[]>;
+  read(path: string): Promise<string>;
+  write(path: string, text: string): Promise<void>;
+  replace(path: string, oldText: string, newText: string): Promise<void>;
+}
 export interface Checkpoint {
   id: string; jobId: string; stage: string; manifestId: string | null; stateKey: string; createdAt: number;
 }

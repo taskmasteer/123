@@ -1,0 +1,7 @@
+{
+  "name": "@site-factory/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "parse5": "8.0.1", "playwright": "1.64.1" }
+}
