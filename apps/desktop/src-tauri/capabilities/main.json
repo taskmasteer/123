@@ -1,0 +1,11 @@
+{
+  "identifier": "main",
+  "description": "Only the trusted main application webview can dispatch typed local operations.",
+  "local": true,
+  "webviews": [
+    "main"
+  ],
+  "permissions": [
+    "desktop-dispatch"
+  ]
+}

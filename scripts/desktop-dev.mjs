@@ -1,0 +1,11 @@
+import {spawn} from 'node:child_process';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {resolve,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+await mkdir(resolve(root,'.local-state'),{recursive:true});
+const config=resolve(root,'.local-state/desktop-dev.json');
+await writeFile(config,JSON.stringify({node:process.execPath,script:resolve(root,'dist/apps/worker/src/stdio.js'),source:root}));
+const cli=resolve(root,'node_modules/@tauri-apps/cli/tauri.js');
+const child=spawn(process.execPath,[cli,'dev',...process.argv.slice(2)],{cwd:resolve(root,'apps/desktop'),stdio:'inherit',env:{...process.env,SITE_FACTORY_DEV_CONFIG:config,CARGO_TARGET_DIR:resolve(root,'.local-state/cargo-target')}});
+child.on('exit',code=>process.exitCode=code??1);

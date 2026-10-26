@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "desktop-dispatch"
+description = "Allows typed private-pipe desktop requests from the main webview."
+commands.allow = ["dispatch"]

@@ -1,5 +1,14 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "outDir": "dist", "rootDir": "." },
-  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"]
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "apps/*/src/**/*.ts"
+  ],
+  "exclude": [
+    "apps/desktop"
+  ]
 }

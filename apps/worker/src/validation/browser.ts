@@ -22,7 +22,7 @@ class ValidationTimeout extends Error {}
 /** Generated JS executes only in a sandboxed Chromium renderer, never Node/eval/vm.
  * A new browser and incognito context own every run; failures remain fail-closed.
  */
-export async function validateSite(files: ArtifactFile[]): Promise<ValidationReport> {
+export async function validateSite(files: ArtifactFile[], options: { screenshotRoot?: string } = {}): Promise<ValidationReport> {
   let preflight: ValidationReport;
   try { preflight = validateStatic(files); }
   catch { return { ok: false, issues: [{ code: 'static-error', message: 'Static preflight failed.' }], screenshotIds: [] }; }
@@ -138,7 +138,7 @@ export async function validateSite(files: ArtifactFile[]): Promise<ValidationRep
           runtimeIds.set(artifact.path, new Set(state.ids));
           runtimeLinks.push(...state.links.map((raw) => ({ source: artifact.path, raw })));
           const id = randomUUID() + '.png';
-          const directory = await privateDirectory(join(process.cwd(), '.local-state', 'validation'));
+          const directory = await privateDirectory(options.screenshotRoot ?? join(process.cwd(), '.local-state', 'validation'));
           const screenshot = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', timeout: 2_000 });
           await writeExclusive(join(directory, id), screenshot); screenshotIds.push('validation/' + id);
         }
