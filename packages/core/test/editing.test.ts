@@ -105,6 +105,18 @@ test('manual files and body survive literal demo edits and refinement reads the 
   } finally { await h.close(); }
 });
 
+test('long failure text is bounded without losing the pointer-preservation explanation', async () => {
+  const h = await harness();
+  try {
+    await h.editor.requestEdit(admin, h.before.id, 'Long failure', 1);
+    const candidate = await h.run({ async run() { throw new Error('Service unavailable. ' + 'More diagnostic detail. '.repeat(100)); } });
+    expect(candidate.summary).toContain('Service unavailable.');
+    expect(candidate.summary).toContain('…');
+    expect(candidate.summary.length).toBeLessThanOrEqual(512);
+    expect(candidate.summary.endsWith('Черновик и публикация сохранены.')).toBe(true);
+  } finally { await h.close(); }
+});
+
 test('ordinary users cannot edit accept reject or publish; scoped spec-users can edit and foreign users cannot read chat', async () => {
   const h = await harness();
   try {
@@ -128,11 +140,75 @@ test('an edit failure changes neither pointer and rejection releases the site fo
     await h.editor.requestEdit(admin, h.before.id, 'Fail this attempt', 1);
     const candidate = await h.run({ async run(_request, tools) { await tools.write('manual.js', 'throw new Error("partial");'); throw new Error('provider unavailable'); } });
     expect(candidate.status).toBe('failed');
+    expect(candidate.summary).toContain('provider unavailable');
+    expect(candidate.summary).toContain('Черновик и публикация сохранены.');
+    const history = await h.editor.getConversation(admin, h.before.id);
+    expect(history.at(-1)?.text).toBe(candidate.summary);
+    const reopened = h.reopen(await createLocalEditingStore(h.root));
+    expect((await reopened.list(admin, h.before.id)).candidates[0]?.summary).toBe(candidate.summary);
+    expect(await reopened.getConversation(admin, h.before.id)).toEqual(history);
     expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
     await h.editor.rejectCandidate(admin, h.before.id, candidate.id);
     await h.editor.requestEdit(admin, h.before.id, 'Retry heading', 1);
     const retried = await h.run();
     expect((await h.deps.artifacts.read(retried.manifestId!)).find(f => f.path === 'manual.js')).toEqual(h.originalFiles.find(f => f.path === 'manual.js'));
+  } finally { await h.close(); }
+});
+
+test('failed edit diagnostics redact credentials and private addresses before persisting bounded chat text', async () => {
+  const h = await harness();
+  try {
+    await h.editor.requestEdit(admin, h.before.id, 'Fail safely', 1);
+    const candidate = await h.run({ async run() {
+      throw new Error('Provider refused request. Authorization: Bearer sk-proj-123456789012345678901234567890; api_key="private-key-value"; password=hunter-two; "Cookie": "session=private-cookie"; https://user:password@example.test/?token=private-query C:\\Users\\private\\credentials.json ' + 'x'.repeat(1000));
+    } });
+    expect(candidate.summary).toContain('Provider refused request.');
+    expect(candidate.summary).toContain('[скрыто]');
+    expect(candidate.summary).not.toMatch(/sk-proj-|1234567890|private-key-value|hunter-two|private-cookie|user:password|private-query|credentials\.json/);
+    expect(candidate.summary.length).toBeLessThanOrEqual(512);
+    expect((await h.editor.getConversation(admin, h.before.id)).at(-1)?.text).toBe(candidate.summary);
+    expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
+  } finally { await h.close(); }
+});
+
+test('validation failure diagnostics differ from model errors and survive reopening the editor', async () => {
+  const h = await harness();
+  try {
+    await h.editor.requestEdit(admin, h.before.id, 'Invalid output', 1);
+    const candidate = await h.run({ async run(_request, tools) {
+      await tools.write('index.html', '<html><body><form><input name="email"></form></body></html>');
+      return { summary: 'invalid output', inputTokens: 0, outputTokens: 0 };
+    } });
+    expect(candidate.status).toBe('failed');
+    expect(candidate.summary).toContain('Validation failed after two repairs.');
+    expect(candidate.summary).toContain('Черновик и публикация сохранены.');
+    const reopened = h.reopen(await createLocalEditingStore(h.root));
+    expect((await reopened.getConversation(admin, h.before.id)).at(-1)?.text).toBe(candidate.summary);
+    expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
+  } finally { await h.close(); }
+});
+
+test.each(['checkpoint', 'job', 'site', 'base'] as const)('does not expose a failed diagnostic with a foreign %s binding', async mismatch => {
+  const h = await harness();
+  try {
+    await h.editor.requestEdit(admin, h.before.id, 'Bound failure', 1);
+    const real = h.deps.checkpoints;
+    const editor = createEditing({ ...h.deps, checkpoints: { ...real, async load(id) {
+      const saved = await real.load(id);
+      if (mismatch === 'checkpoint') saved.checkpoint.jobId = randomUUID();
+      if (mismatch === 'job') saved.state.jobId = randomUUID();
+      if (mismatch === 'site') saved.state.siteId = randomUUID();
+      if (mismatch === 'base') saved.state.baseManifestId = randomUUID();
+      saved.state.error = 'Foreign private diagnostic';
+      return saved;
+    } } });
+    const claim = (await h.deps.queue.claim('test-device'))!;
+    await runJob(claim.job, claim.lease, { ...h.deps, model: { async run() { throw new Error('original failure'); } }, templates: { async load() { throw new Error('unexpected template'); } }, workspace: join(h.root, 'work') }, new AbortController().signal);
+    const candidate = (await editor.list(admin, h.before.id)).candidates[0]!;
+    expect(candidate.status).toBe('failed');
+    expect(candidate.summary).not.toContain('Foreign private diagnostic');
+    expect((await editor.getConversation(admin, h.before.id)).at(-1)?.text).not.toContain('Foreign private diagnostic');
+    expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
   } finally { await h.close(); }
 });
 

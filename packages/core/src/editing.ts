@@ -17,6 +17,23 @@ export interface EditingDeps {
 const terminal = new Set(['ready', 'accepted', 'rejected', 'conflict', 'failed']);
 const busyMessage = 'Дождитесь завершения или отмените текущую правку.';
 
+/** Checkpoint errors are private provider data: expose only a short, redacted first-line diagnostic. */
+function safeDiagnostic(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.slice(0, 8192)
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*/gi, '[скрыто]')
+    .replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie)\b["']?\s*[:=][^\r\n;]*/gi, '[скрыто]')
+    .replace(/\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|passwd|secret)\b["']?\s*[:=]\s*(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^\s;,]+)/gi, '[скрыто]')
+    .replace(/\b(?:Bearer|Basic)\s+[^\s;,]+/gi, '[скрыто]')
+    .replace(/\b(?:sk-[\w-]+|AKIA[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+(?:\.[\w-]+)?|[A-Za-z0-9_+/=-]{40,})\b/g, '[скрыто]')
+    .replace(/\b(?:https?|file):\/\/[^\s<>"']+/gi, '[скрыто]')
+    .replace(/(?:\b[A-Z]:[\\/]|\\\\|\/(?:Users|home|tmp|var|private)\/)[^\r\n;<>"']*/gi, '[скрыто]')
+    .split(/[\r\n]/, 1)[0]!
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/\s+/g, ' ').trim();
+  return text ? text.length > 400 ? text.slice(0, 399) + '…' : text : null;
+}
+
 /** Authorized domain transitions. The journal precedes external writes so a restart can reconcile CAS outcomes. */
 export function createEditing(deps: EditingDeps) {
   let tail: Promise<unknown> = Promise.resolve();
@@ -53,6 +70,21 @@ export function createEditing(deps: EditingDeps) {
       !state.validation.screenshotIds.every(id => typeof id === 'string')) throw new AppError('INVALID_INPUT', 'Проверка не соответствует варианту.');
     return { state, report: state.validation as unknown as ValidationReport, manifestId: state.manifestId as string };
   }
+  async function failureDiagnostic(candidate: Candidate, job: Job): Promise<string | null> {
+    if (!job.checkpointId || job.id !== candidate.jobId || job.siteId !== candidate.siteId || job.kind !== 'edit' ||
+      job.baseRevision !== candidate.baseRevision || job.edit?.candidateId !== candidate.id) return null;
+    try {
+      const saved = await deps.checkpoints.load(job.checkpointId), state = saved.state;
+      if (saved.checkpoint.id !== job.checkpointId || saved.checkpoint.jobId !== job.id || saved.checkpoint.stage !== job.stage ||
+        state.jobId !== job.id || state.siteId !== candidate.siteId || state.baseRevision !== candidate.baseRevision ||
+        state.baseManifestId !== candidate.baseManifestId || state.parentRevisionId !== candidate.parentRevisionId ||
+        (state.revisionId !== null && state.revisionId !== candidate.id)) return null;
+      return safeDiagnostic(state.error);
+    } catch {
+      // Missing/corrupt diagnostics must not prevent rejecting a failed operation or expose a storage error.
+      return null;
+    }
+  }
   async function syncCandidate(candidate: Candidate) {
     if (candidate.status === 'rejected') {
       const job = await deps.queue.get(candidate.jobId);
@@ -74,7 +106,8 @@ export function createEditing(deps: EditingDeps) {
       await deps.revisions.put({ id: candidate.id, siteId: candidate.siteId, parentId: candidate.parentRevisionId, manifestId: candidate.manifestId, kind: 'candidate', createdAt: candidate.createdAt });
     } else if (job.state === 'needs_attention' || job.state === 'cancelled') {
       candidate.status = job.state === 'cancelled' ? 'rejected' : 'failed';
-      candidate.summary = 'Правка не завершена. Черновик и публикация сохранены.';
+      const diagnostic = job.state === 'needs_attention' ? await failureDiagnostic(candidate, job) : null;
+      candidate.summary = `Правка не завершена.${diagnostic ? ` Причина: ${diagnostic}` : ''} Черновик и публикация сохранены.`;
     } else {
       candidate.status = job.state !== 'running' ? 'queued' : ['validate', 'archive', 'publication'].includes(job.stage) ? 'checking' : 'running';
     }
