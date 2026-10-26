@@ -1,8 +1,10 @@
 import React,{useEffect,useRef,useState} from 'react';
-import type {Style} from '../../../../../packages/adapters/src/local-catalog.js';
+import type {Style,Reference} from '../../../../../packages/adapters/src/local-catalog.js';
 import {desktopClient} from '../../lib/desktop-client.js';
-export function CreateSiteDialog({styles,onClose,onCreated}:{styles:Style[];onClose:()=>void;onCreated:()=>void}){
+export function CreateSiteDialog({styles,references,onClose,onCreated}:{styles:Style[];references:Reference[];onClose:()=>void;onCreated:()=>void}){
  const ref=useRef<HTMLDialogElement>(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ const enabledStyles=styles.filter(style=>style.enabled);
+ const eligibleReferenceIds=new Set(enabledStyles.flatMap(style=>style.referenceIds));
  useEffect(()=>{ref.current?.showModal();},[]);
  return <dialog ref={ref} onCancel={event=>{if(busy)event.preventDefault();else onClose();}} aria-labelledby="create-title">
  <form onSubmit={async event=>{event.preventDefault();if(busy)return;const data=new FormData(event.currentTarget);setBusy(true);setError('');try{
@@ -11,7 +13,7 @@ export function CreateSiteDialog({styles,onClose,onCreated}:{styles:Style[];onCl
  <h2 id="create-title">Создать сайт</h2><p className="muted">Укажите домен. Тему можно описать самостоятельно или оставить выбор исполнителю.</p>
  <label>Домен<input name="domain" autoFocus required maxLength={253} placeholder="example.test" disabled={busy}/></label>
  <label>О чём сайт <span className="muted">(необязательно)</span><textarea name="about" rows={3} maxLength={8000} disabled={busy} placeholder="Например: инструменты для надёжной работы с данными"/></label>
- <label>Стиль<select name="referenceId" disabled={busy}><option value="">Выбрать автоматически</option>{styles.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
+ <label>Референс<select name="referenceId" disabled={busy}><option value="">Выбрать автоматически</option><optgroup label="Референсы">{references.filter(reference=>eligibleReferenceIds.has(reference.id)).map(reference=><option key={reference.id} value={reference.id}>{reference.name}</option>)}</optgroup><optgroup label="Стили">{enabledStyles.map(style=><option key={style.id} value={style.id}>{style.name}</option>)}</optgroup></select></label>
  <p className="hint">Содержимое сайта будет на английском. После проверки появится локальная версия.</p>
  {error?<p role="alert" className="error">{error}</p>:null}
  <footer className="dialog-actions"><button type="button" onClick={onClose} disabled={busy}>Отмена</button><button className="primary" disabled={busy}>{busy?'Создание…':'Создать'}</button></footer>
