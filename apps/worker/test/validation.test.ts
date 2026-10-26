@@ -1,12 +1,21 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as htmlParser from 'parse5';
 import { validateSite } from '../src/validation/browser.js';
 import { validateStatic } from '../src/validation/static.js';
 import { createPreviewServer, serveFiles } from '../src/preview/server.js';
 import { createLocalArtifacts } from '../../../packages/adapters/src/local-artifacts.js';
 import { cleanDirectories, directory, file, site } from './fixtures.js';
+vi.mock('parse5', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('parse5')>();
+  return { ...actual, parse: vi.fn(actual.parse) };
+});
+vi.mock('../src/validation/static.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/validation/static.js')>();
+  return { ...actual, validateStatic: vi.fn(actual.validateStatic) };
+});
 afterEach(cleanDirectories);
 
 describe('static validation', () => {
@@ -28,6 +37,40 @@ describe('static validation', () => {
     const files = site('<a href="about/team.html#people">Team</a>').concat(file('about/team.html', '<html lang="en"><head><title>Team</title></head><body><h1 id="people">Our team</h1><a href="../index.html">Home</a></body></html>'));
     expect(validateStatic(files).ok).toBe(true);
     files[0] = file('index.html', '<a href="%2e%2e/secret.html">bad</a>'); expect(validateStatic(files).ok).toBe(false);
+  });
+  // Catches applying an HTML language requirement to parse5's synthetic SVG wrapper.
+  it('accepts an ordinary local SVG without an HTML lang attribute', async () => {
+    const logo = { path: 'logo.svg', mediaType: 'image/svg+xml', bytes: new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="#111"/></svg>') };
+    const files = site('<h1>Product information</h1><img src="logo.svg" alt="Product logo">').concat(logo);
+    expect(validateStatic(files)).toMatchObject({ ok: true, issues: [] });
+    const result = await validateSite(files); expect(result).toMatchObject({ ok: true, issues: [] }); expect(result.screenshotIds).toHaveLength(2);
+  }, 30000);
+  // Catches stack exhaustion on a small artifact before Chromium can enforce its deadline.
+  it('reports excessive nesting for allowed-size HTML instead of throwing', async () => {
+    const files = site('<div>'.repeat(5_000) + '<h1>Product information</h1>' + '</div>'.repeat(5_000));
+    expect(files[0]!.bytes.byteLength).toBeLessThan(60_000);
+    expect(validateStatic(files)).toMatchObject({ ok: false, issues: [{ code: 'document-complexity', path: 'index.html' }] });
+    await expect(validateSite(files)).resolves.toMatchObject({ ok: false, issues: [{ code: 'document-complexity', path: 'index.html' }], screenshotIds: [] });
+  });
+  // Catches bounding depth without also bounding the total AST work for broad documents.
+  it('reports excessive AST size for broad allowed-size HTML', () => {
+    const files = site('<span>Readable details</span>'.repeat(11_000));
+    expect(files[0]!.bytes.byteLength).toBeLessThan(400_000);
+    expect(validateStatic(files)).toMatchObject({ ok: false, issues: [{ code: 'document-complexity', path: 'index.html' }] });
+  });
+  // Fault-inject a parser failure: real valid markup cannot reliably trigger a dependency crash.
+  // Catches leaking a parser exception through either public validation boundary.
+  it('returns a validation issue if the HTML parser fails unexpectedly', async () => {
+    const parser = vi.mocked(htmlParser.parse).mockImplementation(() => { throw new RangeError('Parser failure'); });
+    try {
+      expect(validateStatic(site())).toMatchObject({ ok: false, issues: [{ code: 'static-error', path: 'index.html' }] });
+      await expect(validateSite(site())).resolves.toMatchObject({ ok: false, issues: [{ code: 'static-error', path: 'index.html' }], screenshotIds: [] });
+    } finally { parser.mockRestore(); }
+  });
+  // Fault-inject an unforeseen analyzer failure to exercise validateSite's public boundary.
+  it('reports an unexpected static-preflight exception instead of rejecting', async () => {
+    vi.mocked(validateStatic).mockImplementationOnce(() => { throw new Error('Unexpected analyzer failure'); });
+    await expect(validateSite(site())).resolves.toMatchObject({ ok: false, issues: [{ code: 'static-error' }], screenshotIds: [] });
   });
 });
 

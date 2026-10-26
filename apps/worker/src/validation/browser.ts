@@ -23,7 +23,10 @@ class ValidationTimeout extends Error {}
  * A new browser and incognito context own every run; failures remain fail-closed.
  */
 export async function validateSite(files: ArtifactFile[]): Promise<ValidationReport> {
-  const preflight = validateStatic(files); if (!preflight.ok) return preflight;
+  let preflight: ValidationReport;
+  try { preflight = validateStatic(files); }
+  catch { return { ok: false, issues: [{ code: 'static-error', message: 'Static preflight failed.' }], screenshotIds: [] }; }
+  if (!preflight.ok) return preflight;
   const issues: Issue[] = []; const screenshotIds: string[] = [];
   const add = (code: string, message: string, path?: string) => {
     if (issues.length < 100 && !issues.some((issue) => issue.code === code && issue.message === message && issue.path === path)) {
