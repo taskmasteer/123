@@ -51,9 +51,13 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
     let allowed: &[&str] = match request.method.as_str() {
         "site.list" | "device.status" | "catalog.list" => &[],
         "site.create" => &["domain", "about", "referenceId"],
-        "job.status" | "job.retry" => &["siteId"],
+        "job.status" | "job.retry" | "edit.list" | "chat.list" => &["siteId"],
+        "edit.request" => &["siteId", "instruction", "expectedRevision", "candidateId"],
+        "edit.accept" => &["siteId", "candidateId", "expectedRevision"],
+        "edit.reject" => &["siteId", "candidateId"],
+        "site.publish" => &["siteId", "expectedRevision"],
         "preview.open" => &["siteId", "revisionId"],
-        "preview.screenshot" => &["siteId", "revisionId", "width"],
+        "preview.screenshot" => &["siteId", "revisionId", "width", "candidateId"],
         "catalog.style.update" => &["id", "enabled"],
         "catalog.reference.update" => &["id", "description"],
         _ => return Err(invalid()),
@@ -93,14 +97,34 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
                 return Err(invalid());
             }
         }
-        "job.status" | "job.retry" => {
+        "job.status" | "job.retry" | "edit.list" | "chat.list" => {
             if !uuid("siteId") {
+                return Err(invalid());
+            }
+        }
+        "edit.request" | "edit.accept" | "edit.reject" | "site.publish" => {
+            if !uuid("siteId")
+                || (request.method != "edit.reject"
+                    && !params
+                        .get("expectedRevision")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|v| v <= 9_007_199_254_740_991))
+                || (matches!(request.method.as_str(), "edit.accept" | "edit.reject")
+                    && !uuid("candidateId"))
+                || (params.contains_key("candidateId") && !uuid("candidateId"))
+                || (request.method == "edit.request"
+                    && !params
+                        .get("instruction")
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| !v.trim().is_empty() && v.encode_utf16().count() <= 8000))
+            {
                 return Err(invalid());
             }
         }
         "preview.open" | "preview.screenshot" => {
             if !uuid("siteId")
                 || !uuid("revisionId")
+                || (params.contains_key("candidateId") && !uuid("candidateId"))
                 || (request.method == "preview.screenshot"
                     && !matches!(
                         params.get("width").and_then(Value::as_u64),
@@ -151,6 +175,72 @@ pub async fn dispatch<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn editing_and_publication_schemas_reject_role_and_path_overrides() {
+        let site = "11111111-1111-4111-8111-111111111111";
+        let candidate = "22222222-2222-4222-8222-222222222222";
+        for (method, params) in [
+            (
+                "edit.request",
+                json!({"siteId":site,"instruction":"Updated heading","expectedRevision":1,"candidateId":candidate}),
+            ),
+            (
+                "edit.accept",
+                json!({"siteId":site,"candidateId":candidate,"expectedRevision":1}),
+            ),
+            (
+                "edit.reject",
+                json!({"siteId":site,"candidateId":candidate}),
+            ),
+            ("edit.list", json!({"siteId":site})),
+            ("chat.list", json!({"siteId":site})),
+            ("site.publish", json!({"siteId":site,"expectedRevision":2})),
+            (
+                "preview.screenshot",
+                json!({"siteId":site,"revisionId":candidate,"candidateId":candidate,"width":375}),
+            ),
+        ] {
+            assert!(validate(&DesktopRequest {
+                id: "test".into(),
+                version: 1,
+                method: method.into(),
+                params
+            })
+            .is_ok());
+        }
+        for (method, params) in [
+            (
+                "edit.request",
+                json!({"siteId":site,"instruction":"","expectedRevision":1}),
+            ),
+            (
+                "edit.request",
+                json!({"siteId":site,"instruction":"x","expectedRevision":-1}),
+            ),
+            (
+                "edit.request",
+                json!({"siteId":site,"instruction":"x","expectedRevision":1,"role":"admin"}),
+            ),
+            (
+                "edit.accept",
+                json!({"siteId":site,"candidateId":candidate,"expectedRevision":1.5}),
+            ),
+            (
+                "edit.reject",
+                json!({"siteId":site,"candidateId":"../private"}),
+            ),
+            ("site.publish", json!({"siteId":site})),
+            ("chat.list", json!({"siteId":site,"path":"../private"})),
+        ] {
+            assert!(validate(&DesktopRequest {
+                id: "test".into(),
+                version: 1,
+                method: method.into(),
+                params
+            })
+            .is_err());
+        }
+    }
     #[test]
     fn rejects_version_method_and_path_injection() {
         for (version, method, params) in [

@@ -91,21 +91,22 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       if (!revision || revision.siteId !== site.id || revision.manifestId !== state.manifestId || revision.kind !== 'published') throw new AppError('INVALID_INPUT', 'Published revision does not match the checkpoint.');
       await save('completed'); await deps.queue.finish(lease, 'completed'); return;
     }
-    if (site.revision !== job.baseRevision) throw new AppError('CONFLICT', 'Site changed after this job was queued.');
+    if (job.kind === 'generate' && site.revision !== job.baseRevision) throw new AppError('CONFLICT', 'Site changed after this job was queued.');
     if (!state) {
       if (job.kind === 'edit' && !site.draftId && !site.publishedId) throw new AppError('INVALID_INPUT', 'Editing needs an existing site artifact.');
-      const parentRevisionId = site.draftId ?? site.publishedId;
+      const parentRevisionId = job.edit?.parentRevisionId ?? site.draftId ?? site.publishedId;
       const parent = parentRevisionId ? await deps.revisions.get(parentRevisionId) : null;
       if (parentRevisionId && (!parent || parent.siteId !== site.id)) throw new AppError('INVALID_INPUT', 'Base revision is missing or belongs to another site.');
+      if (job.edit && parent?.manifestId !== job.edit.baseManifestId) throw new AppError('INVALID_INPUT', 'Selected candidate base does not match its immutable revision.');
       const seed = seedFor(job.id);
-      const prepared = job.generation ? job : deps.prepare ? await deps.prepare(job) : await deps.templates.prepare?.(job, 0, seed, site.input.referenceId);
-      if (!prepared?.generation && site.input.referenceId) throw new AppError('INVALID_INPUT', 'A catalog is required to resolve the selected reference.');
-      const selection = prepared?.generation ?? { seed, styleId: ['light-product', 'dark-tech', 'editorial', 'corporate', 'diagram'][seed % 5]!, templateVersion: '1.0.0' };
+      const prepared = job.generation || job.kind === 'edit' ? job : deps.prepare ? await deps.prepare(job) : await deps.templates.prepare?.(job, 0, seed, site.input.referenceId);
+      if (job.kind === 'generate' && !prepared?.generation && site.input.referenceId) throw new AppError('INVALID_INPUT', 'A catalog is required to resolve the selected reference.');
+      const selection = prepared?.generation ?? (job.kind === 'edit' ? { seed, styleId: 'existing-site', templateVersion: 'existing' } : { seed, styleId: ['light-product', 'dark-tech', 'editorial', 'corporate', 'diagram'][seed % 5]!, templateVersion: '1.0.0' });
       const brief = site.input.about?.trim() || `${topics[selection.seed % topics.length]} for ${site.domain}`;
       state = { schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief,
         image: selection.seed % 100 < 10 ? 'assets/network.svg' : null, repairAttempts: 0, transportRetries: 0, transcript: [], toolTranscript: [], manifestId: null, intentId: null,
         baseManifestId: parent?.manifestId ?? null, parentRevisionId, revisionId: null, revisionCreatedAt: null,
-        instruction: deps.request?.instruction ?? brief, conversation: deps.request?.conversation ?? [],
+        instruction: job.edit?.instruction ?? deps.request?.instruction ?? brief, conversation: job.edit?.conversation ?? deps.request?.conversation ?? [],
         ...(deps.request?.selectedElementId === undefined ? {} : { selectedElementId: deps.request.selectedElementId }) };
       parseState(state, job); await save('assets');
     }
@@ -184,11 +185,11 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     if (stage === 'archive') {
       await check(); const manifest = await deps.artifacts.put(site.id, files, state.selection.templateVersion);
       state.manifestId = manifest.id; state.intentId = `${job.id}:${manifest.id}`;
-      state.revisionId = job.kind === 'generate' ? randomUUID() : null; state.revisionCreatedAt = deps.clock.now(); await save('publication');
+      state.revisionId = job.kind === 'generate' ? randomUUID() : job.edit?.candidateId ?? null; state.revisionCreatedAt = deps.clock.now(); await save('publication');
     }
     if (stage === 'publication') {
       const current = await deps.sites.get(site.id);
-      if (!current || current.revision !== job.baseRevision) throw new AppError('CONFLICT', 'Site changed before publication.');
+      if (!current || (job.kind === 'generate' && current.revision !== job.baseRevision)) throw new AppError('CONFLICT', 'Site changed before publication.');
       // Edits produce a validated candidate only. The editor's explicit accept/reject flow owns draft CAS.
       if (job.kind === 'generate') {
         await check(); const publication = await deps.publication.advance(state.intentId!);

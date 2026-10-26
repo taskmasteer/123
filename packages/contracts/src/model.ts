@@ -1,3 +1,4 @@
+import type { EditRequest } from './editing.js';
 export type Role = 'user' | 'spec-user' | 'admin';
 export interface Principal { userId: string; role: Role }
 export interface SiteInput { domain: string; about?: string; referenceId?: string; logoAssetId?: string }
@@ -25,6 +26,7 @@ export interface Job {
   state: 'queued' | 'running' | 'paused' | 'waiting_provider' | 'needs_attention' | 'completed' | 'cancelled';
   checkpointId: string | null; baseRevision: number;
   generation?: { seed: number; styleId: string; templateVersion: string };
+  edit?: EditRequest;
 }
 export interface Lease { jobId: string; workerId: string; generation: number; expiresAt: number }
 export interface ValidationReport {

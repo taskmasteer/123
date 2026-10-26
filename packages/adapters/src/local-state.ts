@@ -6,6 +6,15 @@ import type { Clock, Site, SiteRepository } from '../../contracts/src/model.js';
 import { nonemptyString, parseSiteInput, parseSitePatch, record } from '../../contracts/src/inputs.js';
 import { authorize } from '../../core/src/permissions.js';
 import { normalizeDomain } from '../../core/src/sites.js';
+import { parseEditingState } from '../../contracts/src/editing.js';
+import type { EditingState, EditingStore } from '../../contracts/src/editing.js';
+import { privateJson } from './private-json.js';
+
+/** Private editor journal; write-ahead intents bridge registry and queue transactions. */
+export async function createLocalEditingStore(directory: string): Promise<EditingStore> {
+  if (process.env.NODE_ENV === 'production') throw new AppError('FORBIDDEN', 'Local editing is a demonstration adapter.');
+  return privateJson<EditingState>(directory, 'editing.json', { version: 1, candidates: [], messages: [], publications: [] }, parseEditingState);
+}
 
 export interface LocalState extends SiteRepository { close(): Promise<void> }
 const activeDirectories = new Set<string>();

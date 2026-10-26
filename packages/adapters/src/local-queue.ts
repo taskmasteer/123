@@ -2,13 +2,15 @@ import { AppError } from '../../contracts/src/model.js';
 import type { Clock, Job, Lease, Queue } from '../../contracts/src/model.js';
 import { record, nonemptyString } from '../../contracts/src/inputs.js';
 import { privateJson } from './private-json.js';
-export interface LocalQueue extends Queue { get(id: string): Promise<Job | null>; retry(id: string): Promise<void>; close(): Promise<void> }
+import { validEditRequest } from '../../contracts/src/editing.js';
+export interface LocalQueue extends Queue { get(id: string): Promise<Job | null>; current(siteId: string): Promise<Job | null>; cancel(id: string): Promise<void>; retry(id: string): Promise<void>; close(): Promise<void> }
 interface Entry { job: Job; lease: Lease | null; generation: number }
 interface State { version: 1; entries: Entry[] }
 const states = ['queued', 'running', 'paused', 'waiting_provider', 'needs_attention', 'completed', 'cancelled'];
 export function validJob(value: unknown): value is Job {
   return record(value) && nonemptyString(value.id) && nonemptyString(value.siteId) && ['generate', 'edit'].includes(String(value.kind)) &&
     nonemptyString(value.stage) && states.includes(String(value.state)) && Number.isSafeInteger(value.baseRevision) && (value.baseRevision as number) >= 0 &&
+    (value.edit === undefined || validEditRequest(value.edit)) &&
     (value.checkpointId === null || nonemptyString(value.checkpointId)) && (value.generation === undefined || (record(value.generation) &&
       Number.isSafeInteger(value.generation.seed) && (value.generation.seed as number) >= 0 && nonemptyString(value.generation.styleId) && nonemptyString(value.generation.templateVersion)));
 }
@@ -59,6 +61,14 @@ export async function createLocalQueue(directory: string, clock: Clock): Promise
       const entry = owned(state, lease); entry.job.state = status; entry.lease = null; return { value: state, result: undefined };
     }); },
     get(id) { return transaction((state) => ({ result: structuredClone(state.entries.find((e) => e.job.id === id)?.job ?? null) })); },
+    current(siteId) { return transaction(state => ({ result: structuredClone(state.entries.find(e => e.job.siteId === siteId && !['completed', 'cancelled'].includes(e.job.state))?.job ?? state.entries.findLast(e => e.job.siteId === siteId)?.job ?? null) })); },
+    cancel(id) { return transaction(state => {
+      const entry = state.entries.find(e => e.job.id === id);
+      if (!entry) throw new AppError('NOT_FOUND', 'Job does not exist.');
+      if (entry.job.state === 'running') throw new AppError('CONFLICT', 'Дождитесь завершения текущей правки.');
+      entry.job.state = 'cancelled'; entry.lease = null;
+      return { value: state, result: undefined };
+    }); },
     retry(id) { return transaction((state) => {
       const entry = state.entries.find((e) => e.job.id === id); if (!entry) throw new AppError('NOT_FOUND', 'Job does not exist.');
       if (!['paused', 'waiting_provider', 'needs_attention'].includes(entry.job.state)) throw new AppError('CONFLICT', 'Job cannot be retried in its current state.');
