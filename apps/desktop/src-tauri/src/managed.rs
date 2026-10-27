@@ -13,9 +13,17 @@ pub enum ManagedRequest {
         #[serde(rename = "accessToken")]
         access_token: String,
     },
-    Start {},
-    Stop {},
+    Start {
+        #[serde(rename = "expectedOrigin")]
+        expected_origin: String,
+    },
+    Stop {
+        #[serde(rename = "expectedOrigin")]
+        expected_origin: String,
+    },
     Revoke {
+        #[serde(rename = "expectedOrigin")]
+        expected_origin: String,
         #[serde(rename = "accessToken")]
         access_token: String,
     },
@@ -66,6 +74,22 @@ fn valid_origin(value: &str) -> Result<(), AppError> {
         return Err(AppError::new("Invalid control origin"));
     }
     Ok(())
+}
+fn bound_enrollment<'a>(
+    saved: &'a Option<Enrollment>,
+    expected_origin: &str,
+) -> Result<&'a Enrollment, AppError> {
+    valid_origin(expected_origin)?;
+    let current = saved
+        .as_ref()
+        .ok_or_else(|| AppError::new("No enrollment"))?;
+    if current.origin != expected_origin {
+        return Err(AppError {
+            code: "CONFLICT".into(),
+            message: "Device belongs to a different control origin".into(),
+        });
+    }
+    Ok(current)
 }
 pub fn handle(
     secrets: &dyn SecretStore,
@@ -130,23 +154,25 @@ pub fn handle(
             current.acknowledged = true;
             save(secrets, current)?;
         }
-        ManagedRequest::Start {} => {
-            let current = saved
-                .as_ref()
-                .filter(|s| s.acknowledged)
-                .ok_or_else(|| AppError::new("Complete enrollment first"))?;
+        ManagedRequest::Start { expected_origin } => {
+            let current = bound_enrollment(&saved, &expected_origin)?;
+            if !current.acknowledged {
+                return Err(AppError::new("Complete enrollment first"));
+            }
             call(
                 "managed.start",
                 json!({"workerId":current.worker_id,"token":current.token,"controlOrigin":current.origin}),
             )?;
         }
-        ManagedRequest::Stop {} => {
+        ManagedRequest::Stop { expected_origin } => {
+            bound_enrollment(&saved, &expected_origin)?;
             call("managed.stop", json!({}))?;
         }
-        ManagedRequest::Revoke { access_token } => {
-            let current = saved
-                .as_ref()
-                .ok_or_else(|| AppError::new("No enrollment"))?;
+        ManagedRequest::Revoke {
+            access_token,
+            expected_origin,
+        } => {
+            let current = bound_enrollment(&saved, &expected_origin)?;
             if access_token.is_empty() || access_token.len() > 16000 {
                 return Err(AppError::new("Invalid session"));
             }
@@ -262,7 +288,14 @@ mod tests {
         let result = handle(&store, &mut call, enroll()).unwrap();
         assert!(!result.to_string().contains(&token));
         assert!(!result.to_string().contains("transient-admin"));
-        handle(&store, &mut call, ManagedRequest::Start {}).unwrap();
+        handle(
+            &store,
+            &mut call,
+            ManagedRequest::Start {
+                expected_origin: "https://control.test".into(),
+            },
+        )
+        .unwrap();
         drop(call);
         assert_eq!(prepared, 1);
         assert_eq!(attempts, 2);
@@ -273,6 +306,90 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("transient-admin"));
+    }
+    #[test]
+    fn lifecycle_origin_mismatch_never_reaches_private_pipe_or_erases_saved_identity() {
+        for acknowledged in [false, true] {
+            let store = Memory(Mutex::new(None));
+            save(
+                &store,
+                &Enrollment {
+                    worker_id: "11111111-1111-4111-8111-111111111111".into(),
+                    token: "x".repeat(43),
+                    origin: "https://installation-a.test".into(),
+                    name: "Saved A".into(),
+                    acknowledged,
+                },
+            )
+            .unwrap();
+            let before = store.0.lock().unwrap().clone();
+            let mut calls = Vec::new();
+            for action in ["start", "stop", "revoke"] {
+                let mut payload =
+                    json!({"action":action,"expectedOrigin":"https://installation-b.test"});
+                if action == "revoke" {
+                    payload["accessToken"] = json!("installation-b-admin");
+                }
+                let request = serde_json::from_value::<ManagedRequest>(payload).unwrap();
+                let result = handle(
+                    &store,
+                    |method, params| {
+                        calls.push((method.to_string(), params));
+                        Ok(json!({"running":false,"error":null}))
+                    },
+                    request,
+                );
+                assert!(
+                    result.is_err(),
+                    "Saved A must reject current B before {action}"
+                );
+                assert!(
+                    calls.is_empty(),
+                    "No HTTP or private sidecar command may receive a mismatched action"
+                );
+                assert_eq!(*store.0.lock().unwrap(), before);
+            }
+            if acknowledged {
+                for action in ["start", "stop", "revoke"] {
+                    let mut payload =
+                        json!({"action":action,"expectedOrigin":"https://installation-a.test"});
+                    if action == "revoke" {
+                        payload["accessToken"] = json!("installation-a-admin");
+                    }
+                    let request = serde_json::from_value::<ManagedRequest>(payload).unwrap();
+                    handle(
+                        &store,
+                        |method, params| {
+                            if method == "managed.start" || method == "managed.revoke" {
+                                assert_eq!(params["controlOrigin"], "https://installation-a.test");
+                            }
+                            if method == "managed.revoke" {
+                                assert_eq!(params["accessToken"], "installation-a-admin");
+                            }
+                            calls.push((method.to_string(), params));
+                            Ok(json!({"running":false,"error":null}))
+                        },
+                        request,
+                    )
+                    .unwrap();
+                }
+                assert_eq!(
+                    calls
+                        .iter()
+                        .map(|(method, _)| method.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "managed.start",
+                        "managed.status",
+                        "managed.stop",
+                        "managed.status",
+                        "managed.revoke",
+                        "managed.status"
+                    ]
+                );
+                assert!(store.0.lock().unwrap().is_none());
+            }
+        }
     }
     #[test]
     fn ambiguous_os_write_is_recovered_before_any_network_request() {
@@ -343,6 +460,17 @@ mod tests {
     }
     #[test]
     fn renderer_cannot_supply_worker_credentials_or_private_commands() {
+        for action in ["start", "stop", "revoke"] {
+            let payload = if action == "revoke" {
+                json!({"action":action,"accessToken":"admin"})
+            } else {
+                json!({"action":action})
+            };
+            assert!(
+                serde_json::from_value::<ManagedRequest>(payload).is_err(),
+                "Lifecycle actions require the current configured origin"
+            );
+        }
         assert!(serde_json::from_value::<ManagedRequest>(json!({"action":"enroll","origin":"https://control.test","name":"Machine","accessToken":"admin","token":"injected"})).is_err());
         assert!(valid_origin("https://control.test/foreign").is_err());
         assert!(valid_origin("https://user:password@control.test").is_err());

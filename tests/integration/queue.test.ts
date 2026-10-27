@@ -127,3 +127,70 @@ test('explicit resume retains saved progress and trusted provider retry ticket a
         await pool.end();
     }
 });
+
+test('direct job controls enforce fresh editing permission while ordinary users can control their generation', async () => {
+    const pool = await database();
+    try {
+        await seedUsers(pool);
+        const repo = new SupabaseRepository(pool), queue = new PostgresQueue(repo);
+        const user = { userId: identities.user, role: 'user' as const };
+        const editor = { userId: identities.spec, role: 'spec-user' as const };
+        const admin = { userId: identities.admin, role: 'admin' as const };
+        const app = createApp({ repository: repo, queue, auth: {
+            // Deliberately retain the pre-demotion session principal: the write
+            // transaction must consult current membership, not this role.
+            verifyUser: async token => token === 'admin' ? admin : token === 'editor' ? editor : user,
+            verifyWorker: async () => { throw new Error('Not used'); }
+        } });
+        const request = (siteId: string, action: 'retry' | 'cancel', token = 'user') => app(new Request(`https://control.test/sites/${siteId}/jobs/${action}`, {
+            method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: '{}'
+        }));
+        const own = await repo.create({ domain: 'own-generation.example' }, user);
+        expect((await request(own.id, 'cancel')).status).toBe(200);
+        expect((await repo.current(own.id))!.state).toBe('cancelled');
+        const paused = await repo.create({ domain: 'own-paused-generation.example' }, user);
+        await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"paused\"') where id=$1", [paused.id]);
+        expect((await request(paused.id, 'retry')).status).toBe(200);
+        expect((await repo.current(paused.id))!.state).toBe('queued');
+
+        const assignedGeneration = await repo.create({ domain: 'assigned-generation-control.example' }, admin);
+        await pool.query('insert into public.assignments(site_id,user_id) values($1,$2),($1,$3)', [assignedGeneration.id, user.userId, editor.userId]);
+        await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"paused\"') where id=$1", [assignedGeneration.id]);
+        const assignedBefore = (await pool.query('select * from private.jobs where id=$1', [assignedGeneration.id])).rows[0];
+        for (const token of ['user', 'editor']) for (const action of ['retry', 'cancel'] as const) {
+            expect((await request(assignedGeneration.id, action, token)).status, `assigned generation ${token} ${action}`).toBe(403);
+            expect((await pool.query('select * from private.jobs where id=$1', [assignedGeneration.id])).rows[0]).toEqual(assignedBefore);
+        }
+        expect((await request(assignedGeneration.id, 'retry', 'admin')).status).toBe(200);
+        expect((await request(assignedGeneration.id, 'cancel', 'admin')).status).toBe(200);
+
+        for (const scope of ['own', 'assigned', 'demoted'] as const) {
+            const owner = scope === 'own' ? user : scope === 'demoted' ? editor : admin;
+            const site = await repo.create({ domain: `${scope}-edit-controls.example` }, owner);
+            if (scope === 'assigned') await pool.query('insert into public.assignments(site_id,user_id) values($1,$2)', [site.id, user.userId]);
+            if (scope === 'demoted') await pool.query("update public.memberships set role='user' where user_id=$1", [editor.userId]);
+            for (const state of ['paused', 'waiting_provider'] as const) {
+                // The stored job is the authorization subject. No HTTP kind/role
+                // field may turn this existing edit into an ordinary generation.
+                const job = { ...(await repo.current(site.id))!, kind: 'edit' as const, state,
+                    edit: { candidateId: randomUUID(), baseDraftId: null, baseManifestId: randomUUID(), parentRevisionId: randomUUID(), instruction: 'Edit existing copy', conversation: [] } };
+                await pool.query('update private.jobs set data=$2 where id=$1', [job.id, job]);
+                for (const action of ['retry', 'cancel'] as const) {
+                    const before = (await pool.query('select * from private.jobs where id=$1', [job.id])).rows[0];
+                    const admission = (await pool.query('select * from private.site_operations where site_id=$1', [site.id])).rows[0];
+                    expect((await request(site.id, action, scope === 'demoted' ? 'editor' : 'user')).status, `${scope} ${state} ${action}`).toBe(403);
+                    expect((await pool.query('select * from private.jobs where id=$1', [job.id])).rows[0]).toEqual(before);
+                    expect((await pool.query('select * from private.site_operations where site_id=$1', [site.id])).rows[0]).toEqual(admission);
+                }
+            }
+            if (scope === 'demoted') {
+                await pool.query("update public.memberships set role='spec-user' where user_id=$1", [editor.userId]);
+                expect((await request(site.id, 'retry', 'editor')).status).toBe(200);
+                expect((await request(site.id, 'cancel', 'editor')).status).toBe(200);
+            } else {
+                expect((await request(site.id, 'retry', 'admin')).status).toBe(200);
+                expect((await request(site.id, 'cancel', 'admin')).status).toBe(200);
+            }
+        }
+    } finally { await pool.end(); }
+});

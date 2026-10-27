@@ -8,6 +8,14 @@ import { SupabaseRepository, type SqlTransaction, type LeaseAuthority, type Work
 export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation {
     constructor(readonly repository: SupabaseRepository) {
     }
+    /** Called only after locking the job and its site; session roles are not authority. */
+    private async authorizeControl(tx: SqlTransaction, actor: Principal, job: Job): Promise<void> {
+        const current = await this.repository.fresh(tx, actor);
+        const site = (await this.repository.get(job.siteId, tx))!;
+        authorize(current, job.kind === 'edit' ? 'site:edit' : 'site:read', site);
+        if (job.kind === 'generate' && current.role !== 'admin' && site.ownerId !== current.userId)
+            throw new AppError('FORBIDDEN', 'Можно управлять только собственной генерацией.');
+    }
     async reserveControllerPublication(tx: SqlTransaction, admission: Admission, requestKey: string, binding: {
         revisionId: string;
         manifestId: string;
@@ -76,10 +84,8 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
     async retry(jobId: string, recovery?: Job['providerRecovery'], actor?: Principal): Promise<void> {
         await this.repository.transaction(async (tx) => {
             const row = await this.lockJob(tx, jobId), job = row.data as Job;
-            if (actor) {
-                const current = await this.repository.fresh(tx, actor);
-                authorize(current, 'site:read', (await this.repository.get(job.siteId, tx))!);
-            }
+            if (actor)
+                await this.authorizeControl(tx, actor, job);
             if (!['paused', 'waiting_provider', 'needs_attention'].includes(job.state) || job.state === 'needs_attention' && !recovery)
                 throw new AppError('CONFLICT', 'Повтор требует исправления причины и явного запроса.');
             if (recovery && (job.kind !== 'generate' || job.state !== 'needs_attention' || job.checkpointId !== recovery.checkpointId))
@@ -145,7 +151,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
         await this.repository.transaction(async (tx) => {
             const job = await this.lockJob(tx, jobId);
             if (actor)
-                authorize(await this.repository.fresh(tx, actor), 'site:read', (await this.repository.get(job.site_id, tx))!);
+                await this.authorizeControl(tx, actor, job.data as Job);
             if (job.data.state === 'completed')
                 throw new AppError('CONFLICT', 'Задание уже завершено.');
             await tx.query("update private.jobs set generation=generation+1,worker_id=null,expires_at=null,data=jsonb_set(data,'{state}','\"cancelled\"') where id=$1", [jobId]);

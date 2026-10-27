@@ -35,7 +35,7 @@ export class RemoteClient {
    const p=object(params,method==='worker.enroll'?['name']:[]),action=method.slice(7);
    const accessToken=['enroll','remove'].includes(action)?await this.token():undefined;
    if(['enroll','remove'].includes(action)&&!accessToken)throw new AppError('UNAUTHENTICATED','Войдите в систему.');
-   const value=object(await invoke('managed_worker',{request:{action:action==='remove'?'revoke':action,...(action==='enroll'?{name:string(p.name,100),origin:this.base}:{}),...(accessToken?{accessToken}:{})}}),['workerId','name','origin','enrolled','running','error']);
+   const value=object(await invoke('managed_worker',{request:{action:action==='remove'?'revoke':action,...(action==='enroll'?{name:string(p.name,100),origin:this.base}:{}),...(['start','stop','remove'].includes(action)?{expectedOrigin:this.base}:{}),...(accessToken?{accessToken}:{})}}),['workerId','name','origin','enrolled','running','error']);
    if(value.workerId!==null)uuid(value.workerId);if(value.name!==null)string(value.name,100);if(value.origin!==null&&value.origin!==this.base)throw new AppError('CONFLICT','Устройство зарегистрировано для другого API.');if(typeof value.enrolled!=='boolean'||typeof value.running!=='boolean'||value.error!==null&&typeof value.error!=='string')return bad();return value as T;
   }
   const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds','cursor']);

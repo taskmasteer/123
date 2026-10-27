@@ -1,7 +1,24 @@
-import {test,expect} from 'vitest';
+import {test,expect,vi} from 'vitest';
 import {RemoteClient,sessionView} from '../src/lib/remote-client.js';
 import {selectClient,desktopClient} from '../src/lib/desktop-client.js';
 const id='11111111-1111-4111-8111-111111111111';
+test('native lifecycle actions carry the configured origin before dispatching any credential',async()=>{
+ const requests:unknown[]=[];
+ vi.stubGlobal('isTauri',true);
+ vi.stubGlobal('window',{__TAURI_INTERNALS__:{invoke:async(command:string,args:unknown)=>{
+  expect(command).toBe('managed_worker');requests.push(args);
+  return {workerId:id,name:'Machine',origin:'https://installation-b.test',enrolled:true,running:false,error:null};
+ }}});
+ try{
+  const client=new RemoteClient('https://installation-b.test',async()=>'installation-b-admin');
+  for(const method of ['worker.start','worker.stop','worker.remove'])await client.request(method);
+  expect(requests).toEqual([
+   {request:{action:'start',expectedOrigin:'https://installation-b.test'}},
+   {request:{action:'stop',expectedOrigin:'https://installation-b.test'}},
+   {request:{action:'revoke',expectedOrigin:'https://installation-b.test',accessToken:'installation-b-admin'}}
+  ]);
+ }finally{vi.unstubAllGlobals();}
+});
 test('generation capability is explicit while publication remains unavailable',()=>{
  const session={principal:{userId:id,role:'admin'},mode:'managed',capabilities:{admin:true,edit:true,generation:true,publish:false,export:false,preview:true,nativeModelSettings:false}};
  expect(sessionView(session).capabilities.generation).toBe(true);
