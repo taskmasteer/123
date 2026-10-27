@@ -128,9 +128,15 @@ test('an interrupted in-flight HTTP attempt consumes the same durable retry budg
     const model = createResponsesModel({ apiKey: secret, model: 'configured-text' }, transport, { now: () => now, async delay(ms) { now += ms; } });
     await expect(model.run(request, tools, controller.signal, { async checkpoint(s) { saved = s; } })).rejects.toThrow();
     expect(saved).toMatchObject({ requestPending: true });
-    const resumed = fixtureTransport([{ status: 'completed', output: [final] }]);
-    const result = await createResponsesModel({ apiKey: secret, model: 'configured-text' }, resumed.transport, { now: () => now, async delay(ms) { now += ms; } }).run({ ...request, continuation: saved! }, tools, new AbortController().signal);
+    saved={...saved!,inputTokens:10,outputTokens:5};
+    const resumed = fixtureTransport([{ status: 'completed', output: [final],usage:{input_tokens:2,output_tokens:1} }]);
+    const restarted=createResponsesModel({ apiKey: secret, model: 'configured-text' }, resumed.transport, { now: () => now, async delay(ms) { now += ms; } });
+    await expect(restarted.run({...request,continuation:saved},tools,new AbortController().signal,{async checkpoint(s){saved=s;if(!s.requestPending&&s.retries===1)throw new Error('crash after durable retry accounting');}})).rejects.toThrow('crash after');
+    expect(resumed.bodies).toHaveLength(0);
+    const result = await restarted.run({ ...request, continuation: saved! }, tools, new AbortController().signal);
     expect(result.continuation?.retries).toBe(1);
+    expect((result as any).uncertainRequests).toBe(1);
+    expect(result.inputTokens).toBe(12);expect(result.outputTokens).toBe(6);
     expect(sends).toBe(1);
 });
 test('provider cannot persist a key it echoes in tool arguments', async () => {

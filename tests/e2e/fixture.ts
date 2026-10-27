@@ -26,7 +26,8 @@ export const test=base.extend<{workerBridge:Bridge}>({
    if(request.action!=='status')modelStatus={mode:request.action==='save'?'live':request.action==='demo'?'demo':'blocked',available:request.action!=='delete',activeJobs:0,maxJobs:2,model:request.action==='save'?request.model:null,images:request.imageModel?'enabled':'disabled',storage:'local',publication:'demo'};
    return modelStatus??{mode:'demo',available:true,activeJobs:0,maxJobs:2,model:null,images:'disabled',storage:'local',publication:'demo'};
   });
-  await page.addInitScript(()=>{Object.defineProperty(window,'__TAURI_INTERNALS__',{value:{invoke:(command:string,args:{request:unknown})=>{const target=window as unknown as {__desktopTestDispatch:(request:unknown)=>Promise<unknown>;__desktopSettingsTest:(request:unknown)=>Promise<unknown>};return command==='model_settings'?target.__desktopSettingsTest(args.request):target.__desktopTestDispatch(args.request);}}});});
+  await page.exposeBinding('__managedWorkerTest',async()=>({workerId:null,name:null,origin:null,enrolled:false,running:false,error:null}));
+  await page.addInitScript(()=>{Object.defineProperty(window,'__TAURI_INTERNALS__',{value:{invoke:(command:string,args:{request:unknown})=>{const target=window as unknown as {__desktopTestDispatch:(request:unknown)=>Promise<unknown>;__desktopSettingsTest:(request:unknown)=>Promise<unknown>;__managedWorkerTest:()=>Promise<unknown>};return command==='managed_worker'?target.__managedWorkerTest():command==='model_settings'?target.__desktopSettingsTest(args.request):target.__desktopTestDispatch(args.request);}}});});
   try{await use({failNext:(method,message)=>failures.set(method,message),polls:()=>polls,requests});}finally{
    worker.stdin.end();await new Promise<void>(resolve=>{if(worker.exitCode!==null)return resolve();worker.once('exit',()=>resolve());});
    lines.close();await rm(data,{recursive:true,force:true});

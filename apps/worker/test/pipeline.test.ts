@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test,vi } from 'vitest';
 import type { ArtifactFile, Checkpoint, CheckpointStore, Job, Lease, ModelPort, Queue } from '../../../packages/contracts/src/model.js';
 import { createLocalState } from '../../../packages/adapters/src/local-state.js';
 import { createLocalArtifacts } from '../../../packages/adapters/src/local-artifacts.js';
@@ -14,10 +14,37 @@ import { createImageGenerator } from '../../../packages/adapters/src/openai/imag
 import { ManualClock } from '../../../packages/testing/src/clock.js';
 import { validateStatic } from '../src/validation/static.js';
 import { runJob } from '../src/pipeline.js';
+import {runWorker} from '../src/runner.js';
 import type { WorkerDeps } from '../src/pipeline.js';
 import { cleanDirectories, directory, file, site as siteFiles } from './fixtures.js';
 
 afterEach(cleanDirectories);
+test('pending model work renews at thirty seconds and pause waits for the completed model stage',async()=>{
+ const f=await fixture();let renewals=0,paused=false;const base=f.deps.queue.heartbeat;
+ f.deps.queue.heartbeat=async lease=>{renewals++;return base(lease);};f.deps.queue.shouldPause=async()=>paused;
+ let entered!:()=>void,release!:()=>void;const start=new Promise<void>(resolve=>entered=resolve),gate=new Promise<void>(resolve=>release=resolve);
+ f.deps.model={async run(){entered();await gate;return {summary:'Finished stage',inputTokens:5,outputTokens:3};}};
+ vi.useFakeTimers();
+ try{
+  const running=runJob(f.job,f.lease,f.deps,new AbortController().signal);await start;const before=renewals;
+  await vi.advanceTimersByTimeAsync(29999);expect(renewals).toBe(before);
+  await vi.advanceTimersByTimeAsync(1);expect(renewals).toBe(before+1);
+  paused=true;release();await running;
+  expect(f.job.state).toBe('paused');expect(f.job.stage).toBe('validate');expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.transcript).toMatchObject([{inputTokens:5,outputTokens:3}]);
+ }finally{vi.useRealTimers();}
+});
+test('managed runner executes queued work and graceful pause commits the current stage before stopping',async()=>{
+ const f=await fixture(),root=await directory(),queue=await createLocalQueue(root,f.deps.clock);
+ await queue.enqueue({...f.job,state:'queued'});f.deps.queue=queue;
+ let modelCalls=0;f.deps.model={async run(){modelCalls++;return {summary:'done',inputTokens:3,outputTokens:4};}};
+ f.deps.queue.shouldPause=async()=>true;
+ const abort=new AbortController();const finish=queue.finish.bind(queue);
+ queue.finish=async(lease,state)=>{await finish(lease,state);abort.abort();};
+ await runWorker(f.deps,'runner-device',abort.signal);
+ const saved=(await queue.get(f.job.id))!;
+ expect(saved.state).toBe('paused');expect(saved.stage).toBe('assets');expect(saved.checkpointId).not.toBeNull();expect(modelCalls).toBe(0);
+ await queue.close();
+});
 async function fixture(about = 'user supplied description: event streaming for research teams') {
   const root = await directory(); const clock = new ManualClock(1000);
   const sites = await createLocalState(join(root, 'registry'), clock);

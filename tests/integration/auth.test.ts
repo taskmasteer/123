@@ -77,9 +77,10 @@ test('HTTP role matrix, safe DTOs, concurrent admission, fresh demotion and work
  await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"needs_attention\"') where id=$1",[state.candidates[0]!.jobId]);
  expect((await request('spec',`/sites/${site.id}/candidates/${state.candidates[0]!.id}/reject`,'POST',{})).status).toBe(200);
  const admission=await repo.acquire({userId:identities.spec,role:'spec-user'},site.id);await pool.query("update private.site_operations set expires_at=clock_timestamp()-interval '1 second' where site_id=$1",[site.id]);await expect(repo.compareAndSet(site.id,0,{domainStatus:'changed'},admission)).rejects.toMatchObject({code:'STALE_LEASE'});await repo.release(admission);
- const enrolled=await (await request('admin','/workers/enroll','POST',{name:'test worker'})).json();expect((await auth.verifyWorker(enrolled.token)).workerId).toBe(enrolled.workerId);expect((await pool.query('select token_hash from private.workers where id=$1',[enrolled.workerId])).rows[0].token_hash).not.toBe(enrolled.token);
- expect((await app(new Request('https://control.test/uploads/prepare',{method:'POST',headers:{authorization:'Bearer '+enrolled.token,'content-type':'application/json'},body:'{}'}))).status).toBe(503);
- await request('admin',`/workers/${enrolled.workerId}/revoke`,'POST',{});await expect(auth.verifyWorker(enrolled.token)).rejects.toMatchObject({code:'UNAUTHENTICATED'});
+ const workerToken=Buffer.alloc(32,17).toString('base64url');
+ const enrolled=await (await request('admin','/workers/enroll','POST',{workerId:randomUUID(),name:'test worker',token:workerToken,controlOrigin:'https://control.test'})).json();expect(enrolled.token).toBeUndefined();expect((await auth.verifyWorker(workerToken)).workerId).toBe(enrolled.workerId);expect((await pool.query('select token_hash from private.workers where id=$1',[enrolled.workerId])).rows[0].token_hash).not.toBe(workerToken);
+ expect((await app(new Request('https://control.test/uploads/prepare',{method:'POST',headers:{authorization:'Bearer '+workerToken,'content-type':'application/json'},body:'{}'}))).status).toBe(503);
+ await request('admin',`/workers/${enrolled.workerId}/revoke`,'POST',{});await expect(auth.verifyWorker(workerToken)).rejects.toMatchObject({code:'UNAUTHENTICATED'});
  await request('admin',`/admin/users/${identities.spec}`,'PATCH',{role:'user',active:true});expect((await (await request('spec','/session')).json()).principal.role).toBe('user');expect((await request('spec',`/sites/${site.id}/edits`,'POST',{instruction:'forged admin',expectedRevision:0})).status).toBe(403);
  }finally{await pool.end();}
 });

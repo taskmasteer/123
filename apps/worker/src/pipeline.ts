@@ -11,6 +11,8 @@ import { artifactMediaType, checkArtifacts } from '../../../packages/core/src/ar
 import { createFileTools } from './files/tools.js';
 import { validateSite } from './validation/browser.js';
 export interface WorkerDeps {
+  /** Remote ports bind protected reads/writes to this claim, never shared mutable current-job state. */
+  bind?: (job:Job,lease:Lease)=>Promise<WorkerDeps>;
   queue: Queue; sites: SiteRepository; artifacts: ArtifactStore; checkpoints: CheckpointStore;
   revisions: RevisionRepository;
   model: ModelPort; clock: Clock; publication: PublicationPort; workspace: string;
@@ -33,6 +35,9 @@ interface PipelineState extends Record<string, unknown> {
   providerRecoveries?: (NonNullable<Job['providerRecovery']>&{previousIdentity:string})[];
 }
 const stages = ['assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
+export const heartbeatIntervalMs=30_000;
+class StagePaused extends Error {}
+function validUncertainRequests(value:unknown){return value===undefined||(Number.isSafeInteger(value)&&(value as number)>=0&&(value as number)<=1000);}
 function validReport(value: unknown): value is ValidationReport {
   return record(value) && typeof value.ok === 'boolean' && Array.isArray(value.issues) && value.ok === (value.issues.length === 0) &&
     value.issues.every((issue) => record(issue) && typeof issue.code === 'string' && typeof issue.message === 'string' && (issue.path === undefined || typeof issue.path === 'string')) &&
@@ -46,7 +51,7 @@ function parseState(value: Record<string, unknown>, job: Job): PipelineState {
       (value.image !== null && value.image !== 'assets/network.svg') || !Number.isInteger(value.repairAttempts) ||
       (value.repairAttempts as number) < 0 || (value.repairAttempts as number) > 2 || !Number.isInteger(value.transportRetries) ||
       (value.transportRetries as number) < 0 || (value.transportRetries as number) > 3 || !Array.isArray(value.transcript) ||
-      !value.transcript.every((r) => record(r) && typeof r.summary === 'string' && Number.isSafeInteger(r.inputTokens) && Number.isSafeInteger(r.outputTokens)) ||
+      !value.transcript.every((r) => record(r) && typeof r.summary === 'string' && Number.isSafeInteger(r.inputTokens) && Number.isSafeInteger(r.outputTokens) && validUncertainRequests(r.uncertainRequests)) ||
       !Array.isArray(value.toolTranscript) || value.toolTranscript.length > 5000 || !value.toolTranscript.every((entry) => record(entry) &&
         ['list', 'read', 'write', 'replace'].includes(String(entry.operation)) && (entry.path === undefined || typeof entry.path === 'string')) ||
       (value.manifestId !== null && typeof value.manifestId !== 'string') || (value.intentId !== null && typeof value.intentId !== 'string') ||
@@ -75,12 +80,17 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
   let leaseError: unknown; let heartbeat: Promise<void> = Promise.resolve();
   const timer = setInterval(() => {
     heartbeat = heartbeat.then(async () => { lease = await deps.queue.heartbeat(lease); }).catch((error: unknown) => { leaseError = error; localAbort.abort(error); });
-  }, 30_000);
+  }, heartbeatIntervalMs);
   async function check() { activeSignal.throwIfAborted(); if (leaseError) throw leaseError; lease = await deps.queue.heartbeat(lease); }
   async function save(next: string) {
     await check();
+    const boundary=next!==stage;
     const checkpoint = await deps.checkpoints.save({ ...job, stage: next }, lease, state!, files);
-    await deps.queue.checkpoint(lease, checkpoint); job.checkpointId = checkpoint.id; job.stage = next; stage = next;
+    await deps.queue.checkpoint(lease, checkpoint,job.checkpointId); job.checkpointId = checkpoint.id; job.stage = next; stage = next;
+    if(boundary&&next!=='completed'){
+      if(deps.queue.pauseAtBoundary){if(await deps.queue.pauseAtBoundary(lease))throw new StagePaused();}
+      else if(await deps.queue.shouldPause?.(lease)){await deps.queue.finish(lease,'paused');throw new StagePaused();}
+    }
   }
   function canApplyRecovery(){
     const ticket=job.providerRecovery;
@@ -202,7 +212,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
           await (deps.delay ?? ((milliseconds, abort) => sleep(milliseconds, undefined, { signal: abort })))(1000 * 2 ** (state!.transportRetries - 1), activeSignal);
           continue;
         }
-        if (!result || typeof result.summary !== 'string' || !Number.isSafeInteger(result.inputTokens) || result.inputTokens < 0 || !Number.isSafeInteger(result.outputTokens) || result.outputTokens < 0) throw new AppError('INVALID_INPUT', 'Invalid model result.');
+        if (!result || typeof result.summary !== 'string' || !Number.isSafeInteger(result.inputTokens) || result.inputTokens < 0 || !Number.isSafeInteger(result.outputTokens) || result.outputTokens < 0 || !validUncertainRequests(result.uncertainRequests)) throw new AppError('INVALID_INPUT', 'Invalid model result.');
         state!.transportRetries = 0;
         const {continuation: _continuation,...summary}=result;state!.transcript.push(summary);
         await collect(tools);delete state!.continuation;return;
@@ -247,6 +257,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     }
     await deps.queue.finish(lease, 'completed');
   } catch (error) {
+    if(error instanceof StagePaused)return;
     if (leaseError || (error instanceof AppError && error.code === 'STALE_LEASE')) throw error;
     if (state && !activeSignal.aborted) { state.error = error instanceof Error ? error.message : String(error); await save(stage); }
     await deps.queue.finish(lease, activeSignal.aborted ? 'paused' : error instanceof AppError && error.code === 'PROVIDER_WAIT' ? 'waiting_provider' : 'needs_attention');

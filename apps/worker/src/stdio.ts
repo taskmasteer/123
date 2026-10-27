@@ -16,7 +16,8 @@ process.stdin.on('data',(chunk:Buffer)=>{
   const line=pending.subarray(0,end).toString('utf8');pending=pending.subarray(end+1);
   tail=tail.then(async()=>{let value:unknown;try{value=JSON.parse(line);
    const privateConfig=record(value)&&value.method==='model.configure'&&value.version===1&&typeof value.id==='string'&&/^[a-zA-Z0-9-]{1,64}$/.test(value.id)&&Object.keys(value).every(key=>['id','version','method','params'].includes(key));
-   const result=privateConfig&&record(value)?await runtime.configure(value.params):await runtime.request(value);reply({id:record(value)?value.id:null,result});}
+   const privateManaged=record(value)&&typeof value.method==='string'&&value.method.startsWith('managed.')&&value.version===1&&typeof value.id==='string'&&/^[a-zA-Z0-9-]{1,64}$/.test(value.id)&&Object.keys(value).every(key=>['id','version','method','params'].includes(key));
+   const result=privateConfig&&record(value)?await runtime.configure(value.params):privateManaged&&record(value)?await runtime.managed(String(value.method),value.params):await runtime.request(value);reply({id:record(value)?value.id:null,result});}
    catch(error){reply({id:record(value)&&typeof value.id==='string'?value.id:null,error:{code:error instanceof AppError?error.code:'NEEDS_ATTENTION',message:error instanceof AppError?error.message:'Исполнитель не смог выполнить операцию.'}});}});
  }
 });

@@ -282,6 +282,29 @@ impl Worker {
             params: serde_json::json!({}),
         })
     }
+    pub fn managed(&mut self, request: crate::managed::ManagedRequest) -> Result<Value, AppError> {
+        if self
+            .process
+            .as_mut()
+            .map(|p| p.child.try_wait().ok().flatten().is_some())
+            .unwrap_or(true)
+        {
+            self.shutdown();
+            self.start()?;
+        }
+        crate::managed::handle(
+            &OsSecretStore,
+            |method, params| {
+                self.exchange(DesktopRequest {
+                    id: "native-managed".into(),
+                    version: 1,
+                    method: method.into(),
+                    params,
+                })
+            },
+            request,
+        )
+    }
     fn exchange(&mut self, request: DesktopRequest) -> Result<Value, AppError> {
         let bytes = serde_json::to_vec(&request).map_err(|_| AppError::new("Invalid request"))?;
         if bytes.len() > 64000 {
@@ -541,6 +564,54 @@ mod tests {
 mod transport_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn managed_identity_uses_private_fixed_sidecar_pipe() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data = root.join(format!(".local-state/managed-pipe-{unique}"));
+        let mut worker = Worker::new(LaunchConfig {
+            node: PathBuf::from(std::env::var_os("SITE_FACTORY_TEST_NODE").unwrap()),
+            script: root.join("dist/apps/worker/src/stdio.js"),
+            source: root,
+            data: data.clone(),
+        })
+        .unwrap();
+        let request = || DesktopRequest {
+            id: "native-managed".into(),
+            version: 1,
+            method: "managed.prepare".into(),
+            params: json!({}),
+        };
+        assert!(
+            worker.request(request()).is_err(),
+            "Generic dispatch cannot mint credentials"
+        );
+        let first = worker.exchange(request()).unwrap();
+        let second = worker.exchange(request()).unwrap();
+        assert_eq!(first["workerId"].as_str().unwrap().len(), 36);
+        assert_eq!(first["token"].as_str().unwrap().len(), 43);
+        assert_ne!(first["workerId"], second["workerId"]);
+        assert_ne!(first["token"], second["token"]);
+        let status = worker
+            .exchange(DesktopRequest {
+                id: "native-managed".into(),
+                version: 1,
+                method: "managed.status".into(),
+                params: json!({}),
+            })
+            .unwrap();
+        assert_eq!(status, json!({"running":false,"error":null}));
+        worker.shutdown();
+        drop(worker);
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     fn run_failure_case(failure: &str) {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

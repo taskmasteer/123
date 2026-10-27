@@ -4,8 +4,13 @@ import {object,uuid,integer,string,siteView} from '../../../../packages/contract
 import type {SessionView} from '../../../../packages/contracts/src/http.js';
 const bad=():never=>{throw new AppError('INVALID_INPUT','Некорректный ответ сервера.');};
 function list(value:unknown){if(!Array.isArray(value)||value.length>10000)return bad();return value;}
-export function sessionView(value:unknown):SessionView {const s=object(value,['principal','mode','capabilities']),p=object(s.principal,['userId','role']),c=object(s.capabilities,['admin','edit','generation','publish','export','preview','nativeModelSettings']);uuid(p.userId);if(!['user','spec-user','admin'].includes(String(p.role))||s.mode!=='managed'||Object.keys(c).length!==7||Object.values(c).some(v=>typeof v!=='boolean')||c.nativeModelSettings!==false||c.generation!==false||c.publish!==false||c.export!==false)return bad();return s as unknown as SessionView;}
+export function sessionView(value:unknown):SessionView {const s=object(value,['principal','mode','capabilities']),p=object(s.principal,['userId','role']),c=object(s.capabilities,['admin','edit','generation','publish','export','preview','nativeModelSettings']);uuid(p.userId);if(!['user','spec-user','admin'].includes(String(p.role))||s.mode!=='managed'||Object.keys(c).length!==7||Object.values(c).some(v=>typeof v!=='boolean')||c.nativeModelSettings!==false||c.publish!==false||c.export!==false)return bad();return s as unknown as SessionView;}
 function validate(method:string,value:unknown):unknown {
+ if(method==='worker.list')return list(value).map(raw=>{
+  const w=object(raw,['id','name','paused','revoked','lastHeartbeat','jobs']);uuid(w.id);string(w.name,100);
+  if(typeof w.paused!=='boolean'||typeof w.revoked!=='boolean')return bad();if(w.lastHeartbeat!==null)integer(w.lastHeartbeat);
+  list(w.jobs).forEach(raw=>{const j=object(raw,['id','siteId','stage','state']);uuid(j.id);uuid(j.siteId);string(j.stage,100);string(j.state,30);});return w;
+ });
  if(method==='session')return sessionView(value);
  if(method==='site.list'){const p=object(value,['items','nextCursor']);if(p.nextCursor!==null)uuid(p.nextCursor);return {items:list(p.items).map(siteView),nextCursor:p.nextCursor};}
  if(method==='site.create'||method==='edit.accept')return siteView(value);
@@ -23,12 +28,28 @@ export class RemoteClient {
  readonly mode='managed';
  constructor(readonly base:string,private token:()=>Promise<string|null>,private transport:typeof fetch=fetch,private onDispose?:()=>void){const u=new URL(base);if(u.protocol!=='https:'||u.pathname!=='/'||u.search||u.hash||u.username||u.password)throw new AppError('INVALID_INPUT','Требуется HTTPS-адрес API без пути.');this.base=u.origin;}
  dispose(){this.onDispose?.();}
- async modelSettings<T>(_request:unknown):Promise<T>{throw new AppError('UNAVAILABLE','Настройки локальной модели доступны в локальном режиме.');}
+ async modelSettings<T>(request:unknown):Promise<T>{if(!isTauri())throw new AppError('UNAVAILABLE','Настройки модели доступны в нативном приложении.');return invoke<T>('model_settings',{request});}
  async request<T>(method:string,params:unknown={}):Promise<T>{
+  if(['worker.enroll','worker.start','worker.stop','worker.status','worker.remove'].includes(method)){
+   if(!isTauri())throw new AppError('UNAVAILABLE','Запуск устройства доступен в нативном приложении.');
+   const p=object(params,method==='worker.enroll'?['name']:[]),action=method.slice(7);
+   const accessToken=['enroll','remove'].includes(action)?await this.token():undefined;
+   if(['enroll','remove'].includes(action)&&!accessToken)throw new AppError('UNAUTHENTICATED','Войдите в систему.');
+   const value=object(await invoke('managed_worker',{request:{action:action==='remove'?'revoke':action,...(action==='enroll'?{name:string(p.name,100),origin:this.base}:{}),...(accessToken?{accessToken}:{})}}),['workerId','name','origin','enrolled','running','error']);
+   if(value.workerId!==null)uuid(value.workerId);if(value.name!==null)string(value.name,100);if(value.origin!==null&&value.origin!==this.base)throw new AppError('CONFLICT','Устройство зарегистрировано для другого API.');if(typeof value.enrolled!=='boolean'||typeof value.running!=='boolean'||value.error!==null&&typeof value.error!=='string')return bad();return value as T;
+  }
   const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds','cursor']);
   if(method==='device.status')return {mode:'blocked',available:false,activeJobs:0,maxJobs:2,model:null,images:'disabled',storage:'managed',publication:'unavailable'} as T;
   let path:string,verb='GET',body:unknown;
   switch(method){
+   case 'worker.list':path='/workers';break;
+   case 'worker.pause':case 'worker.resume':case 'worker.revoke':path=`/workers/${uuid(p.id)}/${method.slice(7)}`;verb='POST';body={};break;
+   case 'job.cancel':path=`/sites/${uuid(p.siteId)}/jobs/cancel`;verb='POST';body={};break;
+   case 'job.retry':{
+    path=`/sites/${uuid(p.siteId)}/jobs/retry`;verb='POST';body={};
+    if(isTauri()){const status=await this.modelSettings<{mode:string;model:string|null}>({action:'status'});if(status.mode==='live'&&status.model)body={modelIdentity:'openai:'+status.model};}
+    break;
+   }
    case 'session':path='/session';break;
    case 'site.list':path='/sites'+(p.cursor===undefined?'':'?cursor='+uuid(p.cursor));break;
    case 'site.create':path='/sites';verb='POST';body=p;break;

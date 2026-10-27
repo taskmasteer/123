@@ -5,7 +5,7 @@ import {record,parseSiteInput} from './inputs.js';
 export type JobView=Pick<Job,'id'|'siteId'|'kind'|'stage'|'state'|'checkpointId'|'baseRevision'>;
 export type SiteView=Site&{job:JobView|null};
 export type CandidateView=Omit<Candidate,'job'>&{instruction:string;job:JobView};
-export interface SessionView {principal:Principal;mode:'managed';capabilities:{admin:boolean;edit:boolean;generation:false;publish:false;export:false;preview:boolean;nativeModelSettings:false}}
+export interface SessionView {principal:Principal;mode:'managed';capabilities:{admin:boolean;edit:boolean;generation:boolean;publish:false;export:false;preview:boolean;nativeModelSettings:false}}
 export function jobView(j:Job):JobView{return {id:j.id,siteId:j.siteId,kind:j.kind,stage:j.stage,state:j.state,checkpointId:j.checkpointId,baseRevision:j.baseRevision};}
 export function candidateView(c:Candidate):CandidateView {return {id:c.id,siteId:c.siteId,jobId:c.jobId,baseRevision:c.baseRevision,baseDraftId:c.baseDraftId,baseManifestId:c.baseManifestId,parentRevisionId:c.parentRevisionId,manifestId:c.manifestId,status:c.status,validation:c.validation?{ok:c.validation.ok,issues:c.validation.issues.map(i=>({code:i.code,message:i.message,...(i.path?{path:i.path}:{})})),screenshotIds:[...c.validation.screenshotIds]}:null,summary:c.summary,createdAt:c.createdAt,acceptance:c.acceptance?{expectedRevision:c.acceptance.expectedRevision,state:c.acceptance.state}:null,instruction:c.job.edit?.instruction??'',job:jobView(c.job)};}
 export function object(value:unknown,keys:string[]):Record<string,unknown>{if(!record(value)||Object.keys(value).some(k=>!keys.includes(k)))throw new AppError('INVALID_INPUT','Некорректные поля запроса.');return value;}

@@ -383,3 +383,26 @@ mod acl_tests {
         assert!(invoke_settings(&main, "https://example.test").is_err());
     }
 }
+
+#[tauri::command]
+pub async fn managed_worker<R: tauri::Runtime>(
+    request: crate::managed::ManagedRequest,
+    app: tauri::AppHandle<R>,
+    webview: tauri::WebviewWindow<R>,
+) -> Result<Value, AppError> {
+    use tauri::Manager;
+    if webview.label() != "main" {
+        return Err(AppError {
+            code: "FORBIDDEN".into(),
+            message: "Only the main local window may enroll a device".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<std::sync::Mutex<Worker>>()
+            .lock()
+            .map_err(|_| AppError::new("Worker lock failed"))?
+            .managed(request)
+    })
+    .await
+    .map_err(|_| AppError::new("Managed worker task failed"))?
+}

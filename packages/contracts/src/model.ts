@@ -73,7 +73,9 @@ export interface Queue {
   enqueue(job: Job): Promise<void>;
   claim(workerId: string): Promise<{ job: Job; lease: Lease } | null>;
   heartbeat(lease: Lease): Promise<Lease>;
-  checkpoint(lease: Lease, checkpoint: Checkpoint): Promise<void>;
+  checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null): Promise<void>;
+  shouldPause?(lease: Lease): Promise<boolean>;
+  pauseAtBoundary?(lease:Lease):Promise<boolean>;
   finish(lease: Lease, state: Job['state']): Promise<void>;
 }
 export type PublicationState = 'pending' | 'uploading' | 'creating' | 'checking' | 'promoting' | 'reconciling' |
@@ -90,12 +92,14 @@ export interface ModelContinuation {
   provider: 'openai-responses'; version: 1; binding: string;
   items: Record<string, unknown>[]; turns: number; retries: number; retryAt: number; transportExhausted: boolean; requestPending:boolean;
   inputTokens: number; outputTokens: number; responseId: string | null;
+  /** Prior attempts with unknown token/billing usage; never an estimate of charges. */
+  uncertainRequests?:number;
   terminal: 'final' | 'refused' | 'incomplete' | 'failed' | 'cancelled' | 'stalled' | null;
   summary: string; seen: Record<string, number>;
   recoverable?: 'account'|'configuration';
 }
 export interface ModelRunHooks { checkpoint(continuation: ModelContinuation): Promise<void> }
-export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; providerResponseId?: string; continuation?: ModelContinuation }
+export interface ModelResult { summary: string; inputTokens: number; outputTokens: number; uncertainRequests?:number; providerResponseId?: string; continuation?: ModelContinuation }
 export interface ModelPort {
   readonly retryOwner?: 'adapter';
   readonly identity?: string;

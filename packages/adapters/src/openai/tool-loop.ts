@@ -59,6 +59,7 @@ export function validateContinuation(value: unknown, binding: string): ModelCont
         (value.turns as number) > 48 || (value.retries as number) > 3 || typeof value.transportExhausted !== 'boolean' || typeof value.requestPending !== 'boolean' || typeof value.summary !== 'string' ||
         (value.responseId !== null && typeof value.responseId !== 'string') || ![null, 'final', 'refused', 'incomplete', 'failed', 'cancelled', 'stalled'].includes(value.terminal as null) ||
         (value.recoverable!==undefined&&(!['account','configuration'].includes(String(value.recoverable))||value.terminal!=='failed'))||
+        (value.uncertainRequests!==undefined&&(!Number.isSafeInteger(value.uncertainRequests)||(value.uncertainRequests as number)<0||(value.uncertainRequests as number)>1000))||
         !record(value.seen) || !Object.entries(value.seen).every(([key, n]) => /^[0-9a-f]{64}$/.test(key) && Number.isSafeInteger(n) && (n as number) > 0) || JSON.stringify(value).length > 1000000)
         throw new AppError('INVALID_INPUT', 'Provider continuation does not match this operation or is corrupt.');
     const calls = new Set<string>(), outputs = new Set<string>();

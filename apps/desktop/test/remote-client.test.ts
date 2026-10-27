@@ -1,7 +1,18 @@
 import {test,expect} from 'vitest';
-import {RemoteClient} from '../src/lib/remote-client.js';
+import {RemoteClient,sessionView} from '../src/lib/remote-client.js';
 import {selectClient,desktopClient} from '../src/lib/desktop-client.js';
 const id='11111111-1111-4111-8111-111111111111';
+test('generation capability is explicit while publication remains unavailable',()=>{
+ const session={principal:{userId:id,role:'admin'},mode:'managed',capabilities:{admin:true,edit:true,generation:true,publish:false,export:false,preview:true,nativeModelSettings:false}};
+ expect(sessionView(session).capabilities.generation).toBe(true);
+ expect(()=>sessionView({...session,capabilities:{...session.capabilities,publish:true}})).toThrow();
+});
+test('worker list validates heartbeat and last stage while rejecting credential fields',async()=>{
+ let data:unknown=[{id,name:'Machine',paused:false,revoked:false,lastHeartbeat:1000,jobs:[{id,siteId:id,stage:'generate',state:'running'}]}];
+ const client=new RemoteClient('https://control.test',async()=>'fixture',async()=>Response.json(data));
+ expect(await client.request('worker.list')).toEqual(data);
+ data=[{...(data as any[])[0],token:'private'}];await expect(client.request('worker.list')).rejects.toMatchObject({code:'INVALID_INPUT'});
+});
 test('remote DTO rejects private jobs and remote failure never invokes native fallback',async()=>{
  const site={id,domain:'test.example',ownerId:id,assignedUserIds:[],input:{domain:'test.example'},revision:0,draftId:null,publishedId:null,generationStatus:'queued',domainStatus:'unconfigured',job:{id,siteId:id,kind:'generate',stage:'brief',state:'queued',checkpointId:null,baseRevision:0,providerRecovery:{secret:'private'}}};
  const client=new RemoteClient('https://control.test',async()=>'fixture',async()=>Response.json({items:[site],nextCursor:null}));

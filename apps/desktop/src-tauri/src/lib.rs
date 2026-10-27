@@ -1,4 +1,5 @@
 mod commands;
+mod managed;
 mod remote_preview;
 mod secrets;
 mod worker;
@@ -14,6 +15,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::dispatch,
             commands::model_settings,
+            commands::managed_worker,
             remote_preview::open_remote_preview
         ])
         .build(tauri::generate_context!())

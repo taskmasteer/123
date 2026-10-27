@@ -47,11 +47,7 @@ export async function readProviderJson(response: Response, maxBytes = 1000000): 
         throw new AppError('NEEDS_ATTENTION', 'Malformed provider response.');
     }
 }
-export function createResponsesModel(config: ResponsesConfig, transport: typeof fetch = fetch, timing = { now: Date.now, delay: (ms: number, signal: AbortSignal) => sleep(ms, undefined, { signal }) }): ModelPort {
-    validateModelConfig(config);
-    const bindingFor=(request:ModelRequest,model:string)=>digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, model]);
-    const initialItems=(request:ModelRequest)=>[{type:'message',role:'user',content:JSON.stringify({domain:request.site.domain,about:request.site.input.about,conversation:request.conversation,instruction:request.instruction})}];
-    function canRecover(value:unknown,diagnostic?:string):boolean {
+export function canRecover(value:unknown,diagnostic?:string):boolean {
         if(!record(value)||typeof value.binding!=='string')return false;
         let state:ModelContinuation;try{state=validateContinuation(value,value.binding);}catch{return false;}
         if(state.terminal!=='failed'||state.requestPending||state.transportExhausted)return false;
@@ -61,6 +57,11 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
         return state.recoverable==='account'||state.recoverable==='configuration'||diagnostic==='Provider quota requires account attention.'||
             /^Provider rejected the configured model request \(HTTP (400|401|402|403|404|422)\)\.$/.test(diagnostic??'');
     }
+
+export function createResponsesModel(config: ResponsesConfig, transport: typeof fetch = fetch, timing = { now: Date.now, delay: (ms: number, signal: AbortSignal) => sleep(ms, undefined, { signal }) }): ModelPort {
+    validateModelConfig(config);
+    const bindingFor=(request:ModelRequest,model:string)=>digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, model]);
+    const initialItems=(request:ModelRequest)=>[{type:'message',role:'user',content:JSON.stringify({domain:request.site.domain,about:request.site.input.about,conversation:request.conversation,instruction:request.instruction})}];
     return { retryOwner: 'adapter', identity: `openai:${config.model}`, canRecover,
         recover(request,previous,context){
             const previousModel=context.previousIdentity.startsWith('openai:')?context.previousIdentity.slice(7):'';
@@ -83,6 +84,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 throw new AppError('NEEDS_ATTENTION', 'Provider replay exceeded its private storage limit.'); await hooks?.checkpoint(structuredClone(state)); }
             async function terminal(kind: NonNullable<ModelContinuation['terminal']>): Promise<never> { state.terminal = kind; await checkpoint(); throw new AppError('NEEDS_ATTENTION', `Model response ${kind}.`); }
             async function retry(response?: Response) {
+                if(!response&&state.requestPending)state.uncertainRequests=(state.uncertainRequests??0)+1;
                 state.requestPending = false;
                 if (state.retries >= 3) {
                     state.transportExhausted = true;
@@ -107,7 +109,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
             while (true) {
                 signal.throwIfAborted();
                 if (state.terminal === 'final')
-                    return { summary: state.summary, inputTokens: state.inputTokens, outputTokens: state.outputTokens, ...(state.responseId ? { providerResponseId: state.responseId } : {}), continuation: state };
+                    return { summary: state.summary, inputTokens: state.inputTokens, outputTokens: state.outputTokens, ...(state.uncertainRequests?{uncertainRequests:state.uncertainRequests}:{}), ...(state.responseId ? { providerResponseId: state.responseId } : {}), continuation: state };
                 if (state.terminal)
                     throw new AppError('NEEDS_ATTENTION', `Model response ${state.terminal}.`);
                 if (state.transportExhausted)

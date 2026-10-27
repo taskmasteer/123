@@ -18,6 +18,7 @@ import { createImageGenerator } from '../../../packages/adapters/src/openai/imag
 import { FakePublication } from '../../../packages/adapters/src/fake-publication.js';
 import { createCheckpointStore } from './checkpoints.js';
 import { runJob } from './pipeline.js';
+import {createManagedRuntime} from './managed-runtime.js';
 import type { WorkerDeps } from './pipeline.js';
 import { parseDesktopRequest, parseModelConfiguration } from './desktop-protocol.js';
 import { validateSite } from './validation/browser.js';
@@ -39,16 +40,19 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     let pumping: Promise<void> | null = null, closed = false;
     let mode:'demo'|'live'|'blocked'=options.native?'blocked':'demo', modelName:string|null=null,imageModel:string|null=null;
     let credentialsAbort=new AbortController(),configuring=false;
-    let usage:{inputTokens:number;outputTokens:number}|undefined;
+    let usage:{inputTokens:number;outputTokens:number;uncertainRequests?:number}|undefined;
+    let managedMode=false;
     const deps:WorkerDeps & {queue:typeof queue} = { sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
         workspace: join(root, 'attempts'), validate: (files: Parameters<typeof validateSite>[0]) => validateSite(files, { screenshotRoot: validationRoot }) };
     const editing = createEditing({ ...deps, store: await createLocalEditingStore(root), ids: { next: randomUUID } });
-    function ready(){return !closed&&!configuring&&mode!=='blocked';}
+    const managedRuntime=createManagedRuntime(()=>deps,()=>mode==='live'&&!configuring&&!closed,options.transport);
+    function ready(){return !closed&&!configuring&&!managedMode&&mode!=='blocked';}
     async function updateUsage(jobId:string){
         const job=await queue.get(jobId);if(!job?.checkpointId)return;
         const {state}=await checkpoints.load(job.checkpointId);
         const records=[...(Array.isArray(state.transcript)?state.transcript:[]),state.continuation].filter(record);
-        if(records.length)usage=records.reduce<{inputTokens:number;outputTokens:number}>((total,item)=>({inputTokens:total.inputTokens+(Number.isSafeInteger(item.inputTokens)?Number(item.inputTokens):0),outputTokens:total.outputTokens+(Number.isSafeInteger(item.outputTokens)?Number(item.outputTokens):0)}),{inputTokens:0,outputTokens:0});
+        if(records.length)usage=records.reduce<{inputTokens:number;outputTokens:number;uncertainRequests:number}>((total,item)=>({inputTokens:total.inputTokens+(Number.isSafeInteger(item.inputTokens)?Number(item.inputTokens):0),outputTokens:total.outputTokens+(Number.isSafeInteger(item.outputTokens)?Number(item.outputTokens):0),uncertainRequests:total.uncertainRequests+(Number.isSafeInteger(item.uncertainRequests)?Number(item.uncertainRequests):0)}),{inputTokens:0,outputTokens:0,uncertainRequests:0});
+        if(usage?.uncertainRequests===0)delete usage.uncertainRequests;
     }
     async function allSites() {
         const items: Site[] = [];
@@ -128,7 +132,18 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         return { site, revision, validation: saved.state.validation };
     }
     return {
+        async managed(method:string,params:unknown){
+            if(!options.native)throw new AppError('FORBIDDEN','Требуется нативный канал.');
+            if(method==='managed.start'){
+                if(active.size||pumping)throw new AppError('CONFLICT','Дождитесь завершения локальных заданий.');
+                const result=await managedRuntime.request(method,params);managedMode=true;return result;
+            }
+            const result=await managedRuntime.request(method,params);
+            if(method==='managed.stop'||method==='managed.revoke')managedMode=false;
+            return result;
+        },
         async configure(value:unknown) {
+            await managedRuntime.stop();
             const config=parseModelConfiguration(value);
             configuring=true;credentialsAbort.abort();
             await pumping;await Promise.allSettled([...active]);
@@ -248,6 +263,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         async close() {
             if (closed) return;
             closed = true;
+            await managedRuntime.stop();
             clearInterval(timer);
             abort.abort();
             await pumping;
