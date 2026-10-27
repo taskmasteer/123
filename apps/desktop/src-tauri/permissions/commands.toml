@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "desktop-dispatch"
 description = "Allows typed private-pipe desktop requests from the main webview."
-commands.allow = ["dispatch","model_settings"]
+commands.allow = ["dispatch","model_settings", "open_remote_preview"]

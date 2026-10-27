@@ -6,7 +6,8 @@
   },
   "include": [
     "packages/*/src/**/*.ts",
-    "apps/*/src/**/*.ts"
+    "apps/*/src/**/*.ts",
+    "apps/control/api/**/*.ts"
   ],
   "exclude": [
     "apps/desktop"

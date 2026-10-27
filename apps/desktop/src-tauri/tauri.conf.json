@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Site Factory — локальное демо",
+        "title": "Site Factory",
         "width": 1280,
         "height": 800,
         "minWidth": 1040,
@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost https:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
       "capabilities": [
         "main"
       ]

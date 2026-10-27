@@ -34,7 +34,7 @@ export interface Lease { jobId: string; workerId: string; generation: number; ex
 export interface ValidationReport {
   ok: boolean; issues: { code: string; path?: string; message: string }[]; screenshotIds: string[];
 }
-export type AppErrorCode = 'INVALID_INPUT' | 'DUPLICATE_DOMAIN' | 'FORBIDDEN' | 'NOT_FOUND' | 'CONFLICT' |
+export type AppErrorCode = 'UNAUTHENTICATED' | 'UNAVAILABLE' | 'INVALID_INPUT' | 'DUPLICATE_DOMAIN' | 'FORBIDDEN' | 'NOT_FOUND' | 'CONFLICT' |
   'STALE_LEASE' | 'PROVIDER_WAIT' | 'NEEDS_ATTENTION';
 export class AppError extends Error {
   constructor(public readonly code: AppErrorCode, message: string, options?: ErrorOptions) {

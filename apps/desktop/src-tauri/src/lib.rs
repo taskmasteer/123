@@ -1,4 +1,5 @@
 mod commands;
+mod remote_preview;
 mod secrets;
 mod worker;
 use tauri::Manager;
@@ -12,7 +13,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::dispatch,
-            commands::model_settings
+            commands::model_settings,
+            remote_preview::open_remote_preview
         ])
         .build(tauri::generate_context!())
         .expect("start desktop");

@@ -21,4 +21,8 @@ function message(error:unknown){
  if(typeof error==='object'&&error!==null&&'message'in error)return String(error.message);
  return 'Исполнитель недоступен. Перезапустите приложение и повторите операцию.';
 }
-export const desktopClient=new DesktopClient();
+export interface Client {request<T>(method:string,params?:unknown):Promise<T>;modelSettings<T>(request:Parameters<DesktopClient['modelSettings']>[0]):Promise<T>;dispose?():void}
+const localClient=new DesktopClient();
+let activeClient:Client=localClient;
+export function selectClient(client:Client|'local'){activeClient.dispose?.();activeClient=client==='local'?localClient:client;}
+export const desktopClient:Client={request:(method,params)=>activeClient.request(method,params),modelSettings:request=>activeClient.modelSettings(request)};
