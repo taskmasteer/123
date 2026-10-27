@@ -15,3 +15,13 @@ test('remote uses current session token and validates server error envelopes',as
  await client.request('site.list');token='two';await client.request('site.list');expect(seen).toEqual(['Bearer one','Bearer two']);
  const invalid=new RemoteClient('https://control.test',async()=>'fixture',async()=>Response.json({error:{code:'UNAVAILABLE',message:'safe',privateKey:'must reject'},requestId:'fixture'},{status:503}));await expect(invalid.request('site.list')).rejects.toMatchObject({code:'INVALID_INPUT'});
 });
+test('remote registry follows an explicit validated cursor without fetching other pages on its own',async()=>{
+ const sites=Array.from({length:51},(_,i)=>({id:`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,domain:`site-${i+1}.example`,ownerId:id,assignedUserIds:[],input:{domain:`site-${i+1}.example`},revision:0,draftId:null,publishedId:null,generationStatus:'queued',domainStatus:'unconfigured',job:null}));
+ const cursor=sites[49]!.id,calls:string[]=[];
+ const client=new RemoteClient('https://control.test',async()=>'fixture',async input=>{const url=String(input);calls.push(url);return Response.json(url.includes('?')?{items:sites.slice(50),nextCursor:null}:{items:sites.slice(0,50),nextCursor:cursor});});
+ const first=await client.request<{items:typeof sites;nextCursor:string}>('site.list');expect(first.items).toHaveLength(50);expect(calls).toHaveLength(1);
+ const second=await client.request<{items:typeof sites;nextCursor:null}>('site.list',{cursor:first.nextCursor});
+ expect(second.items.map(s=>s.domain)).toEqual(['site-51.example']);expect(second.nextCursor).toBeNull();
+ expect(calls).toEqual(['https://control.test/sites','https://control.test/sites?cursor='+cursor]);
+ await expect(client.request('site.list',{cursor:'https://foreign.test/?token=bad'})).rejects.toMatchObject({code:'INVALID_INPUT'});expect(calls).toHaveLength(2);
+});

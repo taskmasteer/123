@@ -20,6 +20,9 @@ export default function App() {
   const [session,setSession]=useState<SessionView|null>(null);
   const [section, setSection] = useState('Сайты');
   const [sites, setSites] = useState<DesktopSite[]>([]);
+  const [pageCursors,setPageCursors]=useState<(string|null)[]>([null]);
+  const [nextCursor,setNextCursor]=useState<string|null>(null);
+  const cursor=pageCursors[pageCursors.length-1]??null;
   const [catalog, setCatalog] = useState<Catalog>({ styles: [], references: [] });
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
@@ -33,6 +36,10 @@ export default function App() {
   const [refresh, setRefresh] = useState(0);
   const editedSite = sites.find(site => site.id === editorId);
 
+  function changePage(cursors:(string|null)[]){
+    setPageCursors(cursors);setNextCursor(null);setSites([]);setLoaded(false);setLoading(true);setEditorId(null);
+  }
+
   async function loadCatalog() {
     try {
       setCatalog(await desktopClient.request<Catalog>('catalog.list'));
@@ -45,31 +52,32 @@ export default function App() {
   useEffect(() => { if(!managed||session)void loadCatalog().catch(() => {}); }, [managed,session]);
   useEffect(() => {
     if(managed&&!session){setLoading(false);return;}
+    setLoading(true);
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
         const [list, status, currentSession] = await Promise.all([
-          desktopClient.request<{ items: DesktopSite[] }>('site.list'),
+          desktopClient.request<{ items: DesktopSite[];nextCursor?:string|null }>('site.list',managed&&cursor?{cursor}:{}),
           desktopClient.request<Device>('device.status'),
           managed?desktopClient.request<SessionView>('session'):Promise.resolve(null),
         ]);
         if (!stopped) {
-          setSites(list.items);
-          setLoaded(true);
+          if(currentSession&&session&&(currentSession.principal.userId!==session.principal.userId||currentSession.principal.role!==session.principal.role))changePage([null]);
+          else {setSites(list.items);setNextCursor(managed?list.nextCursor??null:null);setLoaded(true);}
           setDevice(status);
           if(currentSession&&JSON.stringify(currentSession)!==JSON.stringify(session)){setSession(currentSession);if(!currentSession.capabilities.admin&&['Пользователи','Подключения'].includes(section))setSection('Сайты');if(!currentSession.capabilities.edit)setEditorId(null);}
           setPollError('');
         }
       } catch (error) {
-        if (!stopped) { setPollError((error as Error).message); setDevice(null);if(managed&&['UNAUTHENTICATED','FORBIDDEN'].includes(String((error as {code?:string}).code))){setSession(null);setSites([]);setCatalog({styles:[],references:[]});setEditorId(null);setCreating(false);setSection('Режим работы');} }
+        if (!stopped) { setPollError((error as Error).message); setDevice(null);if(managed&&['UNAUTHENTICATED','FORBIDDEN'].includes(String((error as {code?:string}).code))){setSession(null);changePage([null]);setCatalog({styles:[],references:[]});setEditorId(null);setCreating(false);setSection('Режим работы');} }
       } finally {
         if (!stopped) { setLoading(false); timer = setTimeout(() => void poll(), 600); }
       }
     }
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [refresh,managed,session]);
+  }, [refresh,managed,session,cursor]);
   async function action(method: string, site: DesktopSite) {
     try {
       await desktopClient.request(method, method === 'job.retry' ? { siteId: site.id } : { siteId: site.id, revisionId: site.publishedId });
@@ -96,7 +104,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <h1>{section === 'Сайты' && editedSite ? editedSite.domain : section}</h1>
-            {section === 'Сайты' ? <span className="muted">{managed?`${sites.length} сайтов в общем реестре · ${session?.principal.role??'требуется вход'}`:editedSite ? `Правки сайта · ${device?.mode==='live'?'OpenAI':'локальный режим'}` : loaded ? `${sites.length} сайтов в локальном реестре` : 'Загрузка локального реестра'}</span> : null}
+            {section === 'Сайты' ? <span className="muted">{managed?`${sites.length} сайтов на странице · ${session?.principal.role??'требуется вход'}`:editedSite ? `Правки сайта · ${device?.mode==='live'?'OpenAI':'локальный режим'}` : loaded ? `${sites.length} сайтов в локальном реестре` : 'Загрузка локального реестра'}</span> : null}
           </div>
           {section === 'Сайты' ? editedSite ? <button onClick={() => setEditorId(null)}>← Сайты</button> : <button className="primary" disabled={managed&&!session} onClick={() => setCreating(true)}>Создать сайт</button> : null}
         </header>
@@ -104,7 +112,7 @@ export default function App() {
           {pollError ? <div role="alert" className="error-banner"><strong>Не удалось обновить состояние</strong><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить состояние</button></div> : null}
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => {})}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
-          {section === 'Режим работы'?<Login managed={managed} onStart={()=>{setManaged(true);setSession(null);setSites([]);setCatalog({styles:[],references:[]});setDevice(null);setLoaded(false);setPollError('');setCatalogError('');}} onConnected={value=>{setSession(value);setSection('Сайты');setRefresh(v=>v+1);}} onLocal={()=>{setManaged(false);setSession(null);setSites([]);setLoaded(false);setSection('Сайты');setRefresh(v=>v+1);}}/>:section==='Пользователи'&&session?.capabilities.admin?<UsersSettings/>:section==='Подключения'&&session?.capabilities.admin?<IntegrationsSettings/>:section === 'Сайты' ? editedSite ? (
+          {section === 'Режим работы'?<Login managed={managed} onStart={()=>{setManaged(true);setSession(null);changePage([null]);setCatalog({styles:[],references:[]});setDevice(null);setLoaded(false);setPollError('');setCatalogError('');}} onConnected={value=>{setSession(value);setSection('Сайты');setRefresh(v=>v+1);}} onLocal={()=>{setManaged(false);setSession(null);changePage([null]);setSection('Сайты');setRefresh(v=>v+1);}}/>:section==='Пользователи'&&session?.capabilities.admin?<UsersSettings/>:section==='Подключения'&&session?.capabilities.admin?<IntegrationsSettings/>:section === 'Сайты' ? editedSite ? (
             <SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed} modelMode={device?.mode??'blocked'} onChanged={next => {
               if (next) setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
               setRefresh(value => value + 1);
@@ -113,6 +121,11 @@ export default function App() {
             <>
               <div className="context-line"><span>Реестр доменов</span><span className="muted">{managed?'Общие данные · задания ожидают подключения очереди':'Создание → проверка → локальная версия'}</span></div>
               {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList sites={sites} loading={loading} canEdit={!managed||!!session?.capabilities.edit} canRetry={!managed} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site=>managed?void action('preview.open',site):setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)} />}
+              {managed&&session?<nav className="row-actions" aria-label="Страницы общего реестра">
+                <button disabled={loading||pageCursors.length===1} onClick={()=>{setPollError('');changePage(pageCursors.slice(0,-1));}}>Предыдущая страница</button>
+                <span aria-live="polite">Страница {pageCursors.length}</span>
+                <button disabled={loading||!nextCursor} onClick={()=>{if(nextCursor){setPollError('');changePage([...pageCursors,nextCursor]);}}}>Следующая страница</button>
+              </nav>:null}
               <p className="workspace-note">{managed?'Управляемый режим. Генерация, публикация и экспорт пока не подключены.':'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
             </>
           ) : section === 'Референсы' ? <ReferenceLibrary catalog={catalog} onChange={loadCatalog} canManage={!managed||!!session?.capabilities.admin} managed={managed} /> : !managed ? (
@@ -125,7 +138,7 @@ export default function App() {
           ) : <p>Этот раздел недоступен для текущей роли.</p>}
         </div>
       </main>
-      {creating ? <CreateSiteDialog styles={catalog.styles} references={catalog.references} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); setRefresh(value => value + 1); }} /> : null}
+      {creating ? <CreateSiteDialog styles={catalog.styles} references={catalog.references} onClose={() => setCreating(false)} onCreated={() => { setCreating(false);if(managed)changePage([null]);setRefresh(value => value + 1); }} /> : null}
       {preview ? <Screenshot site={preview} onClose={() => setPreview(null)} /> : null}
     </div>
   );

@@ -1,8 +1,8 @@
-import {Pool} from 'pg';
+import {Pool,type PoolConfig} from 'pg';
 import {readFile,readdir} from 'node:fs/promises';
-export async function database(){
+export async function database(options:Pick<PoolConfig,'max'|'connectionTimeoutMillis'|'statement_timeout'>={}){
  if(!process.env.SITE_FACTORY_TEST_DB)throw new Error('Run npm run test:integration (dedicated PostgreSQL required).');
- const pool=new Pool(JSON.parse(process.env.SITE_FACTORY_TEST_DB));
+ const pool=new Pool({...JSON.parse(process.env.SITE_FACTORY_TEST_DB),...options});
  await pool.query(`drop schema if exists private cascade; drop schema public cascade; create schema public; drop schema if exists auth cascade; create schema auth;
  do $$ begin if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin nosuperuser nobypassrls; create role anon nologin nosuperuser nobypassrls; end if; end $$;
  create table auth.users(id uuid primary key); create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$; grant usage on schema public,auth to authenticated,anon; grant execute on function auth.uid() to authenticated,anon;`);

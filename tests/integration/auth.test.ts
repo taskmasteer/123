@@ -36,6 +36,18 @@ test('admin invitations reconcile provider success and catalogue/assignments sta
  }finally{await pool.end();}
 });
 test.skip('managed Supabase Auth/sign-in/refresh/invitation/PostgREST acceptance requires an authorized test project and credentials',()=>{});
+test('managed registry cursor exposes all51 authorized rows without foreign rows or duplicate pages',async()=>{
+ const pool=await database();try{
+  await seedUsers(pool);const repo=new SupabaseRepository(pool);
+  await pool.query("insert into public.sites(id,domain,owner_id,input) select ('00000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,'registry-'||n||'.example',$1,jsonb_build_object('domain','registry-'||n||'.example') from generate_series(1,51) n",[identities.user]);
+  await repo.create({domain:'foreign-page.example'},{userId:identities.spec,role:'spec-user'});
+  const app=createApp({repository:repo,auth:{verifyUser:async()=>({userId:identities.user,role:'user'}),verifyWorker:async()=>{throw Error('unused');}}});
+  const get=async(path:string)=>app(new Request('https://control.test'+path,{headers:{authorization:'Bearer fixture'}}));
+  const first=await (await get('/sites')).json();expect(first.items).toHaveLength(50);expect(first.nextCursor).toBe(first.items[49].id);
+  const second=await (await get('/sites?cursor='+first.nextCursor)).json();expect(second.items).toHaveLength(1);expect(second.nextCursor).toBeNull();
+  const rows=[...first.items,...second.items];expect(new Set(rows.map(row=>row.id)).size).toBe(51);expect(rows.every(row=>row.ownerId===identities.user)).toBe(true);expect(second.items[0].domain).toBe('registry-51.example');
+ }finally{await pool.end();}
+});
 test('HTTP role matrix, safe DTOs, concurrent admission, fresh demotion and worker revocation',async()=>{
  const pool=await database();try {await seedUsers(pool);const repo=new SupabaseRepository(pool);
  const {privateKey,publicKey}=await generateKeyPair('RS256'),jwk=await exportJWK(publicKey);jwk.kid='matrix';

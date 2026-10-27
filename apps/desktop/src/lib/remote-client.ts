@@ -25,12 +25,12 @@ export class RemoteClient {
  dispose(){this.onDispose?.();}
  async modelSettings<T>(_request:unknown):Promise<T>{throw new AppError('UNAVAILABLE','Настройки локальной модели доступны в локальном режиме.');}
  async request<T>(method:string,params:unknown={}):Promise<T>{
-  const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds']);
+  const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds','cursor']);
   if(method==='device.status')return {mode:'blocked',available:false,activeJobs:0,maxJobs:2,model:null,images:'disabled',storage:'managed',publication:'unavailable'} as T;
   let path:string,verb='GET',body:unknown;
   switch(method){
    case 'session':path='/session';break;
-   case 'site.list':path='/sites';break;
+   case 'site.list':path='/sites'+(p.cursor===undefined?'':'?cursor='+uuid(p.cursor));break;
    case 'site.create':path='/sites';verb='POST';body=p;break;
    case 'edit.list':path=`/sites/${uuid(p.siteId)}/candidates`;break;
    case 'chat.list':path=`/sites/${uuid(p.siteId)}/chat`;break;
