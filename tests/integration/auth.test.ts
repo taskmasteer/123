@@ -6,6 +6,7 @@ import {createApp} from '../../apps/control/src/app.js';
 import {SupabaseRepository} from '../../packages/adapters/src/supabase-repository.js';
 import {randomUUID} from 'node:crypto';
 import {bootstrapAdmin} from '../../apps/control/src/routes/admin.js';
+import {configuredInvitations} from '../../apps/control/src/invitations.js';
 test('cryptographic identity ignores metadata and resolves fresh membership',async()=>{
  const {privateKey,publicKey}=await generateKeyPair('RS256');
  const jwk=await exportJWK(publicKey); jwk.kid='fixture';
@@ -18,10 +19,17 @@ test('cryptographic identity ignores metadata and resolves fresh membership',asy
  await expect(auth.verifyWorker('revoked')).rejects.toMatchObject({code:'UNAUTHENTICATED'});
 });
 test('admin invitations reconcile provider success and catalogue/assignments stay admin-only',async()=>{
- const pool=await database();try{await seedUsers(pool);const repo=new SupabaseRepository(pool),invited=randomUUID();let attempts=0;const operationIds:string[]=[];
- const app=createApp({repository:repo,auth:{verifyUser:async id=>({userId:id,role:(await repo.membership(id))!}),verifyWorker:async()=>{throw new Error('unused');}},invitations:{ensureInvited:async(_email,operationId)=>{operationIds.push(operationId);expect((await pool.query("select count(*)::int n from pg_stat_activity where datname=current_database() and state='idle in transaction'")).rows[0].n).toBe(0);if(attempts++===0){await pool.query('insert into auth.users values($1)',[invited]);throw new Error('ambiguous provider fixture');}return {verifiedUserId:invited};}}});
+ const pool=await database();try{await seedUsers(pool);const repo=new SupabaseRepository(pool),invited=randomUUID();let attempts=0,failRead=true;
+ const invitations=configuredInvitations(repo,{SUPABASE_URL:'https://auth.example',SUPABASE_SERVICE_ROLE_KEY:'fixture'},async(input,init)=>{
+  expect((await pool.query("select count(*)::int n from pg_stat_activity where datname=current_database() and state='idle in transaction'")).rows[0].n).toBe(0);
+  const user={id:invited,email:'invite@example.test',aud:'authenticated'};
+  if(init!.method==='POST'){attempts++;await pool.query('insert into auth.users values($1)',[invited]);return Response.json(user);}
+  if(String(input).includes('?'))return Response.json({users:[]});
+  if(failRead){failRead=false;throw new Error('read after acknowledged invite failed');}return Response.json(user);
+ });
+ const app=createApp({repository:repo,auth:{verifyUser:async id=>({userId:id,role:(await repo.membership(id))!}),verifyWorker:async()=>{throw new Error('unused');}},invitations:invitations!});
  const request=(actor:string,path:string,method='GET',body?:unknown)=>app(new Request('https://control.test'+path,{method,headers:{authorization:'Bearer '+actor,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}));
- const body={email:'invite@example.test',role:'spec-user'};expect((await request(identities.user,'/admin/invitations','POST',body)).status).toBe(403);expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(503);expect(await repo.membership(invited)).toBeNull();expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(200);expect(operationIds[0]).toBe(operationIds[1]);expect(await repo.membership(invited)).toBe('spec-user');expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(200);expect(attempts).toBe(2);
+ const body={email:'invite@example.test',role:'spec-user'};expect((await request(identities.user,'/admin/invitations','POST',body)).status).toBe(403);expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(503);expect(await repo.membership(invited)).toBeNull();const operation=(await pool.query('select id from private.invitations')).rows[0].id;expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(200);expect((await pool.query('select operation_id from private.invitation_attempts')).rows[0].operation_id).toBe(operation);expect(await repo.membership(invited)).toBe('spec-user');expect((await request(identities.admin,'/admin/invitations','POST',body)).status).toBe(200);expect(attempts).toBe(1);
  await pool.query("insert into private.catalog values('style','fixture',$1)",[{id:'fixture',name:'Fixture',version:'1.0.0',enabled:true,referenceIds:[]}]);expect((await request(identities.spec,'/catalog/styles/fixture','PATCH',{enabled:false})).status).toBe(403);expect((await request(identities.admin,'/catalog/styles/fixture','PATCH',{enabled:false})).status).toBe(200);expect((await (await request(identities.user,'/catalog')).json()).styles[0].enabled).toBe(false);
  const site=await repo.create({domain:'assigned.example'},{userId:identities.user,role:'user'});expect((await request(identities.spec,`/admin/sites/${site.id}/assignments`,'PUT',{userIds:[identities.spec]})).status).toBe(403);expect((await request(identities.admin,`/admin/sites/${site.id}/assignments`,'PUT',{userIds:[identities.spec]})).status).toBe(200);expect((await request(identities.spec,'/sites/'+site.id)).status).toBe(200);
  await expect(bootstrapAdmin(repo,invited,async()=>({id:identities.user,email:'wrong@example.test'}))).rejects.toMatchObject({code:'FORBIDDEN'});await expect(bootstrapAdmin(repo,invited,async()=>({id:invited,email:'invite@example.test'}))).rejects.toMatchObject({code:'CONFLICT'});

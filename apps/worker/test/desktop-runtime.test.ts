@@ -49,7 +49,8 @@ it('reports returned token usage even when a live response refuses the job',asyn
  const request=(method:string,params:unknown={}):Promise<any>=>runtime.request({id:'usage',version:1,method,params});
  try{await runtime.configure({mode:'live',apiKey:'fixture-secret',model:'configured'});const created=await request('site.create',{domain:'usage.test'});
  await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state).toBe('needs_attention');
- expect(await request('device.status')).toMatchObject({usage:{inputTokens:9,outputTokens:4}});
+ // Terminal job persistence precedes async edit recovery and checkpoint usage publication.
+ await expect.poll(()=>request('device.status')).toMatchObject({usage:{inputTokens:9,outputTokens:4}});
  }finally{await runtime.close();}
 });
 it('native boot waits for private configuration, rotates calls and never falls back from a live error',async()=>{
