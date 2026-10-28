@@ -120,8 +120,8 @@ export class PostgresPublication {
             const operation = (await tx.query('select kind,operation_id from private.site_operations where site_id=$1', [r.site_id])).rows[0];
             if (current.resolution || operation?.kind !== 'publication' || operation.operation_id !== id)
                 throw new AppError('CONFLICT', 'Владение публикацией изменилось.');
-            // Commit before any fallible preparation: a crash or unavailable R2
-            // cannot make this oldest orphan monopolize the next machine tick.
+            // Back off incomplete attachment. Tick also uses this durable stamp
+            // for fair ordering, independent of failure duration/polling cadence.
             await tx.query("update private.publication_reservations set attachment_retry_at=clock_timestamp()+interval '15 seconds' where id=$1", [id]);
             return true;
         });
@@ -164,7 +164,8 @@ export class PostgresPublication {
             const existing = (await tx.query('select * from private.provider_publications where id=$1', [id])).rows[0];
             if (existing.manifest_hash !== hash || existing.account_id !== this.client.options.accountId || existing.editing_intent_id !== editingIntentId)
                 throw new AppError('CONFLICT', 'Настройки публикации изменились.');
-            await tx.query('update private.publication_reservations set attachment_retry_at=null where id=$1', [id]);
+            // Retain the ordering stamp when attachment succeeds. A newly
+            // materialized intent must not regain never-selected priority.
         });
         return this.view(id);
     }
@@ -468,7 +469,15 @@ export class PostgresPublication {
         await tx.query("update private.provider_publications set settlement='settled',phase='published' where id=$1", [id]);
     }
     async tick(): Promise<void> {
-        const due = (await this.repo.pool.query("select r.id from private.publication_reservations r join private.site_operations o on o.site_id=r.site_id and o.operation_id=r.id and o.kind='publication' left join private.provider_publications p on p.id=r.id where r.resolution is null and ((p.id is null and (r.attachment_retry_at is null or r.attachment_retry_at<=clock_timestamp())) or (p.settlement='pending' and (p.retry_at is null or p.retry_at<=clock_timestamp()) and (p.step_expires is null or p.step_expires<=clock_timestamp()))) order by r.created_at,r.id limit 1")).rows[0];
+        const due = await this.repo.transaction(async (tx) => {
+            const selected = (await tx.query("select r.id,r.attachment_retry_at::text selected_at from private.publication_reservations r join private.site_operations o on o.site_id=r.site_id and o.operation_id=r.id and o.kind='publication' left join private.provider_publications p on p.id=r.id where r.resolution is null and ((p.id is null and (r.attachment_retry_at is null or r.attachment_retry_at<=clock_timestamp())) or (p.settlement='pending' and (p.retry_at is null or p.retry_at<=clock_timestamp()) and (p.step_expires is null or p.step_expires<=clock_timestamp()))) order by r.attachment_retry_at nulls first,r.created_at,r.id limit 1")).rows[0];
+            if (!selected)
+                return null;
+            await this.lockReservation(tx, selected.id);
+            // Preserve lock order and CAS the exact PostgreSQL timestamp text;
+            // another host's selection/attachment may have advanced it meanwhile.
+            return (await tx.query("update private.publication_reservations set attachment_retry_at=clock_timestamp()+interval '15 seconds' where id=$1 and resolution is null and attachment_retry_at is not distinct from $2::timestamptz returning id", [selected.id, selected.selected_at])).rows[0] ?? null;
+        });
         if (due)
             await this.advancePublication(due.id);
     }

@@ -118,8 +118,11 @@ it.each([false, true])('generation attachment outbox survives process loss, expi
         const recovered = () => new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
         const first = application(recovered()), second = application(recovered());
         const get = f.storage.get.bind(f.storage);
-        f.storage.get = async (key) => { if (key.startsWith('private/checkpoints/'))
-            throw new Error('temporary R2 outage'); return get(key); };
+        f.storage.get = async (key) => {
+            if (key.startsWith('private/checkpoints/'))
+                throw new Error('temporary R2 outage');
+            return get(key);
+        };
         expect((await request(first, '/worker/publications/tick', {})).status).toBe(503);
         expect((await f.pool.query('select count(*) from private.provider_publications')).rows[0].count).toBe('0');
         expect(f.calls).toEqual([]);
@@ -209,8 +212,11 @@ it('attachment outbox durably backs off an unreadable oldest reservation so anot
         const bad = await f.queue.reservePublication(claim.lease, { requestKey: claim.job.id + ':' + manifest.id, revisionId, manifestId: manifest.id, checkpointId: cp.id, expectedRevision: 0 });
         await f.pool.query("update private.publication_reservations set created_at=created_at-interval '1 day' where id=$1", [bad.id]);
         const get = f.storage.get.bind(f.storage);
-        f.storage.get = async (key) => { if (key.startsWith('private/checkpoints/' + site.id + '/'))
-            throw new Error('unreadable oldest checkpoint'); return get(key); };
+        f.storage.get = async (key) => {
+            if (key.startsWith('private/checkpoints/' + site.id + '/'))
+                throw new Error('unreadable oldest checkpoint');
+            return get(key);
+        };
         const recovered = () => new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
         await expect(recovered().tick()).rejects.toThrow('unreadable oldest checkpoint');
         await expect(recovered().tick()).resolves.toBeUndefined();
@@ -223,6 +229,94 @@ it('attachment outbox durably backs off an unreadable oldest reservation so anot
         expect((await f.repo.get(f.site.id))!.publishedId).toBe(f.binding.revisionId);
         expect(f.counts().createCount).toBe(1);
         expect((await f.pool.query('select kind,operation_id from private.site_operations where site_id=$1', [site.id])).rows[0]).toEqual({ kind: 'publication', operation_id: bad.id });
+    }
+    finally {
+        await f.pool.end();
+    }
+});
+it('durable tick fairness survives production error cadence and slow R2 failures with multiple healthy publications', async () => {
+    const f = await fixture();
+    try {
+        await f.queue.finish(f.claim.lease, 'waiting_provider');
+        async function reserve(domain: string) {
+            const site = await f.repo.create({ domain }, { userId: identities.admin, role: 'admin' }), claim = (await f.queue.claim(f.claim.lease.workerId))!;
+            expect(claim.job.siteId).toBe(site.id);
+            const manifest = await f.store.put(site.id, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('<h1>Fair publication ' + domain + '</h1>') }], '1'), revisionId = randomUUID();
+            const cp = await f.store.save({ ...claim.job, stage: 'publication' }, claim.lease, { jobId: claim.job.id, siteId: site.id, revisionId, revisionCreatedAt: 1, parentRevisionId: null, manifestId: manifest.id }, []);
+            await f.queue.checkpoint(claim.lease, cp, null);
+            const intent = await f.queue.reservePublication(claim.lease, { requestKey: claim.job.id + ':' + manifest.id, revisionId, manifestId: manifest.id, checkpointId: cp.id, expectedRevision: 0 });
+            await f.queue.finish(claim.lease, 'waiting_provider');
+            return { site, intent, revisionId };
+        }
+        const good = [{ site: f.site, intent: f.reservation, revisionId: f.binding.revisionId }, await reserve('fair-outbox.example'), await reserve('fair-materialized.example')], bad = await reserve('fair-unreadable.example');
+        await f.pool.query("update private.publication_reservations set created_at=created_at-interval '1 day' where id=$1", [bad.intent.id]);
+        const deployments = new Map<string, any>(), creates = new Map<string, number>();
+        let promotions = 0, failures = 0, ticks = 0;
+        const client = new VercelClient({ token: 'fixture', accountId: 'team_fixture', fetch: async (input, init) => {
+                const url = new URL(String(input)), path = url.pathname, site = good.find(g => path.includes(g.site.id) || path.includes(g.site.domain))?.site;
+                if (path.includes('/domains/') && path.startsWith('/v9/'))
+                    return Response.json({ name: site!.domain, verified: true });
+                if (path.startsWith('/v9/projects/'))
+                    return Response.json({ id: 'prj_' + site!.id, name: 'sf-' + site!.id, accountId: 'team_fixture', framework: null, buildCommand: '', installCommand: '' });
+                if (path.startsWith('/v6/domains/'))
+                    return Response.json({ misconfigured: false, recommendedCNAME: [{ rank: 1, value: 'fixture.vercel-dns.com' }] });
+                if (path === '/v2/files')
+                    return new Response(null, { status: 200 });
+                if (path === '/v13/deployments') {
+                    const body = JSON.parse(String(init!.body)), id = body.meta.sfSite;
+                    creates.set(id, (creates.get(id) ?? 0) + 1);
+                    const d = { id: 'dpl_' + id, projectId: body.project, meta: body.meta, readyState: 'READY' };
+                    deployments.set(d.id, d);
+                    return Response.json(d);
+                }
+                if (path.startsWith('/v13/deployments/'))
+                    return Response.json(deployments.get(path.split('/').at(-1)!));
+                if (path.includes('/promote/')) {
+                    promotions++;
+                    return new Response(null, { status: 202 });
+                }
+                if (path.startsWith('/v4/aliases/'))
+                    return Response.json({ alias: site!.domain, projectId: 'prj_' + site!.id, deploymentId: 'dpl_' + site!.id });
+                throw new Error('Unexpected fair publication provider route ' + path);
+            } });
+        const recovered = () => new PostgresPublication(f.queue, f.store, client, async () => ({ verifiedAt: 123456 }));
+        await recovered().attach(good[2]!.intent.id); // A materialized due step competes with two healthy outboxes.
+        // A controlled SQL-relative clock advances every stored deadline together.
+        // This preserves ordering and executes the production DB predicates without sleeps.
+        async function elapse(ms: number) {
+            await f.pool.query("update private.publication_reservations set attachment_retry_at=attachment_retry_at-($1::int*interval '1 millisecond')", [ms]);
+            await f.pool.query("update private.provider_publications set retry_at=retry_at-($1::int*interval '1 millisecond')", [ms]);
+            await f.pool.query("update private.provider_accounts set request_window=request_window-($1::int*interval '1 millisecond'),blocked_until=blocked_until-($1::int*interval '1 millisecond')", [ms]);
+        }
+        const get = f.storage.get.bind(f.storage);
+        f.storage.get = async (key) => { if (key.startsWith('private/checkpoints/' + bad.site.id + '/')) {
+            failures++;
+            await elapse(40000);
+            throw new Error('slow unreadable checkpoint');
+        } return get(key); };
+        const abort = new AbortController(), waits: number[] = [];
+        const queue = Object.assign(f.queue, { continuePublications: async () => { ticks++; try {
+                await recovered().tick();
+            }
+            finally {
+                if (ticks >= 120 || (await Promise.all(good.map(g => f.repo.get(g.site.id)))).every(site => site!.publishedId))
+                    abort.abort();
+            } } });
+        const unused = async () => { throw new Error('Unexpected generation during publication continuation'); };
+        const deps: WorkerDeps = { queue, sites: f.repo, artifacts: f.store, checkpoints: f.store,
+            revisions: { get: id => f.repo.revision(id), put: unused }, model: { run: unused },
+            clock: { now: Date.now }, publication: { advance: unused }, workspace: resolve('.local-state'), templates: { load: unused },
+            delay: async ms => { waits.push(ms); await elapse(ms); } };
+        await runWorker(deps, f.claim.lease.workerId, abort.signal);
+        expect(failures).toBeGreaterThan(1);
+        expect(waits).toContain(15000);
+        expect((await Promise.all(good.map(g => f.repo.get(g.site.id)))).map(site => site!.publishedId), JSON.stringify({ ticks, failures, creates: [...creates] })).toEqual(good.map(g => g.revisionId));
+        expect(waits).toContain(3000);
+        expect([...creates.values()]).toEqual([1, 1, 1]);
+        expect(promotions).toBe(3);
+        expect((await f.pool.query('select id from private.provider_publications where id=$1', [bad.intent.id])).rowCount).toBe(0);
+        expect((await f.pool.query('select resolution from private.publication_reservations where id=$1', [bad.intent.id])).rows[0].resolution).toBeNull();
+        expect((await f.pool.query('select kind,operation_id from private.site_operations where site_id=$1', [bad.site.id])).rows[0]).toEqual({ kind: 'publication', operation_id: bad.intent.id });
     }
     finally {
         await f.pool.end();
