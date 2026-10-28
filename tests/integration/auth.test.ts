@@ -72,8 +72,10 @@ test('HTTP role matrix, safe DTOs, concurrent admission, fresh demotion and work
  const rev=randomUUID(),manifest=randomUUID();await pool.query('insert into private.artifacts values($1,$2,$3,true)',[manifest,site.id,{}]);await pool.query("insert into revisions values($1,$2,null,$3,'published',1)",[rev,site.id,manifest]);await pool.query('update sites set published_id=$2 where id=$1',[site.id,rev]);await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"completed\"') where id=$1",[site.id]);
  const requests=await Promise.all([request('spec',`/sites/${site.id}/edits`,'POST',{instruction:'Keep private job data',expectedRevision:0}),request('spec',`/sites/${site.id}/edits`,'POST',{instruction:'Race',expectedRevision:0},other)]);
  expect(requests.map(r=>r.status).sort()).toEqual([200,409]);
+ const winner=requests.findIndex(r=>r.status===200),admitted=await requests[winner]!.json();
  const state=await repo.editingState(site.id);expect(state.candidates).toHaveLength(1);expect((await pool.query('select kind,operation_id from private.site_operations where site_id=$1',[site.id])).rows[0]).toEqual({kind:'job',operation_id:state.candidates[0]!.jobId});
- const list=await (await request('spec',`/sites/${site.id}/candidates`)).json();expect(list.candidates[0].job.edit).toBeUndefined();expect(list.candidates[0].instruction).toBe('Keep private job data');
+ expect(state.candidates[0]!.jobId).toBe(admitted.id);
+ const list=await (await request('spec',`/sites/${site.id}/candidates`)).json();expect(list.candidates[0].job.edit).toBeUndefined();expect(list.candidates[0].instruction).toBe(['Keep private job data','Race'][winner]);
  await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"needs_attention\"') where id=$1",[state.candidates[0]!.jobId]);
  expect((await request('spec',`/sites/${site.id}/candidates/${state.candidates[0]!.id}/reject`,'POST',{})).status).toBe(200);
  const admission=await repo.acquire({userId:identities.spec,role:'spec-user'},site.id);await pool.query("update private.site_operations set expires_at=clock_timestamp()-interval '1 second' where site_id=$1",[site.id]);await expect(repo.compareAndSet(site.id,0,{domainStatus:'changed'},admission)).rejects.toMatchObject({code:'STALE_LEASE'});await repo.release(admission);

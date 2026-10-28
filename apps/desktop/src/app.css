@@ -731,3 +731,7 @@ button[aria-pressed=true] {
 .worker-list table { table-layout:fixed; white-space:normal }
 .worker-list th, .worker-list td { padding:12px 8px; overflow-wrap:anywhere; vertical-align:top }
 .worker-list td:last-child button { display:block; margin-bottom:8px; max-width:100%; white-space:normal }
+.publication-panel table { table-layout:fixed; white-space:normal }
+.publication-panel th, .publication-panel td { overflow-wrap:anywhere; vertical-align:top }
+.publication-panel th:first-child { width:90px }
+.publication-panel td:first-child { white-space:nowrap }

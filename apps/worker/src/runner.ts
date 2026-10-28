@@ -32,7 +32,17 @@ export async function runWorker(deps: WorkerDeps, workerId: string, signal: Abor
             }
         }
     }
-    const results = await Promise.allSettled(Array.from({ length: maxParallelJobsPerDevice }, () => consume().catch(error => {
+    async function publications(){
+      if(!deps.queue.continuePublications)return;
+      while(!signal.aborted){
+        let wait=3000;
+        try{await deps.queue.continuePublications();}
+        catch(error){if(error instanceof AppError&&['UNAUTHENTICATED','STALE_LEASE'].includes(error.code))throw error;wait=15000;}
+        try{await (deps.delay??((ms,abort)=>delay(ms,undefined,{signal:abort})))(wait,signal);}catch{if(!signal.aborted)throw new AppError('UNAVAILABLE','Ожидание публикации прервано.');}
+      }
+    }
+    const tasks=[...Array.from({ length:maxParallelJobsPerDevice },()=>consume),publications];
+    const results = await Promise.allSettled(tasks.map(task => task().catch(error => {
         stop.abort();
         throw error;
     })));

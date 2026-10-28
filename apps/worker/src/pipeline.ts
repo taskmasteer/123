@@ -76,6 +76,15 @@ const illustration = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 1
  */
 export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, signal: AbortSignal): Promise<void> {
   let lease = initialLease; let state: PipelineState | undefined; let files: ArtifactFile[] = []; let stage = job.stage;
+  async function serverSettled() {
+    if(job.kind!=='generate'||!deps.publication.settlement)return false;
+    const receipt=await deps.publication.settlement();if(!receipt)return false;
+    if(receipt.jobId!==job.id||receipt.siteId!==job.siteId||receipt.checkpointId!==job.checkpointId||receipt.expectedRevision!==job.baseRevision||
+      receipt.requestKey!==`${job.id}:${receipt.manifestId}`||(state&&(receipt.revisionId!==state.revisionId||receipt.manifestId!==state.manifestId||receipt.requestKey!==state.intentId)))throw new AppError('CONFLICT','Подтверждение публикации относится к другому снимку.');
+    return true;
+  }
+  // Settlement ends the job lease. A trusted exact receipt must precede lease-bound reads.
+  if(await serverSettled())return;
   const localAbort = new AbortController(); const activeSignal = AbortSignal.any([signal, localAbort.signal]);
   let leaseError: unknown; let heartbeat: Promise<void> = Promise.resolve();
   const timer = setInterval(() => {
@@ -112,7 +121,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
           (job.kind === 'generate' && (!state.revisionId || state.revisionCreatedAt === null)))) throw new AppError('INVALID_INPUT', 'Publication checkpoint is incomplete or has a different intent.');
     }
     // A crash between site CAS and the final checkpoint is reconciled without another publication.
-    if (job.kind === 'generate' && state?.revisionId && site.publishedId === state.revisionId && site.revision === job.baseRevision + 1) {
+    if (!deps.publication.settlement && job.kind === 'generate' && state?.revisionId && site.publishedId === state.revisionId && site.revision === job.baseRevision + 1) {
       const revision = await deps.revisions.get(state.revisionId);
       if (!revision || revision.siteId !== site.id || revision.manifestId !== state.manifestId || revision.kind !== 'published') throw new AppError('INVALID_INPUT', 'Published revision does not match the checkpoint.');
       await save('completed'); await deps.queue.finish(lease, 'completed'); return;
@@ -247,8 +256,10 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
       // Edits produce a validated candidate only. The editor's explicit accept/reject flow owns draft CAS.
       if (job.kind === 'generate') {
         await check(); const publication = await deps.publication.advance(state.intentId!);
+        if(await serverSettled())return;
         if (publication === 'needs_attention') throw new AppError('NEEDS_ATTENTION', 'Publication needs attention.');
         if (publication !== 'published') { await deps.queue.finish(lease, 'waiting_provider'); return; }
+        if(deps.publication.settlement)throw new AppError('CONFLICT','Сервер ещё не подтвердил установку версии.');
         await check();
         await deps.revisions.put({ id: state.revisionId!, siteId: site.id, parentId: state.parentRevisionId, manifestId: state.manifestId!, kind: 'published', createdAt: state.revisionCreatedAt! });
         await deps.sites.compareAndSet(site.id, job.baseRevision, { publishedId: state.revisionId, draftId: null, generationStatus: 'completed' });
@@ -258,6 +269,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     await deps.queue.finish(lease, 'completed');
   } catch (error) {
     if(error instanceof StagePaused)return;
+    if(await serverSettled())return;
     if (leaseError || (error instanceof AppError && error.code === 'STALE_LEASE')) throw error;
     if (state && !activeSignal.aborted) { state.error = error instanceof Error ? error.message : String(error); await save(stage); }
     await deps.queue.finish(lease, activeSignal.aborted ? 'paused' : error instanceof AppError && error.code === 'PROVIDER_WAIT' ? 'waiting_provider' : 'needs_attention');

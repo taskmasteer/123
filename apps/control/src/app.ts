@@ -17,7 +17,9 @@ import {projectPreview} from './preview.js';
 import type {PostgresQueue} from '../../../packages/adapters/src/postgres-queue.js';
 import {jobsRoute} from './routes/jobs.js';
 import {jobControlsRoute} from './routes/job-controls.js';
-export interface AppDependencies {auth:Auth;repository:SupabaseRepository;queue?:PostgresQueue;store?:R2Store;invitations?:InvitationProvider;previewKey?:Uint8Array;publicOrigin?:string;allowedOrigins?:string[]}
+import type {PostgresPublication} from '../../../packages/adapters/src/postgres-publication.js';
+import {publicationRoute} from './routes/publication.js';
+export interface AppDependencies {auth:Auth;repository:SupabaseRepository;queue?:PostgresQueue;publication?:PostgresPublication;store?:R2Store;invitations?:InvitationProvider;previewKey?:Uint8Array;publicOrigin?:string;allowedOrigins?:string[]}
 async function body(request:Request){if(request.method==='GET'||request.method==='HEAD')return {};if(!request.headers.get('content-type')?.startsWith('application/json'))throw new AppError('INVALID_INPUT','Требуется JSON.');if(Number(request.headers.get('content-length')??0)>64000)throw new AppError('INVALID_INPUT','Запрос слишком большой.');const reader=request.body?.getReader();let size=0;const parts:Uint8Array[]=[];if(reader)while(true){const r=await reader.read();if(r.done)break;size+=r.value.length;if(size>64000){await reader.cancel();throw new AppError('INVALID_INPUT','Используйте прямую загрузку ресурса.');}parts.push(r.value);}try{return JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new AppError('INVALID_INPUT','Некорректный JSON.');}}
 export function createApp(deps:Partial<AppDependencies>){return async(request:Request):Promise<Response>=>{
  const url=new URL(request.url),origin=request.headers.get('origin');
@@ -42,15 +44,16 @@ export function createApp(deps:Partial<AppDependencies>){return async(request:Re
   const token=/^Bearer ([^\s]+)$/.exec(request.headers.get('authorization')??'')?.[1];if(!token)throw new AppError('UNAUTHENTICATED','Войдите в систему.');if(!deps.auth||!deps.repository)return unavailable();
   if(url.pathname.startsWith('/uploads/')||url.pathname.startsWith('/worker/')){
    const worker=await deps.auth.verifyWorker(token);if(request.method!=='POST')throw new AppError('NOT_FOUND','Маршрут не найден.');
-   const data=await body(request),result=url.pathname.startsWith('/worker/')?await jobsRoute(deps.queue,deps.store,worker.workerId,url.pathname,data):await uploadsRoute(deps.store,worker.workerId,url.pathname,data);
+   const data=await body(request),result=url.pathname.startsWith('/worker/')?await jobsRoute(deps.queue,deps.store,worker.workerId,url.pathname,data,deps.publication):await uploadsRoute(deps.store,worker.workerId,url.pathname,data);
    return finish(result instanceof Response?result:json(result));
   }
   const actor=await deps.auth.verifyUser(token),repo=deps.repository;
-  if(url.pathname==='/session'&&request.method==='GET'){const result:SessionView={principal:actor,mode:'managed',capabilities:{admin:actor.role==='admin',edit:actor.role!=='user',generation:!!deps.queue&&!!deps.store,publish:false,export:false,preview:!!deps.store&&!!deps.previewKey,nativeModelSettings:false}};return finish(json(result));}
-  if(url.pathname==='/admin/integrations'&&request.method==='GET'){if(actor.role!=='admin')throw new AppError('FORBIDDEN','Только администратор.');return finish(json({database:'configured',auth:'configured',storage:deps.store?'configured':'unavailable',queue:deps.queue?'configured':'unavailable',publication:'unavailable',invitations:deps.invitations?'configured':'unavailable'}));}
+  if(url.pathname==='/session'&&request.method==='GET'){const result:SessionView={principal:actor,mode:'managed',capabilities:{admin:actor.role==='admin',edit:actor.role!=='user',generation:!!deps.queue&&!!deps.store,publish:!!deps.publication,export:false,preview:!!deps.store&&!!deps.previewKey,nativeModelSettings:false}};return finish(json(result));}
+  if(url.pathname==='/admin/integrations'&&request.method==='GET'){if(actor.role!=='admin')throw new AppError('FORBIDDEN','Только администратор.');return finish(json({database:'configured',auth:'configured',storage:deps.store?'configured':'unavailable',queue:deps.queue?'configured':'unavailable',publication:deps.publication?'configured':'unavailable',invitations:deps.invitations?'configured':'unavailable'}));}
   const grant=/^\/sites\/([^/]+)\/revisions\/([^/]+)\/preview$/.exec(url.pathname);
   if(grant&&request.method==='GET'){if(!deps.store||!deps.previewKey||!deps.publicOrigin)return unavailable();const siteId=uuid(grant[1]),revisionId=uuid(grant[2]);await repo.scoped(actor,siteId);const revision=await repo.revision(revisionId);if(!revision||revision.siteId!==siteId)throw new AppError('NOT_FOUND','Версия не найдена.');const candidate=(await repo.editingState(siteId)).candidates.find(c=>c.id===revisionId);if(candidate&&!['ready','accepted','conflict'].includes(candidate.status))throw new AppError('FORBIDDEN','Вариант не готов.');const cap=await new SignJWT({siteId,revisionId}).setSubject(actor.userId).setAudience('site-preview').setIssuedAt().setExpirationTime('10m').setProtectedHeader({alg:'HS256'}).sign(deps.previewKey);return finish(json({url:`${deps.publicOrigin}/preview/${siteId}/${revisionId}/index.html?cap=${cap}`}));}
   const data=await body(request);
+  const publication=await publicationRoute(deps.publication,actor,request,url.pathname,data);if(publication!==undefined)return finish(json(publication));
   const control=await jobControlsRoute(deps.queue,deps.store,actor,request,url.pathname,data);if(control!==undefined)return finish(json(control));
   for(const route of [()=>sitesRoute(repo,actor,request,url,data),()=>editingRoute(repo,deps.store,actor,request,url.pathname,data),()=>adminRoute(repo,deps.invitations,actor,request,url.pathname,data),()=>workersRoute(repo,actor,request,url.pathname,data)]){const result=await route();if(result!==undefined)return finish(json(result));}
   throw new AppError('NOT_FOUND','Маршрут не найден.');

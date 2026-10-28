@@ -19,6 +19,34 @@ import type { WorkerDeps } from '../src/pipeline.js';
 import { cleanDirectories, directory, file, site as siteFiles } from './fixtures.js';
 
 afterEach(cleanDirectories);
+test('server settlement receipt completes an offline publication before stale lease reads or duplicate writes',async()=>{
+ const f=await fixture();f.job.checkpointId=randomUUID();f.job.stage='publication';
+ const receipt={jobId:f.job.id,siteId:f.site.id,checkpointId:f.job.checkpointId,expectedRevision:0,manifestId:randomUUID(),revisionId:randomUUID(),requestKey:''};receipt.requestKey=f.job.id+':'+receipt.manifestId;
+ f.deps.publication.settlement=async()=>receipt;
+ f.deps.queue.heartbeat=async()=>{throw new AppError('STALE_LEASE','Already settled');};
+ let writes=0;f.deps.revisions.put=async()=>{writes++;};f.deps.queue.finish=async()=>{writes++;};
+ await expect(runJob(f.job,f.lease,f.deps,new AbortController().signal)).resolves.toBeUndefined();expect(writes).toBe(0);
+});
+test('settlement receipt rejects an unrelated checkpoint binding',async()=>{
+ const f=await fixture();f.job.checkpointId=randomUUID();
+ f.deps.publication.settlement=async()=>({jobId:f.job.id,siteId:f.site.id,checkpointId:randomUUID(),expectedRevision:0,manifestId:randomUUID(),revisionId:randomUUID(),requestKey:'wrong'});
+ await expect(runJob(f.job,f.lease,f.deps,new AbortController().signal)).rejects.toMatchObject({code:'CONFLICT'});
+});
+test('one publication driver continues while both model slots are occupied and throttles idle ticks',async()=>{
+ const a=await fixture(),b=await fixture(),abort=new AbortController();let claims=0,entered=0,ticks=0;
+ let started!:()=>void;const ready=new Promise<void>(r=>started=r);
+ const jobs=[a,b];
+ a.deps.queue.claim=async()=>{const f=jobs[claims++];return f?{job:f.job,lease:f.lease}:null;};
+ a.deps.bind=async job=>jobs.find(f=>f.job.id===job.id)!.deps;
+ for(const f of jobs)f.deps.model={async run(_r,_t,signal){entered++;if(entered===2)started();await new Promise<void>(resolve=>signal.addEventListener('abort',()=>resolve(),{once:true}));signal.throwIfAborted();throw new Error('unreachable');}};
+ a.deps.queue.continuePublications=async()=>{ticks++;};
+ a.deps.delay=(ms,signal)=>new Promise(resolve=>{const timer=setTimeout(resolve,ms);signal.addEventListener('abort',()=>{clearTimeout(timer);resolve();},{once:true});});
+ vi.useFakeTimers();try{
+  const running=runWorker(a.deps,'worker',abort.signal);await ready;
+  await vi.advanceTimersByTimeAsync(5000);expect(ticks).toBeGreaterThanOrEqual(2);expect(ticks).toBeLessThanOrEqual(3);
+  abort.abort();await running;
+ }finally{vi.useRealTimers();}
+});
 test('pending model work renews at thirty seconds and pause waits for the completed model stage',async()=>{
  const f=await fixture();let renewals=0,paused=false;const base=f.deps.queue.heartbeat;
  f.deps.queue.heartbeat=async lease=>{renewals++;return base(lease);};f.deps.queue.shouldPause=async()=>paused;

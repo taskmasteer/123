@@ -2,9 +2,20 @@ import { AppError } from '../../../../packages/contracts/src/model.js';
 import { integer, leaseDto, object, string, uuid } from '../../../../packages/contracts/src/http.js';
 import type { PostgresQueue } from '../../../../packages/adapters/src/postgres-queue.js';
 import type { R2Store } from '../../../../packages/adapters/src/r2-store.js';
-export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store | undefined, workerId: string, path: string, body: unknown): Promise<unknown> {
+import type { PostgresPublication } from '../../../../packages/adapters/src/postgres-publication.js';
+export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store | undefined, workerId: string, path: string, body: unknown, publication?:PostgresPublication): Promise<unknown> {
     if (!queue)
         throw new AppError('UNAVAILABLE', 'Очередь не подключена.');
+    if(path==='/worker/publications/tick'){
+        object(body,[]);
+        const worker=(await queue.repository.pool.query('select id from private.workers where id=$1 and revoked_at is null',[workerId])).rows[0];
+        if(!worker)throw new AppError('STALE_LEASE','Устройство отозвано.');
+        if(publication)await publication.tick();return {ok:true};
+    }
+    const receipt=/^\/worker\/jobs\/([^/]+)\/publication-receipt$/.exec(path);
+    if(receipt){const p=object(body,['lease']),lease=leaseDto(p.lease);if(lease.jobId!==uuid(receipt[1])||lease.workerId!==workerId)throw new AppError('STALE_LEASE','Чужое задание.');
+        return publication?publication.receipt(workerId,lease):null;
+    }
     if (path === '/worker/jobs/claim') {
         object(body, []);
         return queue.claim(workerId);
@@ -94,6 +105,7 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             if (saved.checkpoint.jobId !== lease.jobId || saved.state.revisionId !== b.revisionId || saved.state.manifestId !== b.manifestId)
                 throw new AppError('CONFLICT', 'Публикация не соответствует приватному снимку.');
             const reservation = await queue.reservePublication(lease, { requestKey: string(b.requestKey, 200), manifestId: uuid(b.manifestId), revisionId: uuid(b.revisionId), expectedRevision: integer(b.expectedRevision), checkpointId: uuid(b.checkpointId) });
+            if(publication){const intent=await publication.attach(reservation.id);return {id:intent.id,state:intent.phase};}
             return { id: reservation.id, state: 'pending' };
         }
     }

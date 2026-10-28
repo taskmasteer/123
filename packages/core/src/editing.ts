@@ -11,6 +11,7 @@ export interface EditingDeps {
   checkpoints: CheckpointStore;
   queue: Queue & { get(id: string): Promise<Job | null>; current(siteId: string): Promise<Job | null>; cancel(id: string): Promise<void> };
   publication: PublicationPort;
+  handoffPublication?: (intent:PublishIntent)=>Promise<Site>;
   clock: Clock;
   ids: IdSource;
 }
@@ -156,6 +157,7 @@ export function createEditing(deps: EditingDeps) {
     if (!revision || revision.siteId !== site.id || revision.manifestId !== intent.manifestId) throw new AppError('INVALID_INPUT', 'Версия публикации не соответствует намерению.');
     const candidate = candidateFor(await read(), site.id, revision.id);
     await evidence(candidate);
+    if(deps.handoffPublication)return deps.handoffPublication(intent);
     const state = await deps.publication.advance(intent.id);
     if (state !== 'published') throw new AppError(state === 'needs_attention' ? 'NEEDS_ATTENTION' : 'PROVIDER_WAIT', 'Публикация ожидает завершения. Повторите публикацию для проверки результата.');
     let published: Site;

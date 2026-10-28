@@ -4,8 +4,17 @@ import {object,uuid,integer,string,siteView} from '../../../../packages/contract
 import type {SessionView} from '../../../../packages/contracts/src/http.js';
 const bad=():never=>{throw new AppError('INVALID_INPUT','Некорректный ответ сервера.');};
 function list(value:unknown){if(!Array.isArray(value)||value.length>10000)return bad();return value;}
-export function sessionView(value:unknown):SessionView {const s=object(value,['principal','mode','capabilities']),p=object(s.principal,['userId','role']),c=object(s.capabilities,['admin','edit','generation','publish','export','preview','nativeModelSettings']);uuid(p.userId);if(!['user','spec-user','admin'].includes(String(p.role))||s.mode!=='managed'||Object.keys(c).length!==7||Object.values(c).some(v=>typeof v!=='boolean')||c.nativeModelSettings!==false||c.publish!==false||c.export!==false)return bad();return s as unknown as SessionView;}
+export function sessionView(value:unknown):SessionView {const s=object(value,['principal','mode','capabilities']),p=object(s.principal,['userId','role']),c=object(s.capabilities,['admin','edit','generation','publish','export','preview','nativeModelSettings']);uuid(p.userId);if(!['user','spec-user','admin'].includes(String(p.role))||s.mode!=='managed'||Object.keys(c).length!==7||Object.values(c).some(v=>typeof v!=='boolean')||c.nativeModelSettings!==false||c.export!==false)return bad();return s as unknown as SessionView;}
+function publicationView(raw:unknown){const p=object(raw,['id','siteId','revisionId','manifestId','manifestHash','deploymentId','phase','retryAt','cancelRequested','settlement','verifiedAt','origin']);
+ for(const key of ['id','siteId','revisionId','manifestId'])uuid(p[key]);if(!/^[a-f0-9]{64}$/.test(String(p.manifestHash)))return bad();if(p.deploymentId!==null)string(p.deploymentId,200);
+ if(!['pending','uploading','creating','checking','promoting','reconciling','waiting_quota','awaiting_dns','published','needs_attention'].includes(String(p.phase))||!['pending','settled','cancelled','conflict'].includes(String(p.settlement))||!['generation','draft'].includes(String(p.origin))||typeof p.cancelRequested!=='boolean')return bad();
+ if(p.retryAt!==null)integer(p.retryAt);if(p.verifiedAt!==null)integer(p.verifiedAt);return p;
+}
+function domainView(raw:unknown){const p=object(raw,['records','verified']);if(typeof p.verified!=='boolean')return bad();list(p.records).forEach(raw=>{const r=object(raw,['type','name','value']);if(!['A','CNAME','TXT'].includes(String(r.type)))return bad();string(r.name,253);string(r.value,2048);});return p;}
 function validate(method:string,value:unknown):unknown {
+ if(method==='publication.request'||method==='publication.resume')return publicationView(value);
+ if(method==='publication.history')return list(value).map(publicationView);
+ if(method==='publication.status'){const p=object(value,['publication','domain']);if(p.publication!==null)publicationView(p.publication);domainView(p.domain);return p;}
  if(method==='worker.list')return list(value).map(raw=>{
   const w=object(raw,['id','name','paused','revoked','lastHeartbeat','jobs']);uuid(w.id);string(w.name,100);
   if(typeof w.paused!=='boolean'||typeof w.revoked!=='boolean')return bad();if(w.lastHeartbeat!==null)integer(w.lastHeartbeat);
@@ -38,10 +47,14 @@ export class RemoteClient {
    const value=object(await invoke('managed_worker',{request:{action:action==='remove'?'revoke':action,...(action==='enroll'?{name:string(p.name,100),origin:this.base}:{}),...(['start','stop','remove'].includes(action)?{expectedOrigin:this.base}:{}),...(accessToken?{accessToken}:{})}}),['workerId','name','origin','enrolled','running','error']);
    if(value.workerId!==null)uuid(value.workerId);if(value.name!==null)string(value.name,100);if(value.origin!==null&&value.origin!==this.base)throw new AppError('CONFLICT','Устройство зарегистрировано для другого API.');if(typeof value.enrolled!=='boolean'||typeof value.running!=='boolean'||value.error!==null&&typeof value.error!=='string')return bad();return value as T;
   }
-  const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds','cursor']);
+  const p=object(params,['siteId','revisionId','instruction','expectedRevision','candidateId','domain','about','referenceId','logoAssetId','id','enabled','description','email','role','active','userIds','cursor','requestKey']);
   if(method==='device.status')return {mode:'blocked',available:false,activeJobs:0,maxJobs:2,model:null,images:'disabled',storage:'managed',publication:'unavailable'} as T;
   let path:string,verb='GET',body:unknown;
   switch(method){
+   case 'publication.status':path=`/sites/${uuid(p.siteId)}/publication`;break;
+   case 'publication.history':path=`/sites/${uuid(p.siteId)}/publication-history`;break;
+   case 'publication.request':path=`/sites/${uuid(p.siteId)}/publication`;verb='POST';body={revisionId:uuid(p.revisionId),expectedRevision:integer(p.expectedRevision),requestKey:uuid(p.requestKey)};break;
+   case 'publication.resume':path=`/sites/${uuid(p.siteId)}/publication/resume`;verb='POST';body={id:uuid(p.id)};break;
    case 'worker.list':path='/workers';break;
    case 'worker.pause':case 'worker.resume':case 'worker.revoke':path=`/workers/${uuid(p.id)}/${method.slice(7)}`;verb='POST';body={};break;
    case 'job.cancel':path=`/sites/${uuid(p.siteId)}/jobs/cancel`;verb='POST';body={};break;

@@ -70,6 +70,7 @@ export interface CheckpointStore {
   load(id: string): Promise<{ checkpoint: Checkpoint; state: Record<string, unknown>; files: ArtifactFile[] }>;
 }
 export interface Queue {
+  continuePublications?():Promise<void>;
   enqueue(job: Job): Promise<void>;
   claim(workerId: string): Promise<{ job: Job; lease: Lease } | null>;
   heartbeat(lease: Lease): Promise<Lease>;
@@ -80,7 +81,7 @@ export interface Queue {
 }
 export type PublicationState = 'pending' | 'uploading' | 'creating' | 'checking' | 'promoting' | 'reconciling' |
   'waiting_quota' | 'awaiting_dns' | 'published' | 'needs_attention';
-export interface PublicationPort { advance(intentId: string): Promise<PublicationState> }
+export interface PublicationPort { advance(intentId: string): Promise<PublicationState>; settlement?():Promise<import('./publication.js').PublicationReceipt|null> }
 export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: string; createdAt: number }
 export interface ModelRequest {
   mode: 'generate' | 'edit'; site: Site; instruction: string; baseManifestId: string | null;

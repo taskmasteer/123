@@ -8,6 +8,9 @@ import {SupabaseRepository} from '../../../packages/adapters/src/supabase-reposi
 import {PostgresQueue} from '../../../packages/adapters/src/postgres-queue.js';
 import {R2Store,R2Transport} from '../../../packages/adapters/src/r2-store.js';
 import {errorResponse,unavailable} from '../src/errors.js';
+import {PostgresPublication} from '../../../packages/adapters/src/postgres-publication.js';
+import {VercelClient} from '../../../packages/adapters/src/vercel/client.js';
+import {verifyPublicHttps} from '../../../packages/adapters/src/public-https.js';
 let app:ReturnType<typeof createApp>|undefined;
 export async function handler(request:Request){
  try{
@@ -23,7 +26,8 @@ export async function handler(request:Request){
    const previewKey=env.PREVIEW_SIGNING_KEY?Buffer.from(env.PREVIEW_SIGNING_KEY,'base64'):undefined;
    if(previewKey&&previewKey.length<32)return unavailable();
    const invitations=configuredInvitations(repository,env);
-   app=createApp({repository,auth,queue,...(invitations?{invitations}:{}),...(store?{store}:{}),...(previewKey?{previewKey}:{}),...(env.CONTROL_PUBLIC_ORIGIN?{publicOrigin:env.CONTROL_PUBLIC_ORIGIN}:{}),allowedOrigins:(env.CONTROL_ALLOWED_ORIGINS??'').split(',').filter(Boolean)});
+   const publication=store&&env.VERCEL_PUBLICATION_TOKEN&&env.VERCEL_PUBLICATION_TEAM_ID?new PostgresPublication(queue,store,new VercelClient({token:env.VERCEL_PUBLICATION_TOKEN,accountId:env.VERCEL_PUBLICATION_TEAM_ID}),verifyPublicHttps):undefined;
+   app=createApp({repository,auth,queue,...(publication?{publication}:{}),...(invitations?{invitations}:{}),...(store?{store}:{}),...(previewKey?{previewKey}:{}),...(env.CONTROL_PUBLIC_ORIGIN?{publicOrigin:env.CONTROL_PUBLIC_ORIGIN}:{}),allowedOrigins:(env.CONTROL_ALLOWED_ORIGINS??'').split(',').filter(Boolean)});
   }
   return app(request);
  }catch(error){return errorResponse(error);}

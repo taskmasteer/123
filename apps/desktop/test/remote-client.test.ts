@@ -19,10 +19,22 @@ test('native lifecycle actions carry the configured origin before dispatching an
   ]);
  }finally{vi.unstubAllGlobals();}
 });
-test('generation capability is explicit while publication remains unavailable',()=>{
+test('publication capability follows configured server while export remains unavailable',()=>{
  const session={principal:{userId:id,role:'admin'},mode:'managed',capabilities:{admin:true,edit:true,generation:true,publish:false,export:false,preview:true,nativeModelSettings:false}};
  expect(sessionView(session).capabilities.generation).toBe(true);
- expect(()=>sessionView({...session,capabilities:{...session.capabilities,publish:true}})).toThrow();
+ expect(sessionView({...session,capabilities:{...session.capabilities,publish:true}}).capabilities.publish).toBe(true);
+ expect(()=>sessionView({...session,capabilities:{...session.capabilities,export:true}})).toThrow();
+});
+test('publication client routes IDs only and rejects provider-private status fields',async()=>{
+ let value:unknown={publication:null,domain:{records:[{type:'CNAME',name:'test.example',value:'target.vercel-dns.com'}],verified:false}};
+ const calls:{url:string;body:unknown}[]=[];
+ const client=new RemoteClient('https://control.test',async()=>'fixture',async(input,init)=>{calls.push({url:String(input),body:init?.body?JSON.parse(String(init.body)):null});return Response.json(value);});
+ expect(await client.request('publication.status',{siteId:id})).toEqual(value);
+ value={id,siteId:id,revisionId:id,manifestId:id,manifestHash:'a'.repeat(64),deploymentId:null,phase:'pending',retryAt:null,cancelRequested:false,settlement:'pending',verifiedAt:null,origin:'draft'};
+ await client.request('publication.request',{siteId:id,revisionId:id,expectedRevision:1,requestKey:id});
+ expect(calls[1]).toEqual({url:`https://control.test/sites/${id}/publication`,body:{revisionId:id,expectedRevision:1,requestKey:id}});
+ value={...(value as object),token:'provider-private'};
+ await expect(client.request('publication.resume',{siteId:id,id})).rejects.toMatchObject({code:'INVALID_INPUT'});
 });
 test('worker list validates heartbeat and last stage while rejecting credential fields',async()=>{
  let data:unknown=[{id,name:'Machine',paused:false,revoked:false,lastHeartbeat:1000,jobs:[{id,siteId:id,stage:'generate',state:'running'}]}];

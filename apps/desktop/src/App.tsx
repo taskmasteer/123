@@ -13,6 +13,7 @@ import {UsersSettings} from './features/settings/UsersSettings.js';
 import {IntegrationsSettings} from './features/settings/IntegrationsSettings.js';
 import type {SessionView} from '../../../packages/contracts/src/http.js';
 import './app.css';
+import {PublicationPanel} from './features/sites/PublicationPanel.js';
 import {WorkerList} from './features/workers/WorkerList.js';
 
 type Device = DeviceStatus;
@@ -33,6 +34,8 @@ export default function App() {
   const [catalogError, setCatalogError] = useState('');
   const [actionFailure, setActionFailure] = useState<{ message: string; method: string; site: DesktopSite } | null>(null);
   const [preview, setPreview] = useState<DesktopSite | null>(null);
+  const [publicationId,setPublicationId]=useState<string|null>(null);
+  const publicationSite=sites.find(site=>site.id===publicationId);
   const [editorId, setEditorId] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
   const editedSite = sites.find(site => site.id === editorId);
@@ -114,20 +117,21 @@ export default function App() {
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => {})}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
           {section === 'Режим работы'?<Login managed={managed} onStart={()=>{setManaged(true);setSession(null);changePage([null]);setCatalog({styles:[],references:[]});setDevice(null);setLoaded(false);setPollError('');setCatalogError('');}} onConnected={value=>{setSession(value);setSection('Сайты');setRefresh(v=>v+1);}} onLocal={()=>{setManaged(false);setSession(null);changePage([null]);setSection('Сайты');setRefresh(v=>v+1);}}/>:section==='Пользователи'&&session?.capabilities.admin?<UsersSettings/>:section==='Исполнители'&&session?.capabilities.admin?<WorkerList/>:section==='Подключения'&&session?.capabilities.admin?<IntegrationsSettings/>:section === 'Сайты' ? editedSite ? (
-            <SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed} modelMode={device?.mode??'blocked'} onChanged={next => {
+            <SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed||!!session?.capabilities.publish} {...(session?{principal:session.principal}:{})} modelMode={device?.mode??'blocked'} onChanged={next => {
               if (next) setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
               setRefresh(value => value + 1);
             }} />
           ) : (
             <>
               <div className="context-line"><span>Реестр доменов</span><span className="muted">{managed?'Общие данные · задания выполняют подключённые устройства':'Создание → проверка → локальная версия'}</span></div>
-              {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList sites={sites} loading={loading} canEdit={!managed||!!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site=>managed?void action('preview.open',site):setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)} />}
+              {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList {...(managed&&session?.capabilities.publish?{onPublication:(site:DesktopSite)=>setPublicationId(site.id)}:{})} sites={sites} loading={loading} canEdit={!managed||!!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site=>managed?void action('preview.open',site):setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)} />}
               {managed&&session?<nav className="row-actions" aria-label="Страницы общего реестра">
                 <button disabled={loading||pageCursors.length===1} onClick={()=>{setPollError('');changePage(pageCursors.slice(0,-1));}}>Предыдущая страница</button>
                 <span aria-live="polite">Страница {pageCursors.length}</span>
                 <button disabled={loading||!nextCursor} onClick={()=>{if(nextCursor){setPollError('');changePage([...pageCursors,nextCursor]);}}}>Следующая страница</button>
               </nav>:null}
-              <p className="workspace-note">{managed?'Управляемый режим. Генерация требует запущенного устройства. Публикация и экспорт пока не подключены.':'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
+              {managed&&session&&publicationSite?<><button onClick={()=>setPublicationId(null)}>Закрыть публикацию</button><PublicationPanel key={publicationSite.id} site={publicationSite} principal={session.principal} onChanged={()=>setRefresh(v=>v+1)}/></>:null}
+              <p className="workspace-note">{managed?(session?.capabilities.publish?'Управляемый режим. Генерация требует запущенного устройства. Первая публикация продолжается автоматически при запущенном устройстве; DNS настраивается вручную. Экспорт пока не подключён.':'Управляемый режим. Генерация требует запущенного устройства. Внешняя публикация не настроена. Экспорт пока не подключён.'):'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
             </>
           ) : section === 'Референсы' ? <ReferenceLibrary catalog={catalog} onChange={loadCatalog} canManage={!managed||!!session?.capabilities.admin} managed={managed} /> : !managed ? (
             <><section className="device-panel">
