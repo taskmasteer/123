@@ -6,7 +6,7 @@ export class DesktopClient {
  }
  async request<T>(method:string,params:unknown={}):Promise<T>{
   try{return await invoke<T>('dispatch',{request:{id:crypto.randomUUID(),version:1,method,params}});}
-  catch(error){throw new DesktopError(message(error),typeof error==='object'&&error!==null&&'code'in error?String(error.code):'NEEDS_ATTENTION');}
+  catch(error){throw new DesktopError(method.startsWith('visual.')&&typeof error==='object'&&error!==null&&'message'in error?String(error.message).slice(0,1000):message(error),typeof error==='object'&&error!==null&&'code'in error?String(error.code):'NEEDS_ATTENTION');}
  }
 }
 export class DesktopError extends Error {

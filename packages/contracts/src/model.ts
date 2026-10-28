@@ -149,7 +149,7 @@ export interface CheckpointStore {
 export interface Queue {
     continuePublications?(): Promise<void>;
     enqueue(job: Job): Promise<void>;
-    claim(workerId: string): Promise<{
+    claim(workerId: string, mode?:'all'|'visual'): Promise<{
         job: Job;
         lease: Lease;
     } | null>;

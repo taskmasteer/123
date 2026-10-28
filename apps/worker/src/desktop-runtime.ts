@@ -28,6 +28,10 @@ import { parseDesktopRequest, parseModelConfiguration } from './desktop-protocol
 import { validateSite } from './validation/browser.js';
 import { serveFiles } from './preview/server.js';
 import type { Preview } from './preview/server.js';
+import type { ElementPatch } from '../../../packages/contracts/src/visual.js';
+import { projectSelection } from '../../../packages/core/src/visual/projection.js';
+import { projectionResource } from '../../../packages/core/src/visual/resources.js';
+import { createSelectionRuntime } from './preview/selection-runtime.js';
 const principal = { userId: 'local-demo-admin', role: 'admin' } as const;
 export async function createDesktopRuntime(root: string, sourceRoot: string, options: {
     native?: boolean;
@@ -59,7 +63,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         queue: typeof queue;
     } = { readLogo: (assetId, siteId) => imports.readLogo(assetId, siteId), sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
         workspace: join(root, 'attempts'), validate: (files: Parameters<typeof validateSite>[0]) => validateSite(files, { screenshotRoot: validationRoot }) };
-    const editing = createEditing({ ...deps, store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
+    const editing = createEditing({ ...deps, visualCompareAndSet:async(actorId,siteId,expectedRevision,draftId)=>{if(actorId!==principal.userId)throw new AppError('FORBIDDEN','Доступ отозван.');return sites.compareAndSet(siteId,expectedRevision,{draftId});},store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
+    const selectionRuntime=createSelectionRuntime();
     const managedRuntime = createManagedRuntime(() => deps, () => mode === 'live' && !configuring && !closed, options.transport);
     function ready() { return !closed && !configuring && !managedMode && mode !== 'blocked'; }
     async function updateUsage(jobId: string) {
@@ -96,20 +101,20 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         return job;
     }
     function pump(): Promise<void> {
-        if (!ready())
+        if (!ready() && (closed||configuring||managedMode||!database.sql.prepare("select 1 from jobs where json_extract(data,'$.edit.producer.kind')='visual' and json_extract(data,'$.state')='queued' limit 1").get()))
             return Promise.resolve();
         if (pumping)
             return pumping;
         pumping = (async () => {
             const pending = database.sql.prepare("select b.id from batches b where state='active' and exists(select 1 from batch_rows r where r.batch_id=b.id and site_id is null and json_array_length(json_extract(r.data,'$.issues'))=0) order by rowid limit 1").get();
-            if (pending)
+            if (pending&&mode!=='blocked')
                 await batches.admit(principal, String(pending.id), 25).catch(error => console.error('Batch admission failed:', String(error)));
-            while (ready() && active.size < 2) {
-                const claimed = await queue.claim(workerId);
+            while (!closed && !configuring && !managedMode && active.size < 2) {
+                const claimed = await queue.claim(workerId,mode==='blocked'?'visual':'all');
                 if (!claimed)
                     break;
                 // Closing can race an in-flight claim. Release it before closing persistence.
-                if (!ready()) {
+                if (!ready()&&!claimed.job.edit?.producer) {
                     await queue.finish(claimed.lease, 'paused');
                     break;
                 }
@@ -186,6 +191,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             credentialsAbort.abort();
             await pumping;
             await Promise.allSettled([...active]);
+            await selectionRuntime.close();
             mode = 'blocked';
             modelName = null;
             imageModel = null;
@@ -265,6 +271,11 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                 return result;
             }
             switch (request.method) {
+                case 'visual.projection':
+                case 'visual.projection.chunk': {const {map,files}=await editing.visualMap(principal,String(p.siteId),Number(p.expectedRevision));const resource=projectionResource(projectSelection(files,map));if(request.method==='visual.projection')return resource.descriptor;if(p.mapId!==map.binding.mapId)throw new AppError('CONFLICT','Проекция устарела.');return resource.chunk(Number(p.index));}
+                case 'visual.submit':{const job=await editing.requestVisual(principal,String(p.siteId),Number(p.expectedRevision),p.patch as ElementPatch,String(p.mapId),String(p.requestKey));void pump();return {saveId:job.edit!.candidateId,status:'queued'};}
+                case 'visual.status':return editing.visualStatus(principal,String(p.siteId),String(p.saveId));
+                case 'visual.selection.begin':case 'visual.selection.chunk':case 'visual.selection.open':case 'visual.selection.status':case 'visual.selection.close':return selectionRuntime.request(request.method,p);
                 case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
                 case 'site.list': {
                     const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;
@@ -382,6 +393,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             }));
             await queue.close();
             await sites.close();
+            await selectionRuntime.close();
             await database.close();
         }
     };

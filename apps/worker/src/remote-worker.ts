@@ -32,6 +32,7 @@ export function createRemoteWorker(options: {
     controlOrigin: string;
     workerId: string;
     workerToken: string;
+    claimMode?:'all'|'visual';
     fetch?: typeof fetch;
 }, local: WorkerDeps): WorkerDeps {
     const origin = controlOrigin(options.controlOrigin), transport = options.fetch ?? fetch;
@@ -59,19 +60,20 @@ export function createRemoteWorker(options: {
     }
     const endpoint = (lease: Lease, action: string) => `/worker/jobs/${lease.jobId}/${action}`;
     const queue: Queue = {
-        async continuePublications() { await call('/worker/publications/tick', {}); },
+        async continuePublications() { if(options.claimMode!=='visual')await call('/worker/publications/tick', {}); },
         async enqueue() {
             throw new AppError('FORBIDDEN', 'Исполнитель не создаёт задания.');
         },
         async claim(workerId) {
             if (workerId !== options.workerId)
                 throw new AppError('FORBIDDEN', 'Чужое устройство.');
-            const value = await call('/worker/jobs/claim', {});
+            const value = await call('/worker/jobs/claim', options.claimMode?{mode:options.claimMode}:{});
             if (value === null)
                 return null;
             const c = object(value, ['job', 'lease']), lease = leaseDto(c.lease);
             if (!validJob(c.job) || c.job.state !== 'running' || lease.workerId !== workerId || lease.jobId !== c.job.id)
                 throw new AppError('INVALID_INPUT', 'Некорректная выдача задания.');
+            if(options.claimMode==='visual'&&!c.job.edit?.producer)throw new AppError('INVALID_INPUT','Выдано задание другого типа.');
             uuid(c.job.id);
             uuid(c.job.siteId);
             return { job: c.job, lease };

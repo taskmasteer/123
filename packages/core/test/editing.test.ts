@@ -16,7 +16,7 @@ import { FakePublication } from '../../adapters/src/fake-publication.js';
 import { validateStatic } from '../../../apps/worker/src/validation/static.js';
 import { AppError } from '../../contracts/src/model.js';
 import type { EditingStore } from '../../contracts/src/editing.js';
-import type { ModelPort } from '../../contracts/src/model.js';
+import type { ModelPort,ArtifactFile,ValidationReport } from '../../contracts/src/model.js';
 
 afterEach(cleanDirectories);
 
@@ -67,6 +67,34 @@ test('edit refinement survives restart, accepts only a draft, publishes explicit
 }, 90000);
 
 const admin = { userId: 'admin', role: 'admin' } as const;
+test.each(['validation','revocation','conflict'] as const)('visual %s failure preserves draft/public pointers and never requests AI repair',async(mode)=>{const h=await harness();try{
+ const {map}=await h.editor.visualMap(admin,h.before.id,1);const job=await h.editor.requestVisual(admin,h.before.id,1,{elementId:map.elements.find(e=>e.tag==='h1')!.elementId,text:'Manual save'},map.binding.mapId,'failed-save');let calls=0;
+ if(mode==='revocation')h.deps.visualCompareAndSet=async()=>{throw new AppError('FORBIDDEN','Access revoked');};
+ await h.run({run:async()=>{calls++;throw new Error('No repair');}},async()=>{if(mode==='conflict')await h.deps.sites.compareAndSet(h.before.id,1,{domainStatus:'changed'});return mode==='validation'?{ok:false,issues:[{code:'readability',message:'Text unreadable'}],screenshotIds:[]}:{ok:true,issues:[],screenshotIds:[]};});
+ const result=await h.editor.visualStatus(admin,h.before.id,job.edit!.candidateId);expect(result.status).toBe('failed');expect(result.error).toBeTruthy();expect(calls).toBe(0);expect(await h.deps.sites.get(h.before.id)).toMatchObject({draftId:h.before.draftId,publishedId:h.before.publishedId,revision:mode==='conflict'?2:1});
+}finally{await h.close();}});
+test('model-free local claim skips an older AI job and runs only the deterministic visual producer',async()=>{const h=await harness();try{
+ const older=await h.deps.sites.create({domain:'older-ai.test'},admin);await h.deps.queue.enqueue({id:older.id,siteId:older.id,kind:'generate',stage:'brief',state:'queued',checkpointId:null,baseRevision:0});
+ const {map}=await h.editor.visualMap(admin,h.before.id,1);const target=map.elements.find(e=>e.tag==='h1')!;const job=await h.editor.requestVisual(admin,h.before.id,1,{elementId:target.elementId,text:'Manual'},map.binding.mapId,'visual-only');
+ const claim=await h.deps.queue.claim('visual-device','visual');expect(claim?.job.id).toBe(job.id);expect((await h.deps.queue.get(older.id))!.state).toBe('queued');
+}finally{await h.close();}});
+test('visual Save is durable/idempotent and installs once without ModelPort or publish; subsequent AI starts from saved text',async()=>{
+ const h=await harness();try{
+  const {map}=await h.editor.visualMap(admin,h.before.id,h.before.revision),target=map.elements.find(e=>e.tag==='h1')!;
+  const patch={elementId:target.elementId,text:'Manual saved heading'};
+  const job=await h.editor.requestVisual(admin,h.before.id,1,patch,map.binding.mapId,'save-once');
+  expect((await h.editor.requestVisual(admin,h.before.id,1,patch,map.binding.mapId,'save-once')).id).toBe(job.id);
+  h.reopen();expect((await h.editor.visualStatus(admin,h.before.id,job.edit!.candidateId)).status).toBe('queued');
+  await h.run({run:async()=>{throw new Error('Visual producer must never call model');}});
+  const result=await h.editor.visualStatus(admin,h.before.id,job.edit!.candidateId);expect(result.status).toBe('completed');
+  const site=(await h.deps.sites.get(h.before.id))!;expect(site).toMatchObject({revision:2,draftId:result.revision!.id,publishedId:h.before.publishedId});
+  expect((await h.editor.visualStatus(admin,h.before.id,job.edit!.candidateId)).revision).toEqual(result.revision);
+  expect((await h.deps.sites.get(site.id))!.revision).toBe(2);
+  await expect(h.editor.requestVisual(admin,site.id,1,{...patch,text:'Changed replay'},map.binding.mapId,'save-once')).rejects.toMatchObject({code:'CONFLICT'});
+  await h.editor.requestEdit(admin,site.id,'Change structure',2);
+  await h.run({run:async(_request,tools)=>{const source=await tools.read('index.html');expect(source).toContain('Manual saved heading');await tools.write('index.html',source.replace('<h1>','<section><h1>').replace('</h1>','</h1></section>'));return {summary:'Structure changed',inputTokens:0,outputTokens:0};}});
+ }finally{await h.close();}
+});
 async function harness() {
   const root = await directory(), clock = { now: () => 1000 };
   const sites = await createLocalState(join(root, 'sites'), clock), queue = await createLocalQueue(root, clock);
@@ -77,12 +105,12 @@ async function harness() {
   const manifest = await artifacts.put(created.id, originalFiles, 'manual-v1'), revisionId = randomUUID();
   await revisions.put({ id: revisionId, siteId: created.id, parentId: null, manifestId: manifest.id, kind: 'published', createdAt: 1000 });
   const before = await sites.compareAndSet(created.id, 0, { publishedId: revisionId });
-  const deps = { sites, queue, artifacts, revisions, checkpoints, store, clock, ids: { next: randomUUID }, publication: new FakePublication() };
+  const deps = { sites, queue, artifacts, revisions, checkpoints, store, clock, ids: { next: randomUUID }, publication: new FakePublication(),visualCompareAndSet:async(actorId:string,siteId:string,expected:number,draftId:string)=>{if(actorId!==admin.userId)throw new AppError('FORBIDDEN','Revoked');return sites.compareAndSet(siteId,expected,{draftId});} };
   let editor = createEditing(deps);
-  async function run(model: ModelPort = new FakeModel()) {
+  async function run(model: ModelPort = new FakeModel(),validate:(files:ArtifactFile[])=>Promise<ValidationReport>=async files=>validateStatic(files)) {
     const claim = (await queue.claim('test-device'))!;
     expect(claim).not.toBeNull();
-    await runJob(claim.job, claim.lease, { ...deps, model, templates: { async prepare() { throw new Error('Disabled catalog must not prevent editing existing files'); }, async load() { throw new Error('An edit must not regenerate a template'); } }, workspace: join(root, 'work'), validate: async files => validateStatic(files) }, new AbortController().signal);
+    await runJob(claim.job, claim.lease, { ...deps, model, templates: { async prepare() { throw new Error('Disabled catalog must not prevent editing existing files'); }, async load() { throw new Error('An edit must not regenerate a template'); } }, workspace: join(root, 'work'), validate }, new AbortController().signal);
     await editor.recover(before.id);
     return (await editor.list(admin, before.id)).candidates.at(-1)!;
   }

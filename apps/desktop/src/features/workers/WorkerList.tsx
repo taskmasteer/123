@@ -80,6 +80,7 @@ export function WorkerList() {
   <div className="row-actions">
    <button disabled={busy || native?.enrolled} onClick={() => void action('worker.enroll', { name })}>{native?.workerId ? 'Повторить регистрацию' : 'Зарегистрировать устройство'}</button>
    <button disabled={busy || !native?.enrolled || native.running} onClick={() => void action('worker.start')}>Запустить</button>
+   <button disabled={busy || !native?.enrolled || native.running} onClick={() => void action('worker.start',{mode:'visual'})}>Только визуальные правки</button>
    <button disabled={busy || !native?.running} onClick={() => void action('worker.stop')}>Остановить</button>
    <button disabled={busy || !native?.workerId} onClick={() => void action('worker.remove')}>Отозвать это устройство</button>
   </div>

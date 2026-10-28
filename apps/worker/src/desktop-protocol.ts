@@ -1,6 +1,7 @@
 import { cursorShape } from '../../../packages/core/src/site-pagination.js';
 import { importMethods } from '../../../packages/contracts/src/import.js';
 import { importParams } from '../../../packages/contracts/src/import-wire.js';
+import { visualMethods,visualParams } from '../../../packages/contracts/src/visual-wire.js';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { parseSiteInput, record } from '../../../packages/contracts/src/inputs.js';
 import { validateModelConfig } from '../../../packages/adapters/src/openai/responses.js';
@@ -27,6 +28,7 @@ export interface DesktopRequest {
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const methods: Record<string, string[]> = {
     ...importMethods,
+    ...visualMethods,
     'site.list': ['cursor', 'limit', 'domain', 'status', 'batchId'], 'site.create': ['domain', 'about', 'referenceId'], 'job.status': ['siteId'],
     'job.retry': ['siteId'], 'preview.open': ['siteId', 'revisionId'], 'preview.screenshot': ['siteId', 'revisionId', 'width', 'candidateId'],
     'device.status': [], 'catalog.list': [], 'catalog.style.update': ['id', 'enabled'], 'catalog.reference.update': ['id', 'description'],
@@ -47,6 +49,7 @@ export function parseDesktopRequest(value: unknown): DesktopRequest {
         importParams(value.method, p);
         return value as unknown as DesktopRequest;
     }
+    if(Object.hasOwn(visualMethods,value.method)){visualParams(value.method,p);return value as unknown as DesktopRequest;}
     if (value.method === 'site.list') {
         if (p.cursor !== undefined)
             cursorShape(p.cursor);

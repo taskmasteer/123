@@ -1,8 +1,11 @@
 import type { ChatMessage, Job, ValidationReport } from './model.js';
 import { AppError } from './model.js';
 import { record, nonemptyString } from './inputs.js';
+import { validVisualProducer } from './visual.js';
+import type { VisualProducer,VisualSave } from './visual.js';
 export type CandidateStatus = 'queued' | 'running' | 'checking' | 'ready' | 'rejected' | 'accepted' | 'conflict' | 'failed';
 export interface EditRequest {
+    producer?:VisualProducer;
     candidateId: string;
     baseDraftId: string;
     baseManifestId: string;
@@ -11,6 +14,7 @@ export interface EditRequest {
     conversation: ChatMessage[];
 }
 export interface Candidate {
+    visualSave?:VisualSave;
     id: string;
     siteId: string;
     jobId: string;
@@ -57,7 +61,7 @@ export interface EditingStore {
     }): Promise<T>;
 }
 export function validEditRequest(value: unknown): value is EditRequest {
-    return record(value) && ['candidateId', 'baseDraftId', 'baseManifestId', 'parentRevisionId'].every(key => nonemptyString(value[key])) &&
+    return record(value) && (value.producer===undefined||validVisualProducer(value.producer)) && ['candidateId', 'baseDraftId', 'baseManifestId', 'parentRevisionId'].every(key => nonemptyString(value[key])) &&
         typeof value.instruction === 'string' && !!value.instruction.trim() && value.instruction.length <= 8000 &&
         Array.isArray(value.conversation) && value.conversation.every(m => record(m) && nonemptyString(m.id) &&
         ['user', 'assistant'].includes(String(m.role)) && typeof m.text === 'string' && Number.isSafeInteger(m.createdAt));
@@ -71,6 +75,7 @@ export function parseEditingState(value: unknown): EditingState {
         ['queued', 'running', 'checking', 'ready', 'rejected', 'accepted', 'conflict', 'failed'].includes(String(c.status)) &&
         (c.manifestId === null || nonemptyString(c.manifestId)) && record(c.job) && c.job.id === c.jobId && c.job.siteId === c.siteId && c.job.kind === 'edit' &&
         validEditRequest(c.job.edit) && c.job.edit.candidateId === c.id && c.job.baseRevision === c.baseRevision &&
+        (c.visualSave===undefined?c.job.edit.producer===undefined:(c.job.edit.producer!==undefined&&record(c.visualSave)&&[c.visualSave.actorId,c.visualSave.requestKey,c.visualSave.payloadHash].every(nonemptyString)&&['pending','completed','failed'].includes(String(c.visualSave.state))&&(c.visualSave.error===undefined||typeof c.visualSave.error==='string'))) &&
         (c.validation === null || (record(c.validation) && typeof c.validation.ok === 'boolean' && Array.isArray(c.validation.issues) && Array.isArray(c.validation.screenshotIds) && c.validation.screenshotIds.every(nonemptyString))) &&
         (c.acceptance === null || (record(c.acceptance) && Number.isSafeInteger(c.acceptance.expectedRevision) && ['pending', 'completed', 'conflict'].includes(String(c.acceptance.state))))))
         return invalid();

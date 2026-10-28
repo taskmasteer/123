@@ -16,6 +16,7 @@ pub enum ManagedRequest {
     Start {
         #[serde(rename = "expectedOrigin")]
         expected_origin: String,
+        mode: Option<String>,
     },
     Stop {
         #[serde(rename = "expectedOrigin")]
@@ -154,14 +155,15 @@ pub fn handle(
             current.acknowledged = true;
             save(secrets, current)?;
         }
-        ManagedRequest::Start { expected_origin } => {
+        ManagedRequest::Start { expected_origin,mode } => {
+            if mode.as_deref().is_some_and(|v|v!="all"&&v!="visual"){return Err(AppError::new("Invalid worker mode"));}
             let current = bound_enrollment(&saved, &expected_origin)?;
             if !current.acknowledged {
                 return Err(AppError::new("Complete enrollment first"));
             }
             call(
                 "managed.start",
-                json!({"workerId":current.worker_id,"token":current.token,"controlOrigin":current.origin}),
+                json!({"workerId":current.worker_id,"token":current.token,"controlOrigin":current.origin,"mode":mode.unwrap_or_else(||"all".into())}),
             )?;
         }
         ManagedRequest::Stop { expected_origin } => {
@@ -293,6 +295,7 @@ mod tests {
             &mut call,
             ManagedRequest::Start {
                 expected_origin: "https://control.test".into(),
+                mode:None,
             },
         )
         .unwrap();

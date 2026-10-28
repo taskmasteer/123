@@ -6,9 +6,9 @@ import {AppError} from '../../../../packages/contracts/src/model.js';
 import type {SupabaseRepository,Admission} from '../../../../packages/adapters/src/supabase-repository.js';
 import type {R2Store} from '../../../../packages/adapters/src/r2-store.js';
 import {unavailable} from '../errors.js';
-function editingFor(repo:SupabaseRepository,store:R2Store|undefined,admission:Admission){
+export function editingFor(repo:SupabaseRepository,store:R2Store|undefined,admission:Admission){
  const checkpoints=store??{save:async()=>unavailable(),load:async()=>unavailable()};
- return createEditing({sites:{create:(input,p)=>repo.create(input,p),list:(p,c,l)=>repo.list(p,c,l),get:id=>repo.get(id),compareAndSet:(id,rev,patch)=>repo.compareAndSet(id,rev,patch,admission)},store:repo.editingStore(admission),revisions:{get:id=>repo.revision(id),put:r=>repo.putRevision(r,admission)},queue:repo.queue(admission),checkpoints,publication:{advance:async()=>unavailable()},ids:{next:randomUUID},clock:{now:Date.now}});
+ return createEditing({...(store?{artifacts:store}:{}),visualCompareAndSet:(actorId,id,rev,draftId)=>repo.compareAndSet(id,rev,{draftId},admission,actorId),sites:{create:(input,p)=>repo.create(input,p),list:(p,c,l)=>repo.list(p,c,l),get:id=>repo.get(id),compareAndSet:(id,rev,patch)=>repo.compareAndSet(id,rev,patch,admission)},store:repo.editingStore(admission),revisions:{get:id=>repo.revision(id),put:r=>repo.putRevision(r,admission)},queue:repo.queue(admission),checkpoints,publication:{advance:async()=>unavailable()},ids:{next:randomUUID},clock:{now:Date.now}});
 }
 export async function editingRoute(repo:SupabaseRepository,store:R2Store|undefined,actor:Principal,request:Request,path:string,body:unknown){
  const match=/^\/sites\/([^/]+)\/(edits|candidates|chat|history|publish|export)(?:\/([^/]+)\/(accept|reject))?$/.exec(path);if(!match)return undefined;

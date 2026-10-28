@@ -1,6 +1,9 @@
 * {
   box-sizing:border-box
 }
+.visual-editor {margin:16px 0;padding:16px;border:1px solid #c9d3df;border-radius:4px;background:#fff}
+.visual-editor h3 {margin:0}.visual-editor>label,.element-inspector>label,.element-inspector fieldset>label {display:flex;flex-direction:column;gap:4px;margin:10px 0}
+.visual-editor select,.element-inspector input,.element-inspector textarea {max-width:100%;min-width:0}.element-inspector {display:grid;gap:8px;max-width:680px}.element-inspector fieldset {display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;border:1px solid #c9d3df}.element-inspector fieldset .hint {grid-column:1/-1}.element-inspector button {justify-self:start}
 body {
   margin:0;
   font:14px/1.45 "Segoe UI Variable","Segoe UI",-apple-system,sans-serif;

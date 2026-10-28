@@ -15,6 +15,7 @@ import type { InvitationProvider } from './routes/admin.js';
 import { workersRoute } from './routes/workers.js';
 import { uploadsRoute } from './routes/uploads.js';
 import { projectPreview } from './preview.js';
+import { visualRoute } from './routes/visual.js';
 import type { PostgresQueue } from '../../../packages/adapters/src/postgres-queue.js';
 import { jobsRoute } from './routes/jobs.js';
 import { jobControlsRoute } from './routes/job-controls.js';
@@ -159,7 +160,7 @@ export function createApp(deps: Partial<AppDependencies>) {
             const control = await jobControlsRoute(deps.queue, deps.store, actor, request, url.pathname, data);
             if (control !== undefined)
                 return finish(json(control));
-            for (const route of [() => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
+            for (const route of [() => visualRoute(repo,deps.store,actor,request,url,data),() => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
                 const result = await route();
                 if (result !== undefined)
                     return finish(json(result));

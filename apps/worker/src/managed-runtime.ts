@@ -39,7 +39,8 @@ export function createManagedRuntime(deps: () => WorkerDeps, ready: () => boolea
                 await stop();
                 return { running: false, error: lastError };
             }
-            const p = object(params, ['workerId', 'token', 'name', 'controlOrigin', 'accessToken']), workerId = uuid(p.workerId), origin = controlOrigin(string(p.controlOrigin, 1000));
+            const p = object(params, ['workerId', 'token', 'name', 'controlOrigin', 'accessToken','mode']), workerId = uuid(p.workerId), origin = controlOrigin(string(p.controlOrigin, 1000));
+            if(p.mode!==undefined&&(method!=='managed.start'||!['all','visual'].includes(String(p.mode))))throw new AppError('INVALID_INPUT','Недопустимый режим исполнителя.');
             if (method === 'managed.revoke') {
                 await stop();
                 await admin(origin, `/workers/${workerId}/revoke`, string(p.accessToken, 16000), {});
@@ -55,13 +56,14 @@ export function createManagedRuntime(deps: () => WorkerDeps, ready: () => boolea
                 return { workerId, name };
             }
             if (method === 'managed.start') {
-                if (!ready())
+                if (!ready()&&p.mode!=='visual')
                     throw new AppError('UNAVAILABLE', 'Сначала настройте реальную модель на устройстве.');
                 if (running)
                     return { running: true, error: lastError };
                 abort = new AbortController();
                 lastError = null;
-                running = runWorker(createRemoteWorker({ controlOrigin: origin, workerId, workerToken: token, fetch: transport }, deps()), workerId, abort.signal)
+                const local=deps();const workerDeps=p.mode==='visual'?{...local,model:{identity:'unavailable',run:async()=>{throw new AppError('UNAVAILABLE','Модель не настроена.');}}}:local;
+                running = runWorker(createRemoteWorker({ controlOrigin: origin, workerId, workerToken: token, fetch: transport,...(p.mode==='visual'?{claimMode:'visual' as const}:{}) }, workerDeps), workerId, abort.signal)
                     .catch(() => {
                     lastError = 'Исполнитель остановлен: проверьте доступ устройства и подключение.';
                     abort?.abort();

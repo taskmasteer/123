@@ -10,7 +10,7 @@ import type { Issue } from './static.js';
 
 const deadlineMs = 10_000;
 // Deliberate allowlist: never inherit provider keys, proxy settings or application secrets.
-function browserEnvironment(): Record<string, string> {
+export function browserEnvironment(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LOCALAPPDATA']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];

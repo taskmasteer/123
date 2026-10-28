@@ -2,6 +2,12 @@ import { test, expect, vi } from 'vitest';
 import { RemoteClient, sessionView } from '../src/lib/remote-client.js';
 import { selectClient, desktopClient } from '../src/lib/desktop-client.js';
 const id = '11111111-1111-4111-8111-111111111111';
+test('remote evidence accepts the worker validation PNG identity but rejects traversal and encoded screenshot paths',async()=>{
+ const candidate={id,siteId:id,jobId:id,baseRevision:0,baseDraftId:id,baseManifestId:id,parentRevisionId:id,manifestId:id,status:'ready',validation:{ok:true,issues:[],screenshotIds:[`validation/${id}.png`]},summary:'Checked',createdAt:1,acceptance:null,instruction:'Visual edit',job:{id,siteId:id,kind:'edit',stage:'completed',state:'completed',checkpointId:id,baseRevision:0}};
+ let value:unknown={candidates:[candidate],publication:null};const client=new RemoteClient('https://control.test',async()=> 'fixture',async()=>Response.json(value));
+ expect((await client.request<any>('edit.list',{siteId:id})).candidates[0].validation.screenshotIds).toEqual([`validation/${id}.png`]);
+ for(const path of [`validation/../${id}.png`,`validation/%2f${id}.png`,`validation/${id}.png?token=x`,`other/${id}.png`]){value={candidates:[{...candidate,validation:{...candidate.validation,screenshotIds:[path]}}],publication:null};await expect(client.request('edit.list',{siteId:id})).rejects.toMatchObject({code:'INVALID_INPUT'});}
+});
 test('native lifecycle actions carry the configured origin before dispatching any credential', async () => {
     const requests: unknown[] = [];
     vi.stubGlobal('isTauri', true);

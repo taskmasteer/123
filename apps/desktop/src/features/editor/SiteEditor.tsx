@@ -6,6 +6,7 @@ import type { DesktopSite } from '../sites/SiteList.js';
 import { desktopClient } from '../../lib/desktop-client.js';
 import { ChatPanel } from './ChatPanel.js';
 import { PreviewComparison } from './PreviewComparison.js';
+import { VisualEditor } from './VisualEditor.js';
 
 import {PublicationPanel} from '../sites/PublicationPanel.js';
 
@@ -27,6 +28,8 @@ export function SiteEditor({ site, onChanged, modelMode,canPublish=true,managed=
   const canReview = selected?.status === 'ready' && selected.baseRevision === site.revision;
   const hasDraft = !!site.draftId && site.draftId !== site.publishedId;
   const previewable = selected && ['ready', 'accepted', 'conflict'].includes(selected.status);
+  const pendingVisual=review.candidates.find(c=>c.visualSave?.state==='pending');
+  const parentIndex=selected?review.candidates.findIndex(c=>c.id===selected.parentRevisionId):-1;
 
   useEffect(() => {
     let stopped = false;
@@ -72,6 +75,7 @@ export function SiteEditor({ site, onChanged, modelMode,canPublish=true,managed=
       {managed&&canPublish&&principal?<PublicationPanel site={site} principal={principal} onChanged={()=>onChanged()}/>:null}
       {pollError ? <div className="error-banner" role="alert"><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить чат</button></div> : null}
       {actionError ? <div className="error-banner" role="alert"><span>{actionError.message}</span><button onClick={() => setActionError(null)}>Закрыть сообщение</button></div> : null}
+      <VisualEditor key={`${site.id}:${principal?.userId??'demo'}:${managed}`} site={site} {...(principal?{principal}:{})} {...(pendingVisual?{pendingSaveId:pendingVisual.id}:{})} blocked={active&&!pendingVisual} onChanged={()=>onChanged()}/>
       <div className="editor-layout">
         <div className="editor-review">
           <div className="candidate-toolbar">
@@ -83,6 +87,7 @@ export function SiteEditor({ site, onChanged, modelMode,canPublish=true,managed=
           {managed?<div className="row-actions"><button disabled={busy||!(site.draftId??site.publishedId)} onClick={()=>void act('preview.open',{revisionId:previewable?selected.parentRevisionId:site.draftId??site.publishedId})}>Открыть исходную версию</button><button disabled={busy||!previewable} onClick={()=>void act('preview.open',{revisionId:selected?.id})}>Открыть вариант</button><p className="hint">Приватный предпросмотр проверенного варианта.</p></div>:<PreviewComparison siteId={site.id} domain={site.domain} beforeId={previewable ? selected.parentRevisionId : site.draftId ?? site.publishedId} afterId={previewable ? selected.id : null} {...(previewable ? { candidateId: selected.id } : {})} />}
           <div className="candidate-decision">
             <strong>{selected ? `Вариант ${review.candidates.indexOf(selected) + 1} · ${statuses[selected.status]}` : 'Первая правка'}</strong>
+            {parentIndex>=0?<p className="hint">Уточнение варианта {parentIndex+1}. Изменения построены на его файлах.</p>:null}
             <p>{selected?.summary || (active ? 'Дождитесь завершения или отмените текущую правку.' : 'Отправьте инструкцию, чтобы подготовить отдельный вариант сайта.')}</p>
             {selected?.validation?.ok ? <span className="badge success">✓ Проверки пройдены · 375 и 1440 px</span> : null}
             {selected?.status === 'conflict' || (selected?.status === 'ready' && !canReview) ? <p className="conflict-note">Черновик изменился. Вариант сохранён отдельно.</p> : null}

@@ -140,13 +140,26 @@ export class SupabaseRepository {
             throw new AppError('STALE_LEASE', 'Срок операции истёк.');
     }
     async release(a: Admission) { await this.transaction(async (tx) => { await tx.query('select id from public.sites where id=$1 for update', [a.siteId]); await tx.query("delete from private.site_operations where site_id=$1 and operation_id=$2 and kind='controller'", [a.siteId, a.token]); }); }
-    async compareAndSet(siteId: string, expectedRevision: number, patch: SitePatch, a?: Admission): Promise<Site> {
+    /** Monotone denial only; never grants admission or changes source/pointers, even while a worker owns the site. */
+    async denyRevokedVisualSave(actor:Principal,siteId:string,saveId:string):Promise<boolean> {
+        return this.transaction(async tx=>{
+            await tx.query('select id from public.sites where id=$1 for update',[siteId]);
+            const row=(await tx.query("select data from private.edit_requests where id=$1 and site_id=$2 and data#>>'{visualSave,actorId}'=$3 for update",[saveId,siteId,actor.userId])).rows[0];
+            if(!row||row.data.visualSave.state!=='pending')return false;
+            let denied=false;try{const site=await this.get(siteId,tx);if(!site)throw new AppError('NOT_FOUND','Нет сайта.');authorize(await this.fresh(tx,actor),'site:edit',site);}catch(error){if(!(error instanceof AppError&&['FORBIDDEN','NOT_FOUND'].includes(error.code)))throw error;denied=true;}
+            if(!denied)return false;
+            const candidate=row.data as import('../../contracts/src/editing.js').Candidate;candidate.visualSave!.state='failed';candidate.visualSave!.error='Доступ к сохранению отозван.';if(candidate.acceptance?.state==='pending')candidate.acceptance.state='conflict';
+            await tx.query('update private.edit_requests set data=$2 where id=$1',[saveId,candidate]);return true;
+        });
+    }
+    async compareAndSet(siteId: string, expectedRevision: number, patch: SitePatch, a?: Admission, visualActorId?:string): Promise<Site> {
         if (!a || a.siteId !== siteId)
             throw new AppError('UNAVAILABLE', 'Требуется полномочие операции.');
         patch = parseSitePatch(patch);
         return this.transaction(async (tx) => {
             await this.guard(tx, a);
             const s = (await this.get(siteId, tx))!;
+            if(visualActorId){authorize(await this.fresh(tx,{userId:visualActorId,role:'user'}),'site:edit',s);const save=(await tx.query("select 1 from private.edit_requests where id=$1 and site_id=$2 and data#>>'{visualSave,actorId}'=$3 and data#>>'{visualSave,state}'='pending'",[patch.draftId,siteId,visualActorId])).rowCount;if(!save)throw new AppError('FORBIDDEN','Сохранение больше не разрешено.');}
             if (s.revision !== expectedRevision)
                 throw new AppError('CONFLICT', 'Версия изменилась.');
             if (patch.assignedUserIds || patch.input)
@@ -179,6 +192,8 @@ export class SupabaseRepository {
                     for (const c of result.value.candidates) {
                         if (c.siteId !== a.siteId)
                             throw new AppError('FORBIDDEN', 'Чужой вариант.');
+                        const previous=(await tx.query('select data from private.edit_requests where id=$1',[c.id])).rows[0]?.data;
+                        if(previous?.visualSave?.state==='failed'&&c.visualSave?.state!=='failed')throw new AppError('CONFLICT','Отозванное сохранение нельзя возобновить.');
                         // Write-ahead candidate and queued job are atomic; enqueue below transfers admission.
                         await tx.query('insert into private.jobs(id,site_id,data) values($1,$2,$3) on conflict(id) do nothing', [c.jobId, a.siteId, c.job]);
                         const inserted = !(await tx.query('select 1 from private.edit_requests where id=$1', [c.id])).rowCount;

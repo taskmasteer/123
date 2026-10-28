@@ -1,6 +1,8 @@
 import { cursorShape } from '../../../../packages/core/src/site-pagination.js';
 import { importMethods } from '../../../../packages/contracts/src/import.js';
 import { importParams, importResponse } from '../../../../packages/contracts/src/import-wire.js';
+import { visualMethods,visualParams,visualResponse } from '../../../../packages/contracts/src/visual-wire.js';
+import { screenshotIdentity } from '../../../../packages/contracts/src/visual.js';
 import { AppError } from '../../../../packages/contracts/src/model.js';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { object, uuid, integer, string, siteView } from '../../../../packages/contracts/src/http.js';
@@ -48,6 +50,7 @@ function domainView(raw: unknown) {
     return p;
 }
 function validate(method: string, value: unknown): unknown {
+    if(Object.hasOwn(visualMethods,method))return visualResponse(method,value);
     if (Object.hasOwn(importMethods, method))
         return importResponse(method, value);
     if (method === 'publication.request' || method === 'publication.resume')
@@ -95,7 +98,8 @@ function validate(method: string, value: unknown): unknown {
     if (method === 'edit.list') {
         const p = object(value, ['candidates', 'publication']);
         for (const c of list(p.candidates)) {
-            const r = object(c, ['id', 'siteId', 'jobId', 'baseRevision', 'baseDraftId', 'baseManifestId', 'parentRevisionId', 'manifestId', 'status', 'validation', 'summary', 'createdAt', 'acceptance', 'instruction', 'job']);
+            const r = object(c, ['id', 'siteId', 'jobId', 'baseRevision', 'baseDraftId', 'baseManifestId', 'parentRevisionId', 'manifestId', 'status', 'validation', 'summary', 'createdAt', 'acceptance', 'instruction', 'job','visualSave']);
+            if(r.visualSave!==undefined){const v=object(r.visualSave,['state']);if(!['pending','completed','failed'].includes(String(v.state)))return bad();}
             for (const k of ['id', 'siteId', 'jobId', 'baseDraftId', 'baseManifestId', 'parentRevisionId'])
                 uuid(r[k]);
             integer(r.baseRevision);
@@ -109,7 +113,7 @@ function validate(method: string, value: unknown): unknown {
                 const v = object(r.validation, ['ok', 'issues', 'screenshotIds']);
                 if (typeof v.ok !== 'boolean')
                     return bad();
-                list(v.screenshotIds).forEach(uuid);
+                list(v.screenshotIds).forEach(screenshotIdentity);
                 list(v.issues).forEach(i => {
                     const issue = object(i, ['code', 'message', 'path']);
                     string(issue.code, 100);
@@ -216,14 +220,16 @@ export class RemoteClient {
         return invoke<T>('model_settings', { request });
     }
     async request<T>(method: string, params: unknown = {}): Promise<T> {
+        if(method.startsWith('visual.selection.')){if(!isTauri())throw new AppError('UNAVAILABLE','Выделение доступно в настольном приложении.');return invoke<T>('dispatch',{request:{id:crypto.randomUUID(),version:1,method,params:visualParams(method,params)}});}
         if (['worker.enroll', 'worker.start', 'worker.stop', 'worker.status', 'worker.remove'].includes(method)) {
             if (!isTauri())
                 throw new AppError('UNAVAILABLE', 'Запуск устройства доступен в нативном приложении.');
-            const p = object(params, method === 'worker.enroll' ? ['name'] : []), action = method.slice(7);
+            const p = object(params, method === 'worker.enroll' ? ['name'] : method==='worker.start'?['mode']:[]), action = method.slice(7);
+            if(p.mode!==undefined&&!['all','visual'].includes(String(p.mode)))return bad();
             const accessToken = ['enroll', 'remove'].includes(action) ? await this.token() : undefined;
             if (['enroll', 'remove'].includes(action) && !accessToken)
                 throw new AppError('UNAUTHENTICATED', 'Войдите в систему.');
-            const value = object(await invoke('managed_worker', { request: { action: action === 'remove' ? 'revoke' : action, ...(action === 'enroll' ? { name: string(p.name, 100), origin: this.base } : {}), ...(['start', 'stop', 'remove'].includes(action) ? { expectedOrigin: this.base } : {}), ...(accessToken ? { accessToken } : {}) } }), ['workerId', 'name', 'origin', 'enrolled', 'running', 'error']);
+            const value = object(await invoke('managed_worker', { request: { action: action === 'remove' ? 'revoke' : action, ...(action === 'enroll' ? { name: string(p.name, 100), origin: this.base } : {}),...(action==='start'&&p.mode?{mode:p.mode}:{}), ...(['start', 'stop', 'remove'].includes(action) ? { expectedOrigin: this.base } : {}), ...(accessToken ? { accessToken } : {}) } }), ['workerId', 'name', 'origin', 'enrolled', 'running', 'error']);
             if (value.workerId !== null)
                 uuid(value.workerId);
             if (value.name !== null)
@@ -234,7 +240,7 @@ export class RemoteClient {
                 return bad();
             return value as T;
         }
-        const p = Object.hasOwn(importMethods, method) ? importParams(method, params) : object(params, ['siteId', 'revisionId', 'instruction', 'expectedRevision', 'candidateId', 'domain', 'about', 'referenceId', 'logoAssetId', 'id', 'enabled', 'description', 'email', 'role', 'active', 'userIds', 'cursor', 'requestKey', 'domainFilter', 'status', 'batchId', 'limit']);
+        const p = Object.hasOwn(visualMethods,method)?visualParams(method,params):Object.hasOwn(importMethods, method) ? importParams(method, params) : object(params, ['siteId', 'revisionId', 'instruction', 'expectedRevision', 'candidateId', 'domain', 'about', 'referenceId', 'logoAssetId', 'id', 'enabled', 'description', 'email', 'role', 'active', 'userIds', 'cursor', 'requestKey', 'domainFilter', 'status', 'batchId', 'limit']);
         if (method === 'device.status')
             return { mode: 'blocked', available: false, activeJobs: 0, maxJobs: 2, model: null, images: 'disabled', storage: 'managed', publication: 'unavailable' } as T;
         if (method === 'batch.retry' && isTauri()) {
@@ -336,6 +342,11 @@ export class RemoteClient {
             case 'edit.list':
                 path = `/sites/${uuid(p.siteId)}/candidates`;
                 break;
+            case 'visual.projection':case 'visual.projection.chunk':{
+                const query=new URLSearchParams({expectedRevision:String(p.expectedRevision)});if(method==='visual.projection.chunk'){query.set('mapId',String(p.mapId));query.set('index',String(p.index));}path=`/sites/${uuid(p.siteId)}/visual/projection?${query}`;break;
+            }
+            case 'visual.submit':path=`/sites/${uuid(p.siteId)}/visual/saves`;verb='POST';body={expectedRevision:p.expectedRevision,mapId:p.mapId,patch:p.patch,requestKey:p.requestKey};break;
+            case 'visual.status':path=`/sites/${uuid(p.siteId)}/visual/saves/${uuid(p.saveId)}`;break;
             case 'chat.list':
                 path = `/sites/${uuid(p.siteId)}/chat`;
                 break;

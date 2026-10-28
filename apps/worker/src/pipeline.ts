@@ -10,6 +10,8 @@ import { record } from '../../../packages/contracts/src/inputs.js';
 import { artifactMediaType, checkArtifacts } from '../../../packages/core/src/artifacts.js';
 import { createFileTools } from './files/tools.js';
 import { validateSite } from './validation/browser.js';
+import { createEditableMap } from '../../../packages/core/src/visual/editable-map.js';
+import { patchFiles } from '../../../packages/core/src/visual/html-patch.js';
 export interface WorkerDeps {
     /** Remote ports bind protected reads/writes to this claim, never shared mutable current-job state. */
     bind?: (job: Job, lease: Lease) => Promise<WorkerDeps>;
@@ -84,6 +86,7 @@ function validReport(value: unknown): value is ValidationReport {
 function parseState(value: Record<string, unknown>, job: Job): PipelineState {
     const selection = value.selection;
     if (value.schema !== 1 || value.jobId !== job.id || value.siteId !== job.siteId || value.baseRevision !== job.baseRevision ||
+        JSON.stringify(value.visualProducer)!==JSON.stringify(job.edit?.producer) ||
         !record(selection) || !Number.isSafeInteger(selection.seed) || (selection.seed as number) < 0 || typeof selection.styleId !== 'string' || !selection.styleId ||
         typeof selection.templateVersion !== 'string' || !selection.templateVersion || typeof value.brief !== 'string' || !value.brief ||
         (value.image !== null && value.image !== 'assets/network.svg') || !Number.isInteger(value.repairAttempts) ||
@@ -186,7 +189,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             files = saved.files;
             checkArtifacts(files);
             stage = saved.checkpoint.stage;
-            if ((state.modelIdentity ?? 'demo') !== (deps.model.identity ?? 'demo') && !canApplyRecovery())
+            if (!job.edit?.producer && (state.modelIdentity ?? 'demo') !== (deps.model.identity ?? 'demo') && !canApplyRecovery())
                 throw new AppError('NEEDS_ATTENTION', 'The saved operation requires its originally configured model; no fallback was used.');
             if (state.pendingRepairInstruction !== undefined && stage !== 'validate')
                 throw new AppError('INVALID_INPUT', 'A pending repair requires the validation stage.');
@@ -222,7 +225,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                 throw new AppError('INVALID_INPUT', 'A catalog is required to resolve the selected reference.');
             const selection = prepared?.generation ?? (job.kind === 'edit' ? { seed, styleId: 'existing-site', templateVersion: 'existing' } : { seed, styleId: ['light-product', 'dark-tech', 'editorial', 'corporate', 'diagram'][seed % 5]!, templateVersion: '1.0.0' });
             const brief = site.input.about?.trim() || `${topics[selection.seed % topics.length]} for ${site.domain}`;
-            state = { schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief, modelIdentity: deps.model.identity ?? 'demo',
+            state = { ...(job.edit?.producer?{visualProducer:job.edit.producer}:{}),schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief, modelIdentity: deps.model.identity ?? 'demo',
                 image: selection.seed % 100 < 10 ? 'assets/network.svg' : null, repairAttempts: 0, transportRetries: 0, transcript: [], toolTranscript: [], manifestId: null, intentId: null,
                 baseManifestId: parent?.manifestId ?? null, parentRevisionId, revisionId: null, revisionCreatedAt: null,
                 instruction: job.edit?.instruction ?? deps.request?.instruction ?? brief, conversation: job.edit?.conversation ?? deps.request?.conversation ?? [],
@@ -360,7 +363,17 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             }
         }
         if (stage === 'generate') {
-            await generate(state.instruction);
+            if(job.edit?.producer){
+                const producer=job.edit.producer;
+                if(producer.binding.siteId!==site.id||producer.binding.revisionId!==state.parentRevisionId||producer.binding.manifestId!==state.baseManifestId||job.providerRecovery)throw new AppError('INVALID_INPUT','Визуальная правка не соответствует исходной версии.');
+                const map=createEditableMap(files,producer.binding);
+                if(map.binding.mapId!==producer.binding.mapId)throw new AppError('CONFLICT','Карта исходника устарела.');
+                let image:ArtifactFile|undefined;
+                if(producer.patch.imageAssetId){if(producer.patch.imageAssetId!==site.input.logoAssetId)throw new AppError('FORBIDDEN','Изображение другого сайта.');if(!deps.readLogo)throw new AppError('UNAVAILABLE','Проверенное изображение недоступно.');image={...await deps.readLogo(producer.patch.imageAssetId,site.id),path:`assets/visual-${producer.patch.imageAssetId}.png`};}
+                files=patchFiles(files,map,producer.patch,image);
+                state.visualMap=createEditableMap(files,{...producer.binding,revisionId:job.edit.candidateId}).binding;
+                state.visualSummary='Визуальная правка проверена.';
+            }else await generate(state.instruction);
             await save('validate');
         }
         if (stage === 'validate') {
@@ -381,6 +394,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                     await save('archive');
                     break;
                 }
+                if(job.edit?.producer)throw new AppError('NEEDS_ATTENTION','Визуальная правка не прошла проверку: '+report.issues.slice(0,3).map(i=>i.message).join('; '));
                 if (state.repairAttempts >= 2)
                     throw new AppError('NEEDS_ATTENTION', 'Validation failed after two repairs.');
                 state.repairAttempts++;
@@ -392,6 +406,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             await check();
             const manifest = await deps.artifacts.put(site.id, files, state.selection.templateVersion);
             state.manifestId = manifest.id;
+            if(job.edit?.producer)state.visualMap=createEditableMap(files,{...job.edit.producer.binding,revisionId:job.edit.candidateId,manifestId:manifest.id}).binding;
             state.intentId = `${job.id}:${manifest.id}`;
             state.revisionId = job.kind === 'generate' ? randomUUID() : job.edit?.candidateId ?? null;
             state.revisionCreatedAt = deps.clock.now();

@@ -192,12 +192,13 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             return { id };
         });
     }
-    async claim(workerId: string): Promise<{
+    async claim(workerId: string,mode:'all'|'visual'='all'): Promise<{
         job: Job;
         lease: Lease;
     } | null> {
         try {
-            return (await this.repository.pool.query('select private.claim_job($1) result', [workerId])).rows[0].result;
+            if(!['all','visual'].includes(mode))throw new AppError('INVALID_INPUT','Invalid claim mode.');
+            return (await this.repository.pool.query('select private.claim_job($1,$2) result', [workerId,mode==='visual'])).rows[0].result;
         }
         catch (error) {
             if (error instanceof Error && error.message === 'STALE_LEASE')

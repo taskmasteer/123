@@ -27,8 +27,8 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
         return publication ? publication.receipt(workerId, lease) : null;
     }
     if (path === '/worker/jobs/claim') {
-        object(body, []);
-        return queue.claim(workerId);
+        const p=object(body, ['mode']);if(p.mode!==undefined&&!['all','visual'].includes(String(p.mode)))throw new AppError('INVALID_INPUT','Invalid claim mode.');
+        return queue.claim(workerId,p.mode as 'all'|'visual'|undefined);
     }
     const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo)$/.exec(path);
     if (!route)

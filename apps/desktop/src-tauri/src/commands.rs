@@ -1,6 +1,8 @@
 use crate::worker::Worker;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[path = "visual.rs"]
+mod visual;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopRequest {
@@ -48,6 +50,7 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
     {
         return Err(invalid());
     }
+    if request.method.starts_with("visual."){return visual::validate(&request.method,&request.params);}
     let allowed: &[&str] = match request.method.as_str() {
         "device.status" | "catalog.list" => &[],
         "site.list" => &["cursor", "limit", "domain", "status", "batchId"],
