@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { PNG } from 'pngjs';
+import { crc32, inflateSync } from 'node:zlib';
 import { AppError } from '../../contracts/src/model.js';
 import type { Principal, ArtifactFile } from '../../contracts/src/model.js';
 import type { ImportRowView } from '../../contracts/src/import.js';
@@ -19,14 +20,86 @@ interface Resource {
     revision?: number;
 }
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+/** Validate the one header pngjs will consume, then bound inflation before its allocations. */
+function logoPreflight(bytes: Buffer) {
+    if (bytes.length < 45 || bytes.length > 2000000 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a')
+        throw new Error('PNG source size/signature');
+    let width = 0, height = 0, depth = 0, channels = 0, interlace = 0, ended = false, dataEnded = false;
+    const idat: Buffer[] = [];
+    for (let offset = 8; offset < bytes.length;) {
+        if (bytes.length - offset < 12)
+            throw new Error('Truncated PNG chunk');
+        const length = bytes.readUInt32BE(offset), end = offset + 12 + length;
+        if (end > bytes.length)
+            throw new Error('Truncated PNG chunk payload');
+        const type = bytes.toString('latin1', offset + 4, offset + 8);
+        if (!/^[A-Za-z]{2}[A-Z][A-Za-z]$/.test(type) || crc32(bytes.subarray(offset + 4, end - 4)) !== bytes.readUInt32BE(end - 4))
+            throw new Error('Invalid PNG chunk type/CRC');
+        if (type === 'IHDR') {
+            if (offset !== 8 || length !== 13)
+                throw new Error('Duplicate/malformed IHDR');
+            width = bytes.readUInt32BE(offset + 8);
+            height = bytes.readUInt32BE(offset + 12);
+            depth = bytes[offset + 16]!;
+            const color = bytes[offset + 17]!;
+            const depths: Record<number, number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+            channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[color] ?? 0;
+            interlace = bytes[offset + 20]!;
+            if (width < 1 || width > 2048 || height < 1 || height > 2048 || !depths[color]?.includes(depth) || bytes[offset + 18] !== 0 || bytes[offset + 19] !== 0 || interlace > 1)
+                throw new Error('Unsupported PNG header');
+        }
+        else if (!width) {
+            throw new Error('IHDR must be first');
+        }
+        if (type === 'IDAT') {
+            if (dataEnded)
+                throw new Error('Noncontiguous IDAT');
+            idat.push(bytes.subarray(offset + 8, end - 4));
+        }
+        else if (idat.length) {
+            dataEnded = true;
+        }
+        if (type === 'IEND') {
+            if (length !== 0 || end !== bytes.length || !idat.length)
+                throw new Error('Invalid PNG end');
+            ended = true;
+        }
+        offset = end;
+    }
+    if (!ended)
+        throw new Error('Missing PNG end');
+    // RGBA16 is pngjs's largest decoded bitmap; Adam7 adds one filter byte per pass row.
+    const decodedBytes = width * height * 4 * (depth === 16 ? 2 : 1);
+    const passes = interlace ? [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]] : [[0, 0, 1, 1]];
+    let inflatedBytes = 0;
+    for (const [x, y, dx, dy] of passes as [
+        number,
+        number,
+        number,
+        number
+    ][]) {
+        const w = Math.max(0, Math.ceil((width - x) / dx)), h = Math.max(0, Math.ceil((height - y) / dy));
+        if (w && h)
+            inflatedBytes += (Math.ceil(w * channels * depth / 8) + 1) * h;
+    }
+    if (decodedBytes > 32 * 1024 * 1024 || inflatedBytes > 34 * 1024 * 1024)
+        throw new Error('PNG bitmap budget');
+    // pngjs's interlaced path otherwise uses an unbounded inflateSync. Validate the exact
+    // immutable compressed stream first, including its scanline length, for both paths.
+    const inflated = inflateSync(Buffer.concat(idat), { maxOutputLength: inflatedBytes });
+    if (inflated.length !== inflatedBytes)
+        throw new Error('Invalid PNG scanline length');
+    return { width, height };
+}
 export function decodeLogo(bytes: Buffer): ArtifactFile {
-    if (bytes.length < 33 || bytes.length > 2000000 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || bytes.readUInt32BE(16) < 1 || bytes.readUInt32BE(16) > 2048 || bytes.readUInt32BE(20) < 1 || bytes.readUInt32BE(20) > 2048)
-        throw new AppError('INVALID_INPUT', 'Логотип: PNG до 2 МБ и 2048 × 2048 пикселей.');
     try {
-        PNG.sync.read(bytes, { checkCRC: true });
+        const header = logoPreflight(bytes);
+        const decoded = PNG.sync.read(bytes, { checkCRC: true });
+        if (decoded.width !== header.width || decoded.height !== header.height || decoded.data.byteLength > 32 * 1024 * 1024)
+            throw new Error('PNG decoder/header mismatch');
     }
     catch (error) {
-        throw new AppError('INVALID_INPUT', 'Некорректный PNG.', { cause: error });
+        throw new AppError('INVALID_INPUT', 'Логотип: корректный PNG до 2 МБ и 2048 × 2048 пикселей.', { cause: error });
     }
     return { path: 'assets/logo.png', bytes: new Uint8Array(bytes), mediaType: 'image/png' };
 }

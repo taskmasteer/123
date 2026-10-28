@@ -1,12 +1,13 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { PNG } from 'pngjs';
+import { crc32, deflateSync } from 'node:zlib';
 import { openLocalDatabase } from '../src/local-database.js';
 import { LocalBatches } from '../src/local-batches.js';
-import { LocalImportResources } from '../src/import-resources.js';
+import { LocalImportResources, decodeLogo } from '../src/import-resources.js';
 const owner = { userId: 'owner', role: 'user' } as const;
 it('stages bounded hashed chunks, edits one about, maps a local logo, and keeps invalid rows after commit', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-resource-')), db = await openLocalDatabase(root), b = new LocalBatches(db), resources = new LocalImportResources(b);
@@ -51,5 +52,60 @@ it('keeps worst multibyte invalid preview cells intact inside a bounded serializ
     finally {
         await db.close();
         await rm(root, { recursive: true, force: true });
+    }
+});
+function pngChunk(type: string, data: Buffer) {
+    const chunk = Buffer.alloc(data.length + 12);
+    chunk.writeUInt32BE(data.length, 0);
+    chunk.write(type, 4, 'ascii');
+    data.copy(chunk, 8);
+    chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+    return chunk;
+}
+it('rejects a tiny duplicate IHDR before the decoder can replace its checked dimensions', () => {
+    const small = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+    const large = PNG.sync.write(new PNG({ width: 2049, height: 1 }));
+    const attack = Buffer.concat([small.subarray(0, 33), large.subarray(8)]);
+    expect(attack.length).toBe(112);
+    expect(PNG.sync.read(attack).width).toBe(2049);
+    const read = vi.spyOn(PNG.sync, 'read');
+    try {
+        expect(() => decodeLogo(attack)).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+        expect(read).not.toHaveBeenCalled();
+    }
+    finally {
+        read.mockRestore();
+    }
+});
+it('rejects malformed IHDR and excess interlaced inflation before calling pngjs', () => {
+    const png = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+    const header = Buffer.from(png.subarray(16, 29));
+    header[12] = 1;
+    const bomb = Buffer.concat([png.subarray(0, 8), pngChunk('IHDR', header), pngChunk('IDAT', deflateSync(Buffer.alloc(4096))), pngChunk('IEND', Buffer.alloc(0))]);
+    const malformed = Buffer.concat([png.subarray(0, 8), pngChunk('IHDR', header.subarray(0, 12)), png.subarray(33)]);
+    const badCrc = Buffer.from(png);
+    badCrc[29] = badCrc[29]! ^ 1;
+    const read = vi.spyOn(PNG.sync, 'read');
+    try {
+        for (const bytes of [bomb, malformed, badCrc]) {
+            expect(() => decodeLogo(bytes)).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+            expect(read).not.toHaveBeenCalled();
+        }
+    }
+    finally {
+        read.mockRestore();
+    }
+});
+it('accepts legal Adam7 passes, RGBA16 scanlines and the maximum supported width', () => {
+    const png = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+    for (const [width, height, depth, interlace, scanlineBytes] of [[1, 1, 8, 1, 5], [8, 8, 8, 1, 271], [1, 1, 16, 0, 9], [2048, 1, 8, 0, 8193]]) {
+        const header = Buffer.from(png.subarray(16, 29));
+        header.writeUInt32BE(width!, 0);
+        header.writeUInt32BE(height!, 4);
+        header[8] = depth!;
+        header[12] = interlace!;
+        const bytes = Buffer.concat([png.subarray(0, 8), pngChunk('IHDR', header), pngChunk('IDAT', deflateSync(Buffer.alloc(scanlineBytes!))), pngChunk('IEND', Buffer.alloc(0))]);
+        expect(decodeLogo(bytes).bytes).toEqual(new Uint8Array(bytes));
+        expect(PNG.sync.read(bytes)).toMatchObject({ width, height });
     }
 });

@@ -174,3 +174,55 @@ it('wires staged HTTP source and PNG mapping through fresh services to a lease-b
         await pool.end();
     }
 });
+it('projects current registry status across failures, running and pause/resume with filtered cursors', async () => {
+    const pool = await database();
+    try {
+        await seedUsers(pool);
+        const sites = new SupabaseRepository(pool), b = new PostgresBatches(sites), q = new PostgresQueue(sites), owner = { userId: identities.user, role: 'user' } as const;
+        const workerA = randomUUID(), workerB = randomUUID(), current = (id: string) => sites.current(id);
+        for (const [worker, token] of [[workerA, 'c'], [workerB, 'd']])
+            await pool.query('insert into private.workers(id,name,token_hash) values($1,$2,$3)', [worker, 'fixture', token!.repeat(64)]);
+        let batchId: string;
+        const pause = () => b.request(owner, 'batch.pause', { id: batchId }), resume = () => b.request(owner, 'batch.resume', { id: batchId });
+        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ rowNumber: i + 2, domain: 'status-' + i + '.test' })), 'status');
+        batchId = batch.batchId;
+        const a = (await q.claim(workerA))!, c = (await q.claim(workerA))!, d = (await q.claim(workerB))!;
+        expect(a).not.toBeNull();
+        expect(c).not.toBeNull();
+        expect(d).not.toBeNull();
+        await q.finish(a.lease, 'needs_attention');
+        await q.finish(c.lease, 'needs_attention');
+        const walk = async (status: string, expected: string[]) => {
+            const ids: string[] = [];
+            let cursor: string | undefined;
+            do {
+                const page = await sites.list(owner, cursor, 1, { status, batchId: batch.batchId });
+                for (const site of page.items) {
+                    expect((await current(site.id))?.state ?? site.generationStatus).toBe(status);
+                    ids.push(site.id);
+                }
+                if (!cursor && page.nextCursor)
+                    await expect(sites.list(owner, page.nextCursor, 1, { status: 'waiting_provider', batchId: batch.batchId })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+                cursor = page.nextCursor ?? undefined;
+            } while (cursor);
+            expect(ids.sort()).toEqual([...expected].sort());
+            expect(new Set(ids).size).toBe(ids.length);
+        };
+        expect((await sites.get(a.job.siteId))!.generationStatus).toBe('queued');
+        await walk('needs_attention', [a.job.siteId, c.job.siteId]);
+        await walk('running', [d.job.siteId]);
+        const unclaimed = batch.siteIds.filter(id => ![a.job.siteId, c.job.siteId, d.job.siteId].includes(id));
+        await walk('queued', unclaimed);
+        await pause();
+        expect(await q.pauseAtBoundary!(d.lease)).toBe(true);
+        await walk('paused', [d.job.siteId]);
+        await walk('running', []);
+        await resume();
+        await walk('paused', []);
+        await walk('queued', [...unclaimed, d.job.siteId]);
+        await walk('needs_attention', [a.job.siteId, c.job.siteId]);
+    }
+    finally {
+        await pool.end();
+    }
+});

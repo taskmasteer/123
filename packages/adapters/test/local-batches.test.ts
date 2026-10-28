@@ -73,3 +73,54 @@ it('pauses at stage boundaries, resumes only paused work and fences cancelled ge
         await rm(root, { recursive: true, force: true });
     }
 });
+it('projects current registry status across failures, running and pause/resume with filtered cursors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sf-status-')), db = await openLocalDatabase(root), b = new LocalBatches(db), q = await createLocalQueue(root, { now: () => 1000 }, db), sites = await createLocalState(root, { now: () => 1000 }, db);
+    const workerA = 'worker-a', workerB = 'worker-b', current = (id: string) => q.current(id);
+    let batchId: string;
+    const pause = () => b.pauseBatch(owner, batchId), resume = () => b.resumeBatch(owner, batchId);
+    try {
+        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ rowNumber: i + 2, domain: 'status-' + i + '.test' })), 'status');
+        batchId = batch.batchId;
+        const a = (await q.claim(workerA))!, c = (await q.claim(workerA))!, d = (await q.claim(workerB))!;
+        expect(a).not.toBeNull();
+        expect(c).not.toBeNull();
+        expect(d).not.toBeNull();
+        await q.finish(a.lease, 'needs_attention');
+        await q.finish(c.lease, 'needs_attention');
+        const walk = async (status: string, expected: string[]) => {
+            const ids: string[] = [];
+            let cursor: string | undefined;
+            do {
+                const page = await sites.list(owner, cursor, 1, { status, batchId: batch.batchId });
+                for (const site of page.items) {
+                    expect((await current(site.id))?.state ?? site.generationStatus).toBe(status);
+                    ids.push(site.id);
+                }
+                if (!cursor && page.nextCursor)
+                    await expect(sites.list(owner, page.nextCursor, 1, { status: 'waiting_provider', batchId: batch.batchId })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+                cursor = page.nextCursor ?? undefined;
+            } while (cursor);
+            expect(ids.sort()).toEqual([...expected].sort());
+            expect(new Set(ids).size).toBe(ids.length);
+        };
+        expect((await sites.get(a.job.siteId))!.generationStatus).toBe('queued');
+        await walk('needs_attention', [a.job.siteId, c.job.siteId]);
+        await walk('running', [d.job.siteId]);
+        const unclaimed = batch.siteIds.filter(id => ![a.job.siteId, c.job.siteId, d.job.siteId].includes(id));
+        await walk('queued', unclaimed);
+        await pause();
+        expect(await q.pauseAtBoundary!(d.lease)).toBe(true);
+        await walk('paused', [d.job.siteId]);
+        await walk('running', []);
+        await resume();
+        await walk('paused', []);
+        await walk('queued', [...unclaimed, d.job.siteId]);
+        await walk('needs_attention', [a.job.siteId, c.job.siteId]);
+    }
+    finally {
+        await q.close();
+        await sites.close();
+        await db.close();
+        await rm(root, { recursive: true, force: true });
+    }
+});
