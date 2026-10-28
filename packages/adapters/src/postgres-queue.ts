@@ -84,6 +84,8 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
     async retry(jobId: string, recovery?: Job['providerRecovery'], actor?: Principal): Promise<void> {
         await this.repository.transaction(async (tx) => {
             const row = await this.lockJob(tx, jobId), job = row.data as Job;
+            if (row.batch_id && (await tx.query('select state from private.batches where id=$1', [row.batch_id])).rows[0]?.state !== 'active')
+                throw new AppError('CONFLICT', 'Сначала продолжите пачку.');
             if (actor)
                 await this.authorizeControl(tx, actor, job);
             if (!['paused', 'waiting_provider', 'needs_attention'].includes(job.state) || job.state === 'needs_attention' && !recovery)

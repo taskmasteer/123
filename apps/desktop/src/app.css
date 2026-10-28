@@ -735,3 +735,6 @@ button[aria-pressed=true] {
 .publication-panel th, .publication-panel td { overflow-wrap:anywhere; vertical-align:top }
 .publication-panel th:first-child { width:90px }
 .publication-panel td:first-child { white-space:nowrap }
+
+/* Import review uses the registry hierarchy and readable row-level source text. */
+.registry-filters{display:flex;gap:16px;align-items:end;flex-wrap:wrap;margin-bottom:18px}.registry-filters label{display:grid;gap:6px;flex:1;min-width:180px}.batch-detail{display:grid;gap:16px;min-width:0}.batch-detail h2,.batch-detail p{margin:0}.batch-table{overflow:auto}.batch-table table{table-layout:fixed;width:100%}.batch-table th:first-child{width:64px}.batch-table th:last-child{width:160px}.batch-table td{white-space:normal;overflow-wrap:anywhere;vertical-align:top}.batch-about{max-height:12em;overflow:auto;white-space:pre-wrap;line-height:1.5}.batch-table ul{margin:0;padding-left:18px}.logo-picker{display:grid;gap:8px;margin-top:10px;font-size:12px}.logo-picker input{width:100%;min-width:0}.batch-row-edit label{display:grid;gap:8px;margin:12px 0}.batch-row-edit textarea{min-height:130px;resize:vertical}.batch-filter{display:flex;gap:12px;align-items:center}.batch-summary{display:block;width:100%;text-align:left;margin:8px 0;white-space:normal}.batch-import input[type=file]{max-width:100%}

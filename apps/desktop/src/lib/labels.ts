@@ -1,0 +1,3 @@
+export function siteCount(count: number) { const n = Math.abs(count) % 100, last = n % 10; return `${count} ${n >= 11 && n <= 14 ? 'сайтов' : last === 1 ? 'сайт' : last >= 2 && last <= 4 ? 'сайта' : 'сайтов'}`; }
+export function jobStageLabel(value: string) { return ({ brief: 'Подготовка', assets: 'Материалы', generate: 'Создание', validate: 'Проверка', archive: 'Сохранение', publication: 'Публикация', completed: 'Завершено' } as Record<string, string>)[value] ?? value; }
+export function jobStateLabel(value: string) { return ({ queued: 'В очереди', running: 'Выполняется', paused: 'Приостановлено', waiting_provider: 'Ожидание сервиса', needs_attention: 'Нужна проверка', completed: 'Завершено', cancelled: 'Отменено' } as Record<string, string>)[value] ?? value; }

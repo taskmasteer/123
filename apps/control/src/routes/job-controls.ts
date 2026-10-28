@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AppError, type Principal } from '../../../../packages/contracts/src/model.js';
+import { AppError, type Principal, type Job } from '../../../../packages/contracts/src/model.js';
 import { object, string, uuid } from '../../../../packages/contracts/src/http.js';
 import { record } from '../../../../packages/contracts/src/inputs.js';
 import type { PostgresQueue } from '../../../../packages/adapters/src/postgres-queue.js';
@@ -21,6 +21,10 @@ export async function jobControlsRoute(queue: PostgresQueue | undefined, store: 
         await queue.cancel(job.id, actor);
         return { ok: true };
     }
+    return retryControlledJob(queue, store, actor, job, body);
+}
+export async function retryControlledJob(queue: PostgresQueue, store: R2Store | undefined, actor: Principal, job: Job, body: unknown) {
+    const siteId = job.siteId;
     const p = object(body, ['modelIdentity']);
     let recovery;
     if (job.state === 'needs_attention') {

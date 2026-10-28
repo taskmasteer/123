@@ -59,7 +59,7 @@ export function createRemoteWorker(options: {
     }
     const endpoint = (lease: Lease, action: string) => `/worker/jobs/${lease.jobId}/${action}`;
     const queue: Queue = {
-        async continuePublications(){await call('/worker/publications/tick',{});},
+        async continuePublications() { await call('/worker/publications/tick', {}); },
         async enqueue() {
             throw new AppError('FORBIDDEN', 'Исполнитель не создаёт задания.');
         },
@@ -123,6 +123,12 @@ export function createRemoteWorker(options: {
                 return { checkpoint, state, files };
             }
             const bound: WorkerDeps = { ...local, queue,
+                async readLogo(assetId, siteId) {
+                    if (siteId !== job.siteId)
+                        throw new AppError('FORBIDDEN', 'Чужой сайт.');
+                    const bytes = await scoped('logo', { id: uuid(assetId) }, true);
+                    return { path: 'assets/logo.png', mediaType: 'image/png', bytes };
+                },
                 sites: { ...local.sites, async get(id) {
                         if (id !== job.siteId)
                             throw new AppError('FORBIDDEN', 'Чужой сайт.');
@@ -178,16 +184,18 @@ export function createRemoteWorker(options: {
                     const selected = available[seed % available.length];
                     return { ...current, generation: { seed, styleId: string(selected.id, 100), templateVersion: string(selected.version, 100) } };
                 },
-                publication: { async settlement(){
-                        const raw=await scoped('publication-receipt');if(raw===null)return null;
-                        const r=object(raw,['jobId','siteId','checkpointId','requestKey','revisionId','manifestId','expectedRevision']);
-                        return {jobId:uuid(r.jobId),siteId:uuid(r.siteId),checkpointId:uuid(r.checkpointId),requestKey:string(r.requestKey,200),revisionId:uuid(r.revisionId),manifestId:uuid(r.manifestId),expectedRevision:integer(r.expectedRevision)};
-                    },async advance(requestKey) {
+                publication: { async settlement() {
+                        const raw = await scoped('publication-receipt');
+                        if (raw === null)
+                            return null;
+                        const r = object(raw, ['jobId', 'siteId', 'checkpointId', 'requestKey', 'revisionId', 'manifestId', 'expectedRevision']);
+                        return { jobId: uuid(r.jobId), siteId: uuid(r.siteId), checkpointId: uuid(r.checkpointId), requestKey: string(r.requestKey, 200), revisionId: uuid(r.revisionId), manifestId: uuid(r.manifestId), expectedRevision: integer(r.expectedRevision) };
+                    }, async advance(requestKey) {
                         if (!publicationState || !job.checkpointId)
                             throw new AppError('CONFLICT', 'Нет сохранённого этапа публикации.');
                         const p = object(await scoped('publication', { binding: { requestKey, manifestId: publicationState.manifestId, revisionId: publicationState.revisionId, expectedRevision: job.baseRevision, checkpointId: job.checkpointId } }), ['id', 'state']);
                         uuid(p.id);
-                        if (!['pending','uploading','creating','checking','promoting','reconciling','waiting_quota','awaiting_dns','published','needs_attention'].includes(String(p.state)))
+                        if (!['pending', 'uploading', 'creating', 'checking', 'promoting', 'reconciling', 'waiting_quota', 'awaiting_dns', 'published', 'needs_attention'].includes(String(p.state)))
                             throw new AppError('INVALID_INPUT', 'Некорректное состояние публикации.');
                         return p.state as import('../../../packages/contracts/src/model.js').PublicationState;
                     } },

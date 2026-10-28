@@ -49,7 +49,25 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
         return Err(invalid());
     }
     let allowed: &[&str] = match request.method.as_str() {
-        "site.list" | "device.status" | "catalog.list" => &[],
+        "device.status" | "catalog.list" => &[],
+        "site.list" => &["cursor", "limit", "domain", "status", "batchId"],
+        "resource.begin" => &["name", "size", "sha256", "draftId", "rowNumber", "revision"],
+        "resource.chunk" => &["id", "index", "base64"],
+        "import.prepare" | "logo.complete" | "batch.get" | "batch.pause" | "batch.resume"
+        | "batch.cancel" => &["id"],
+        "import.update" => &[
+            "id",
+            "revision",
+            "rowNumber",
+            "domain",
+            "about",
+            "referenceId",
+        ],
+        "import.commit" => &["id", "revision", "requestKey"],
+        "batch.list" => &["cursor"],
+        "batch.rows" => &["id", "cursor", "status"],
+        "batch.retry" => &["id", "rowNumber", "modelIdentity"],
+        "batch.assign" => &["id", "userIds"],
         "site.create" => &["domain", "about", "referenceId"],
         "job.status" | "job.retry" | "edit.list" | "chat.list" => &["siteId"],
         "edit.request" => &["siteId", "instruction", "expectedRevision", "candidateId"],
@@ -144,6 +162,121 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
                 return Err(invalid());
             }
         }
+        "resource.begin" => {
+            let logo = params.contains_key("draftId");
+            if !text("name", 800)
+                || !params
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|v| v > 0 && v <= if logo { 2_000_000 } else { 16 * 1024 * 1024 })
+                || !params
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| {
+                        v.len() == 64
+                            && v.bytes()
+                                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    })
+                || (logo
+                    && (!uuid("draftId")
+                        || !params
+                            .get("rowNumber")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|v| (2..=5001).contains(&v))
+                        || !params
+                            .get("revision")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|v| v <= 9_007_199_254_740_991)))
+            {
+                return Err(invalid());
+            }
+        }
+        "resource.chunk" => {
+            if !uuid("id")
+                || !params
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|v| v <= 699)
+                || !params
+                    .get("base64")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| {
+                        !v.is_empty()
+                            && v.len() <= 32000
+                            && v.len() % 4 == 0
+                            && v.bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(&c))
+                    })
+            {
+                return Err(invalid());
+            }
+        }
+        "import.prepare" | "logo.complete" | "batch.get" | "batch.pause" | "batch.resume"
+        | "batch.cancel" => {
+            if !uuid("id") {
+                return Err(invalid());
+            }
+        }
+        "import.update" | "import.commit" | "batch.retry" => {
+            if !uuid("id")
+                || (request.method != "batch.retry"
+                    && !params
+                        .get("revision")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|v| v <= 9_007_199_254_740_991))
+                || (request.method != "import.commit"
+                    && !params
+                        .get("rowNumber")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|v| (2..=5001).contains(&v)))
+                || (request.method == "import.commit" && !text("requestKey", 100))
+            {
+                return Err(invalid());
+            }
+            for (field, max) in [("domain", 253), ("about", 8000), ("referenceId", 100)] {
+                if params.contains_key(field)
+                    && !params
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| v.encode_utf16().count() <= max)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        "batch.rows" => {
+            if !uuid("id")
+                || params
+                    .get("status")
+                    .is_some_and(|v| !matches!(v.as_str(), Some("all" | "valid" | "invalid")))
+            {
+                return Err(invalid());
+            }
+        }
+        "batch.assign" => {
+            if !uuid("id")
+                || !params
+                    .get("userIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|v| {
+                        v.len() <= 100
+                            && v.iter().all(|x| {
+                                x.as_str().is_some_and(|s| {
+                                    s.len() == 36
+                                        && s.bytes().enumerate().all(|(i, c)| {
+                                            if [8, 13, 18, 23].contains(&i) {
+                                                c == b'-'
+                                            } else {
+                                                c.is_ascii_hexdigit()
+                                            }
+                                        })
+                                })
+                            })
+                    })
+            {
+                return Err(invalid());
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -198,6 +331,64 @@ pub async fn model_settings<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn staged_import_schemas_reject_paths_roles_and_unbounded_fields() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        for (method, params) in [
+            (
+                "resource.begin",
+                json!({"name":"sites.csv","size":1,"sha256":"a".repeat(64)}),
+            ),
+            ("resource.chunk", json!({"id":id,"index":0,"base64":"YQ=="})),
+            (
+                "import.update",
+                json!({"id":id,"revision":1,"rowNumber":2,"about":"Exact row"}),
+            ),
+            (
+                "import.commit",
+                json!({"id":id,"revision":1,"requestKey":"request"}),
+            ),
+            ("batch.rows", json!({"id":id,"status":"invalid"})),
+        ] {
+            assert!(validate(&DesktopRequest {
+                id: "fixture".into(),
+                version: 1,
+                method: method.into(),
+                params
+            })
+            .is_ok());
+        }
+        for (method, params) in [
+            (
+                "resource.begin",
+                json!({"name":"sites.csv","size":17000000,"sha256":"a".repeat(64)}),
+            ),
+            (
+                "resource.chunk",
+                json!({"id":"../secret","index":0,"base64":"YQ=="}),
+            ),
+            (
+                "resource.chunk",
+                json!({"id":id,"index":0,"base64":"A".repeat(33000)}),
+            ),
+            (
+                "import.update",
+                json!({"id":id,"revision":1,"rowNumber":2,"role":"admin"}),
+            ),
+            (
+                "import.commit",
+                json!({"id":id,"revision":-1,"requestKey":"request"}),
+            ),
+        ] {
+            assert!(validate(&DesktopRequest {
+                id: "fixture".into(),
+                version: 1,
+                method: method.into(),
+                params
+            })
+            .is_err());
+        }
+    }
     #[test]
     fn editing_and_publication_schemas_reject_role_and_path_overrides() {
         let site = "11111111-1111-4111-8111-111111111111";

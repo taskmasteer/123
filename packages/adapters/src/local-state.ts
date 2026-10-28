@@ -1,132 +1,159 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
 import { AppError } from '../../contracts/src/model.js';
-import type { Clock, Site, SiteRepository } from '../../contracts/src/model.js';
+import type { Clock, Site, SiteRepository, SitePatch, Lease } from '../../contracts/src/model.js';
 import { nonemptyString, parseSiteInput, parseSitePatch, record } from '../../contracts/src/inputs.js';
 import { authorize } from '../../core/src/permissions.js';
 import { normalizeDomain } from '../../core/src/sites.js';
-import { parseEditingState } from '../../contracts/src/editing.js';
-import type { EditingState, EditingStore } from '../../contracts/src/editing.js';
-import { privateJson } from './private-json.js';
-
+import type { EditingStore } from '../../contracts/src/editing.js';
+import { sqliteEditing } from './sqlite-editing.js';
+import { openLocalDatabase, existingLocalDatabase, insertLocalSite, type LocalDatabase } from './local-database.js';
+import { sitePagePrefix, siteFilters, filterBinding, encodeCursor, decodeCursor, type SiteFilters } from '../../core/src/site-pagination.js';
 /** Private editor journal; write-ahead intents bridge registry and queue transactions. */
-export async function createLocalEditingStore(directory: string): Promise<EditingStore> {
-  if (process.env.NODE_ENV === 'production') throw new AppError('FORBIDDEN', 'Local editing is a demonstration adapter.');
-  return privateJson<EditingState>(directory, 'editing.json', { version: 1, candidates: [], messages: [], publications: [] }, parseEditingState);
-}
-
-export interface LocalState extends SiteRepository { close(): Promise<void> }
-const activeDirectories = new Set<string>();
-interface State { version: 1; savedAt: number; sites: Site[] }
-
-function parseState(value: unknown): State {
-  if (!record(value) || value.version !== 1 || !Number.isSafeInteger(value.savedAt) || !Array.isArray(value.sites)) {
-    throw new AppError('INVALID_INPUT', 'Local state is corrupt or uses an unsupported format.');
-  }
-  const ids = new Set<string>(); const domains = new Set<string>();
-  for (const candidate of value.sites) {
-    if (!record(candidate) || !nonemptyString(candidate.id) || !nonemptyString(candidate.ownerId) ||
-        typeof candidate.domain !== 'string' || normalizeDomain(candidate.domain) !== candidate.domain ||
-        !Number.isSafeInteger(candidate.revision) || (candidate.revision as number) < 0 ||
-        !Array.isArray(candidate.assignedUserIds) || !candidate.assignedUserIds.every(nonemptyString) ||
-        (candidate.draftId !== null && !nonemptyString(candidate.draftId)) ||
-        (candidate.publishedId !== null && !nonemptyString(candidate.publishedId)) ||
-        !nonemptyString(candidate.generationStatus) || !nonemptyString(candidate.domainStatus) ||
-        parseSiteInput(candidate.input).domain !== candidate.domain || ids.has(candidate.id) || domains.has(candidate.domain)) {
-      throw new AppError('INVALID_INPUT', 'Local state contains an invalid or duplicate site.');
+export async function createLocalEditingStore(directory: string, database?: LocalDatabase): Promise<EditingStore> {
+    if (process.env.NODE_ENV === 'production')
+        throw new AppError('FORBIDDEN', 'Local editing is a demonstration adapter.');
+    if (database)
+        return sqliteEditing(database);
+    const initial = await existingLocalDatabase(directory);
+    if (!initial) {
+        const db = await openLocalDatabase(directory);
+        await db.close();
     }
-    ids.add(candidate.id); domains.add(candidate.domain);
-  }
-  return value as unknown as State;
+    let tail: Promise<unknown> = Promise.resolve();
+    const scoped = (siteId?: string): EditingStore => ({ forSite: id => scoped(id), transaction(operation) {
+            const result = tail.then(async () => {
+                const shared = await existingLocalDatabase(directory), db = shared ?? await openLocalDatabase(directory);
+                try {
+                    return await sqliteEditing(db, siteId).transaction(operation);
+                }
+                finally {
+                    if (!shared)
+                        await db.close();
+                }
+            });
+            tail = result.catch(() => { });
+            return result;
+        } });
+    return scoped();
 }
-
+export interface LocalState extends SiteRepository {
+    close(): Promise<void>;
+    workerCompareAndSet(siteId: string, expected: number, patch: SitePatch, lease: Lease): Promise<Site>;
+}
+interface State {
+    version: 1;
+    savedAt: number;
+    sites: Site[];
+}
+export function parseState(value: unknown): State {
+    if (!record(value) || value.version !== 1 || !Number.isSafeInteger(value.savedAt) || !Array.isArray(value.sites)) {
+        throw new AppError('INVALID_INPUT', 'Local state is corrupt or uses an unsupported format.');
+    }
+    const ids = new Set<string>();
+    const domains = new Set<string>();
+    for (const candidate of value.sites) {
+        if (!record(candidate) || !nonemptyString(candidate.id) || !nonemptyString(candidate.ownerId) ||
+            typeof candidate.domain !== 'string' || normalizeDomain(candidate.domain) !== candidate.domain ||
+            !Number.isSafeInteger(candidate.revision) || (candidate.revision as number) < 0 ||
+            !Array.isArray(candidate.assignedUserIds) || !candidate.assignedUserIds.every(nonemptyString) ||
+            (candidate.draftId !== null && !nonemptyString(candidate.draftId)) ||
+            (candidate.publishedId !== null && !nonemptyString(candidate.publishedId)) ||
+            !nonemptyString(candidate.generationStatus) || !nonemptyString(candidate.domainStatus) ||
+            parseSiteInput(candidate.input).domain !== candidate.domain || ids.has(candidate.id) || domains.has(candidate.domain)) {
+            throw new AppError('INVALID_INPUT', 'Local state contains an invalid or duplicate site.');
+        }
+        ids.add(candidate.id);
+        domains.add(candidate.domain);
+    }
+    return value as unknown as State;
+}
 /** Demonstration adapter for one controlling process; not a distributed database.
  * get/compareAndSet are trusted repository primitives: request handlers authorize
  * the principal before using them. list and create receive and enforce a principal.
  */
-export async function createLocalState(directory: string, clock: Clock): Promise<LocalState> {
-  if (process.env.NODE_ENV === 'production') throw new AppError('FORBIDDEN', 'Local demo state is unavailable in production.');
-  const root = resolve(directory); const key = process.platform === 'win32' ? root.toLowerCase() : root;
-  if (activeDirectories.has(key)) throw new AppError('CONFLICT', 'Local state is already open in this process.');
-  activeDirectories.add(key);
-  const path = join(root, 'state.json');
-  let state: State = { version: 1, savedAt: 0, sites: [] };
-  try {
-    await mkdir(root, { recursive: true });
-    try { state = parseState(JSON.parse(await readFile(path, 'utf8')) as unknown); }
-    catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
-        throw new AppError('INVALID_INPUT', 'Cannot read local state; the original file was preserved.', { cause: error });
-      }
-    }
-  } catch (error) { activeDirectories.delete(key); throw error; }
-
-  let tail: Promise<unknown> = Promise.resolve();
-  let closed = false;
-  let closing: Promise<void> | undefined;
-  function run<T>(operation: () => Promise<T> | T): Promise<T> {
-    if (closed) return Promise.reject(new AppError('CONFLICT', 'Local state is closed.'));
-    const result = tail.then(operation); tail = result.catch(() => undefined); return result;
-  }
-  async function save(sites: Site[]): Promise<void> {
-    const savedAt = clock.now();
-    if (!Number.isSafeInteger(savedAt)) throw new AppError('INVALID_INPUT', 'Clock must return integer UTC milliseconds.');
-    const next: State = { version: 1, savedAt, sites };
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    try {
-      const file = await open(temporary, 'wx', 0o600);
-      try { await file.writeFile(JSON.stringify(next)); await file.sync(); } finally { await file.close(); }
-      await rename(temporary, path);
-      state = next;
-    } finally { await rm(temporary, { force: true }); }
-  }
-
-  return {
-    create(input, principal) {
-      return run(async () => {
-        authorize(principal, 'site:create');
-        const validated = parseSiteInput(input); const domain = normalizeDomain(validated.domain);
-        if (state.sites.some((site) => site.domain === domain)) throw new AppError('DUPLICATE_DOMAIN', 'Domain is already registered.');
-        const site: Site = {
-          id: randomUUID(), domain, ownerId: principal.userId, assignedUserIds: [], input: { ...validated, domain },
-          revision: 0, draftId: null, publishedId: null, generationStatus: 'queued', domainStatus: 'pending',
-        };
-        await save([...state.sites, site]); return structuredClone(site);
-      });
-    },
-    get(id) { return run(() => structuredClone(state.sites.find((site) => site.id === id) ?? null)); },
-    list(principal, cursor, limit = 100) {
-      return run(() => {
-        // Validate the principal even when the registry is empty.
-        authorize(principal, 'site:create');
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new AppError('INVALID_INPUT', 'Page limit must be between 1 and 1000.');
-        const visible = state.sites.filter((site) => principal.role === 'admin' || site.ownerId === principal.userId || site.assignedUserIds.includes(principal.userId));
-        const cursorIndex = cursor === undefined ? -1 : visible.findIndex((site) => site.id === cursor);
-        if (cursor !== undefined && cursorIndex === -1) throw new AppError('INVALID_INPUT', 'Invalid site cursor.');
-        const items = visible.slice(cursorIndex + 1, cursorIndex + 1 + limit);
-        const nextCursor = cursorIndex + 1 + items.length < visible.length ? items.at(-1)!.id : null;
-        return { items: structuredClone(items), nextCursor };
-      });
-    },
-    compareAndSet(siteId, expectedRevision, patch) {
-      return run(async () => {
-        const site = state.sites.find((item) => item.id === siteId);
-        if (!site) throw new AppError('NOT_FOUND', 'Site does not exist.');
-        if (site.revision !== expectedRevision) throw new AppError('CONFLICT', 'Site revision has changed.');
-        const validated = parseSitePatch(patch);
-        if (validated.input) {
-          validated.input.domain = normalizeDomain(validated.input.domain);
-          if (validated.input.domain !== site.domain) throw new AppError('INVALID_INPUT', 'Site domain is immutable.');
+export async function createLocalState(directory: string, clock: Clock, database?: LocalDatabase): Promise<LocalState> {
+    const db = database ?? await openLocalDatabase(directory);
+    let closed = false;
+    let tail: Promise<unknown> = Promise.resolve();
+    const run = <T>(action: () => T) => {
+        if (closed)
+            return Promise.reject(new AppError("CONFLICT", "Local state is closed."));
+        const result = tail.then(action);
+        tail = result.catch(() => { });
+        return result;
+    };
+    const get = (id: string): Site | null => {
+        const r = db.sql.prepare("select data from sites where id=?").get(id);
+        if (!r)
+            return null;
+        const site = JSON.parse(String(r.data)) as Site;
+        const assigned = db.sql.prepare('select a.user_id from batch_assignments a join batch_rows r on r.batch_id=a.batch_id where r.site_id=?').all(id).map(r => String(r.user_id));
+        return { ...site, assignedUserIds: [...new Set([...site.assignedUserIds, ...assigned])] };
+    };
+    const saved = () => {
+        const t = clock.now();
+        if (!Number.isSafeInteger(t))
+            throw new AppError("INVALID_INPUT", "Invalid clock.");
+        db.sql.prepare("insert into metadata values(?,?) on conflict(key) do update set value=excluded.value").run("savedAt", String(t));
+    };
+    const cas = (id: string, expected: number, patch: SitePatch, lease?: Lease) => {
+        if (lease) {
+            if (patch.input || patch.assignedUserIds)
+                throw new AppError('FORBIDDEN', 'Worker cannot change input or scope.');
+            const job = db.sql.prepare('select * from jobs where id=?').get(lease.jobId), current = job?.lease ? JSON.parse(String(job.lease)) as Lease : null, operation = db.sql.prepare('select operation_id from operations where site_id=?').get(id);
+            if (!job || job.site_id !== id || job.state !== 'running' || !current || current.workerId !== lease.workerId || current.generation !== lease.generation || current.jobId !== lease.jobId || Number(job.generation) !== lease.generation || current.expiresAt <= clock.now() || operation?.operation_id !== lease.jobId)
+                throw new AppError('STALE_LEASE', 'Worker mutation is fenced.');
         }
-        const next = { ...site, ...validated, revision: site.revision + 1 };
-        await save(state.sites.map((item) => item.id === siteId ? next : item)); return structuredClone(next);
-      });
-    },
-    close() {
-      closed = true;
-      closing ??= tail.then(() => { activeDirectories.delete(key); });
-      return closing;
-    },
-  };
+        const stored = db.sql.prepare("select data from sites where id=?").get(id);
+        const site = stored ? JSON.parse(String(stored.data)) as Site : null;
+        if (!site)
+            throw new AppError("NOT_FOUND", "Site does not exist.");
+        if (site.revision !== expected)
+            throw new AppError("CONFLICT", "Site revision has changed.");
+        const value = parseSitePatch(patch);
+        if (value.input && normalizeDomain(value.input.domain) !== site.domain)
+            throw new AppError("INVALID_INPUT", "Site domain is immutable.");
+        const next = { ...site, ...value, revision: expected + 1 };
+        db.sql.prepare("update sites set data=?,status=? where id=?").run(JSON.stringify(next), next.generationStatus, id);
+        saved();
+        return next;
+    };
+    return {
+        create(input, actor) {
+            return run(() => db.transaction(() => {
+                authorize(actor, "site:create");
+                const validated = parseSiteInput(input), domain = normalizeDomain(validated.domain);
+                if (db.sql.prepare("select id from sites where domain=?").get(domain))
+                    throw new AppError("DUPLICATE_DOMAIN", "Domain is already registered.");
+                const site: Site = { id: randomUUID(), domain, ownerId: actor.userId, assignedUserIds: [], input: { ...validated, domain }, revision: 0, draftId: null, publishedId: null, generationStatus: "queued", domainStatus: "pending" };
+                insertLocalSite(db, site);
+                saved();
+                return site;
+            }));
+        },
+        get(id) { return run(() => get(id)); },
+        list(actor, cursor, limit = 50, filters: SiteFilters = {}) {
+            return run(() => {
+                authorize(actor, "site:create");
+                if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+                    throw new AppError("INVALID_INPUT", "Page limit must be 1–100.");
+                filters = siteFilters(filters);
+                const binding = filterBinding(actor, filters), key = decodeCursor(cursor, binding);
+                const rows = db.sql.prepare(`select s.seq,s.data from sites s where (?='admin' or s.owner_id=? or exists(select 1 from json_each(s.data,'$.assignedUserIds') where value=?) or exists(select 1 from batch_assignments a join batch_rows r on r.batch_id=a.batch_id where r.site_id=s.id and a.user_id=?)) and s.seq>? and (?='' or instr(s.domain,?)>0) and (?='' or s.status=?) and (?='' or exists(select 1 from batch_rows b where b.batch_id=? and b.site_id=s.id)) order by s.seq limit ?`).all(actor.role, actor.userId, actor.userId, actor.userId, Number(key ?? 0), filters.domain ?? "", filters.domain ?? "", filters.status ?? "", filters.status ?? "", filters.batchId ?? "", filters.batchId ?? "", limit + 1);
+                const projected = rows.map(r => ({ seq: r.seq, site: get((JSON.parse(String(r.data)) as Site).id)! }));
+                const page = sitePagePrefix(projected, r => r.site, limit);
+                return { items: page.map(r => r.site), nextCursor: rows.length > page.length ? encodeCursor(String(page.at(-1)!.seq), binding) : null };
+            });
+        },
+        compareAndSet(id, expected, patch) { return run(() => db.transaction(() => cas(id, expected, patch))); },
+        workerCompareAndSet(id, expected, patch, lease) { return run(() => db.transaction(() => cas(id, expected, patch, lease))); },
+        async close() {
+            if (closed)
+                return;
+            closed = true;
+            await tail;
+            if (!database)
+                await db.close();
+        }
+    };
 }

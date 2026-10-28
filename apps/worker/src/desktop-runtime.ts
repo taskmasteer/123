@@ -1,3 +1,7 @@
+import { LocalBatches } from '../../../packages/adapters/src/local-batches.js';
+import { LocalImportResources } from '../../../packages/adapters/src/import-resources.js';
+import { importMethods } from '../../../packages/contracts/src/import.js';
+import { openLocalDatabase } from '../../../packages/adapters/src/local-database.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -18,19 +22,24 @@ import { createImageGenerator } from '../../../packages/adapters/src/openai/imag
 import { FakePublication } from '../../../packages/adapters/src/fake-publication.js';
 import { createCheckpointStore } from './checkpoints.js';
 import { runJob } from './pipeline.js';
-import {createManagedRuntime} from './managed-runtime.js';
+import { createManagedRuntime } from './managed-runtime.js';
 import type { WorkerDeps } from './pipeline.js';
 import { parseDesktopRequest, parseModelConfiguration } from './desktop-protocol.js';
 import { validateSite } from './validation/browser.js';
 import { serveFiles } from './preview/server.js';
 import type { Preview } from './preview/server.js';
 const principal = { userId: 'local-demo-admin', role: 'admin' } as const;
-export async function createDesktopRuntime(root: string, sourceRoot: string, options: {native?:boolean;transport?:typeof fetch}={}) {
+export async function createDesktopRuntime(root: string, sourceRoot: string, options: {
+    native?: boolean;
+    transport?: typeof fetch;
+} = {}) {
     const clock = { now: Date.now };
-    const sites = await createLocalState(join(root, 'sites'), clock);
-    const queue = await createLocalQueue(root, clock), artifacts = await createLocalArtifacts(join(root, 'artifacts'));
-    const revisions = await createLocalRevisions(root), checkpoints = await createCheckpointStore(join(root, 'checkpoints'), clock);
+    const database = await openLocalDatabase(root);
+    const sites = await createLocalState(join(root, 'sites'), clock, database);
+    const queue = await createLocalQueue(root, clock, database), artifacts = await createLocalArtifacts(join(root, 'artifacts'));
+    const revisions = await createLocalRevisions(root, database), checkpoints = await createCheckpointStore(join(root, 'checkpoints'), clock);
     const catalog = await createLocalCatalog(sourceRoot, root), validationRoot = await privateDirectory(join(root, 'validation'));
+    const batches = new LocalBatches(database), imports = new LocalImportResources(batches);
     const abort = new AbortController(), active = new Set<Promise<void>>();
     const previews = new Set<{
         browser: Browser;
@@ -38,21 +47,35 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     }>();
     const workerId = randomUUID();
     let pumping: Promise<void> | null = null, closed = false;
-    let mode:'demo'|'live'|'blocked'=options.native?'blocked':'demo', modelName:string|null=null,imageModel:string|null=null;
-    let credentialsAbort=new AbortController(),configuring=false;
-    let usage:{inputTokens:number;outputTokens:number;uncertainRequests?:number}|undefined;
-    let managedMode=false;
-    const deps:WorkerDeps & {queue:typeof queue} = { sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
+    let mode: 'demo' | 'live' | 'blocked' = options.native ? 'blocked' : 'demo', modelName: string | null = null, imageModel: string | null = null;
+    let credentialsAbort = new AbortController(), configuring = false;
+    let usage: {
+        inputTokens: number;
+        outputTokens: number;
+        uncertainRequests?: number;
+    } | undefined;
+    let managedMode = false;
+    const deps: WorkerDeps & {
+        queue: typeof queue;
+    } = { readLogo: (assetId, siteId) => imports.readLogo(assetId, siteId), sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
         workspace: join(root, 'attempts'), validate: (files: Parameters<typeof validateSite>[0]) => validateSite(files, { screenshotRoot: validationRoot }) };
-    const editing = createEditing({ ...deps, store: await createLocalEditingStore(root), ids: { next: randomUUID } });
-    const managedRuntime=createManagedRuntime(()=>deps,()=>mode==='live'&&!configuring&&!closed,options.transport);
-    function ready(){return !closed&&!configuring&&!managedMode&&mode!=='blocked';}
-    async function updateUsage(jobId:string){
-        const job=await queue.get(jobId);if(!job?.checkpointId)return;
-        const {state}=await checkpoints.load(job.checkpointId);
-        const records=[...(Array.isArray(state.transcript)?state.transcript:[]),state.continuation].filter(record);
-        if(records.length)usage=records.reduce<{inputTokens:number;outputTokens:number;uncertainRequests:number}>((total,item)=>({inputTokens:total.inputTokens+(Number.isSafeInteger(item.inputTokens)?Number(item.inputTokens):0),outputTokens:total.outputTokens+(Number.isSafeInteger(item.outputTokens)?Number(item.outputTokens):0),uncertainRequests:total.uncertainRequests+(Number.isSafeInteger(item.uncertainRequests)?Number(item.uncertainRequests):0)}),{inputTokens:0,outputTokens:0,uncertainRequests:0});
-        if(usage?.uncertainRequests===0)delete usage.uncertainRequests;
+    const editing = createEditing({ ...deps, store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
+    const managedRuntime = createManagedRuntime(() => deps, () => mode === 'live' && !configuring && !closed, options.transport);
+    function ready() { return !closed && !configuring && !managedMode && mode !== 'blocked'; }
+    async function updateUsage(jobId: string) {
+        const job = await queue.get(jobId);
+        if (!job?.checkpointId)
+            return;
+        const { state } = await checkpoints.load(job.checkpointId);
+        const records = [...(Array.isArray(state.transcript) ? state.transcript : []), state.continuation].filter(record);
+        if (records.length)
+            usage = records.reduce<{
+                inputTokens: number;
+                outputTokens: number;
+                uncertainRequests: number;
+            }>((total, item) => ({ inputTokens: total.inputTokens + (Number.isSafeInteger(item.inputTokens) ? Number(item.inputTokens) : 0), outputTokens: total.outputTokens + (Number.isSafeInteger(item.outputTokens) ? Number(item.outputTokens) : 0), uncertainRequests: total.uncertainRequests + (Number.isSafeInteger(item.uncertainRequests) ? Number(item.uncertainRequests) : 0) }), { inputTokens: 0, outputTokens: 0, uncertainRequests: 0 });
+        if (usage?.uncertainRequests === 0)
+            delete usage.uncertainRequests;
     }
     async function allSites() {
         const items: Site[] = [];
@@ -78,6 +101,9 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         if (pumping)
             return pumping;
         pumping = (async () => {
+            const pending = database.sql.prepare("select b.id from batches b where state='active' and exists(select 1 from batch_rows r where r.batch_id=b.id and site_id is null and json_array_length(json_extract(r.data,'$.issues'))=0) order by rowid limit 1").get();
+            if (pending)
+                await batches.admit(principal, String(pending.id), 25).catch(error => console.error('Batch admission failed:', String(error)));
             while (ready() && active.size < 2) {
                 const claimed = await queue.claim(workerId);
                 if (!claimed)
@@ -87,8 +113,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                     await queue.finish(claimed.lease, 'paused');
                     break;
                 }
-                const work = runJob(claimed.job, claimed.lease, deps, AbortSignal.any([abort.signal,credentialsAbort.signal]))
-                    .then(async() => {await editing.recover(claimed.job.siteId);await updateUsage(claimed.job.id);})
+                const work = runJob(claimed.job, claimed.lease, { ...deps, sites: { ...sites, compareAndSet: (id, expected, patch) => sites.workerCompareAndSet(id, expected, patch, claimed.lease) } }, AbortSignal.any([abort.signal, credentialsAbort.signal]))
+                    .then(async () => { await editing.recover(claimed.job.siteId); await updateUsage(claimed.job.id); })
                     .catch(error => console.error('Worker job failed:', String(error)))
                     .finally(() => active.delete(work));
                 active.add(work);
@@ -100,9 +126,13 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         await ensureJob(site);
         await editing.recover(site.id);
         const job = await queue.current(site.id);
-        if(job)await updateUsage(job.id);
+        if (job)
+            await updateUsage(job.id);
         if (job?.state === 'paused')
-            await queue.retry(job.id);
+            await queue.retry(job.id).catch(error => {
+                if (!(error instanceof AppError && error.code === 'CONFLICT'))
+                    throw error;
+            });
     }
     const timer = setInterval(() => { void pump().catch(error => console.error('Worker scheduler:', String(error))); }, 250);
     await pump();
@@ -115,7 +145,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             ![selected.id, selected.parentRevisionId, selected.baseDraftId].includes(revisionId)))
             throw new AppError('FORBIDDEN', 'Снимок не относится к выбранному варианту.');
         const checked = await editing.screenshotEvidence(principal, siteId, revisionId, candidateId);
-        if (checked) return { site, revision: checked.revision, validation: checked.validation };
+        if (checked)
+            return { site, revision: checked.revision, validation: checked.validation };
         const comparisonBase = selected && ['ready', 'accepted', 'conflict'].includes(selected.status) &&
             (selected.parentRevisionId === revisionId || selected.baseDraftId === revisionId);
         if (revisionId !== site.publishedId && revisionId !== site.draftId && !comparisonBase)
@@ -124,7 +155,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         if (!revision || revision.siteId !== site.id)
             throw new AppError('NOT_FOUND', 'Версия не найдена.');
         const job = await queue.get(site.id);
-        if (!job?.checkpointId) throw new AppError('NOT_FOUND', 'Проверка версии не найдена.');
+        if (!job?.checkpointId)
+            throw new AppError('NOT_FOUND', 'Проверка версии не найдена.');
         const saved = await checkpoints.load(job.checkpointId);
         if (saved.checkpoint.jobId !== job.id || saved.state.siteId !== site.id || saved.state.revisionId !== revision.id || saved.state.manifestId !== revision.manifestId ||
             !record(saved.state.validation) || saved.state.validation.ok !== true || !Array.isArray(saved.state.validation.screenshotIds))
@@ -132,42 +164,111 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         return { site, revision, validation: saved.state.validation };
     }
     return {
-        async managed(method:string,params:unknown){
-            if(!options.native)throw new AppError('FORBIDDEN','Требуется нативный канал.');
-            if(method==='managed.start'){
-                if(active.size||pumping)throw new AppError('CONFLICT','Дождитесь завершения локальных заданий.');
-                const result=await managedRuntime.request(method,params);managedMode=true;return result;
+        async managed(method: string, params: unknown) {
+            if (!options.native)
+                throw new AppError('FORBIDDEN', 'Требуется нативный канал.');
+            if (method === 'managed.start') {
+                if (active.size || pumping)
+                    throw new AppError('CONFLICT', 'Дождитесь завершения локальных заданий.');
+                const result = await managedRuntime.request(method, params);
+                managedMode = true;
+                return result;
             }
-            const result=await managedRuntime.request(method,params);
-            if(method==='managed.stop'||method==='managed.revoke')managedMode=false;
+            const result = await managedRuntime.request(method, params);
+            if (method === 'managed.stop' || method === 'managed.revoke')
+                managedMode = false;
             return result;
         },
-        async configure(value:unknown) {
+        async configure(value: unknown) {
             await managedRuntime.stop();
-            const config=parseModelConfiguration(value);
-            configuring=true;credentialsAbort.abort();
-            await pumping;await Promise.allSettled([...active]);
-            mode='blocked';modelName=null;imageModel=null;delete deps.images;
+            const config = parseModelConfiguration(value);
+            configuring = true;
+            credentialsAbort.abort();
+            await pumping;
+            await Promise.allSettled([...active]);
+            mode = 'blocked';
+            modelName = null;
+            imageModel = null;
+            delete deps.images;
             try {
-                if(config.mode==='live') {
-                    deps.model=createResponsesModel(config,options.transport);modelName=config.model;imageModel=config.imageModel??null;
-                    deps.images=(description,seed,signal,hooks)=>createImageGenerator(config,options.transport,hooks,signal).generateImage(description,seed);
-                }else if(config.mode==='demo')deps.model=new FakeModel();
-                mode=config.mode;credentialsAbort=new AbortController();
-                if(mode!=='blocked')for(const site of await allSites()){const job=await queue.current(site.id);if(job?.state==='paused')await queue.retry(job.id);}
-            }finally{configuring=false;}
-            void pump();return {mode,model:modelName,images:imageModel?'enabled':'disabled'};
+                if (config.mode === 'live') {
+                    deps.model = createResponsesModel(config, options.transport);
+                    modelName = config.model;
+                    imageModel = config.imageModel ?? null;
+                    deps.images = (description, seed, signal, hooks) => createImageGenerator(config, options.transport, hooks, signal).generateImage(description, seed);
+                }
+                else if (config.mode === 'demo')
+                    deps.model = new FakeModel();
+                mode = config.mode;
+                credentialsAbort = new AbortController();
+                if (mode !== 'blocked')
+                    for (const site of await allSites()) {
+                        const job = await queue.current(site.id);
+                        if (job?.state === 'paused')
+                            await queue.retry(job.id).catch(error => {
+                                if (!(error instanceof AppError && error.code === 'CONFLICT'))
+                                    throw error;
+                            });
+                    }
+            }
+            finally {
+                configuring = false;
+            }
+            void pump();
+            return { mode, model: modelName, images: imageModel ? 'enabled' : 'disabled' };
         },
         async request(value: unknown): Promise<unknown> {
             if (closed)
                 throw new AppError('CONFLICT', 'Исполнитель остановлен.');
             const request = parseDesktopRequest(value), p = request.params;
-            if((mode==='blocked'||configuring)&&['site.create','edit.request','job.retry'].includes(request.method))throw new AppError('NEEDS_ATTENTION','Настройте модель или включите демонстрационный режим.');
+            if ((mode === 'blocked' || configuring) && ['site.create', 'edit.request', 'job.retry', 'import.commit'].includes(request.method))
+                throw new AppError('NEEDS_ATTENTION', 'Настройте модель или включите демонстрационный режим.');
+            if (Object.hasOwn(importMethods, request.method)) {
+                if (request.method === 'batch.retry') {
+                    batches.read(principal, String(p.id), true);
+                    const row = database.sql.prepare('select site_id from batch_rows where batch_id=? and row_number=?').get(String(p.id), Number(p.rowNumber));
+                    const job = row?.site_id ? await queue.get(String(row.site_id)) : null;
+                    if (!job || job.kind !== 'generate')
+                        throw new AppError('NOT_FOUND', 'Задание строки не найдено.');
+                    let recovery: typeof job.providerRecovery;
+                    if (job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
+                        const saved = await checkpoints.load(job.checkpointId);
+                        if (saved.checkpoint.jobId === job.id && saved.state.siteId === job.siteId && ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') && deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                            recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
+                    }
+                    if (job.state === 'needs_attention' && deps.model.identity && !recovery)
+                        throw new AppError('CONFLICT', 'Ошибка не допускает восстановления учётных данных.');
+                    await queue.retry(job.id, recovery);
+                    void pump();
+                    return { ok: true };
+                }
+                if (request.method === 'batch.assign') {
+                    await batches.assign(principal, String(p.id), p.userIds);
+                    return { ok: true };
+                }
+                if (request.method === 'batch.get')
+                    return batches.get(principal, String(p.id));
+                if (request.method === 'batch.rows')
+                    return batches.page(principal, String(p.id), p.cursor as string | undefined, p.status as string | undefined);
+                if (request.method === 'batch.list') {
+                    const rows = database.sql.prepare("select id from batches where state<>'uploading' and (? is null or id>?) order by id limit 51").all(p.cursor as string ?? null, p.cursor as string ?? null);
+                    return { items: await Promise.all(rows.slice(0, 50).map(r => batches.get(principal, String(r.id)))), nextCursor: rows.length > 50 ? String(rows[49]!.id) : null };
+                }
+                if (['batch.pause', 'batch.resume', 'batch.cancel'].includes(request.method)) {
+                    await (request.method === 'batch.pause' ? batches.pauseBatch(principal, String(p.id)) : request.method === 'batch.resume' ? batches.resumeBatch(principal, String(p.id)) : batches.cancelBatch(principal, String(p.id)));
+                    void pump();
+                    return { ok: true };
+                }
+                const result = await imports.request(principal, request.method, p);
+                if (request.method === 'import.commit')
+                    void pump();
+                return result;
+            }
             switch (request.method) {
-                case 'device.status': return { mode, available:mode!=='blocked'&&!configuring, activeJobs: active.size, maxJobs: 2,model:modelName,imageModel,images:imageModel?'enabled':'disabled',storage:'local',publication:'demo',...(usage?{usage}:{}) };
+                case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
                 case 'site.list': {
-                    const items = await allSites();
-                    return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: null };
+                    const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;
+                    return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: page.nextCursor };
                 }
                 case 'site.create': {
                     if (p.referenceId)
@@ -188,26 +289,31 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                 }
                 case 'job.retry': {
                     const job = await queue.current(p.siteId as string);
-                    if (!job) throw new AppError('NOT_FOUND', 'Задание не найдено.');
-                    if (job.kind === 'edit' && job.state === 'needs_attention') throw new AppError('CONFLICT', 'Отклоните неудачный вариант и отправьте новую правку.');
-                    let recovery:typeof job.providerRecovery;
-                    if(job.kind==='generate'&&job.state==='needs_attention'&&job.checkpointId&&deps.model.identity&&deps.model.recover){
-                        const saved=await checkpoints.load(job.checkpointId);
-                        if(saved.checkpoint.jobId===job.id&&saved.state.jobId===job.id&&saved.state.siteId===job.siteId&&saved.state.baseRevision===job.baseRevision&&
-                            ['generate','validate'].includes(saved.checkpoint.stage)&&(!record(saved.state.imageRun)||saved.state.imageRun.status!=='pending')&&
-                            deps.model.canRecover?.(saved.state.continuation,typeof saved.state.error==='string'?saved.state.error:undefined))
-                            recovery={id:randomUUID(),checkpointId:job.checkpointId,modelIdentity:deps.model.identity};
+                    if (!job)
+                        throw new AppError('NOT_FOUND', 'Задание не найдено.');
+                    if (job.kind === 'edit' && job.state === 'needs_attention')
+                        throw new AppError('CONFLICT', 'Отклоните неудачный вариант и отправьте новую правку.');
+                    let recovery: typeof job.providerRecovery;
+                    if (job.kind === 'generate' && job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
+                        const saved = await checkpoints.load(job.checkpointId);
+                        if (saved.checkpoint.jobId === job.id && saved.state.jobId === job.id && saved.state.siteId === job.siteId && saved.state.baseRevision === job.baseRevision &&
+                            ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') &&
+                            deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                            recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
                     }
-                    await queue.retry(job.id,recovery);
+                    await queue.retry(job.id, recovery);
                     void pump();
                     return { ok: true };
                 }
                 case 'edit.request': {
                     const job = await editing.requestEdit(principal, p.siteId as string, p.instruction as string, p.expectedRevision as number, p.candidateId as string | undefined);
-                    void pump(); return job;
+                    void pump();
+                    return job;
                 }
                 case 'edit.accept': return editing.acceptCandidate(principal, p.siteId as string, p.candidateId as string, p.expectedRevision as number);
-                case 'edit.reject': await editing.rejectCandidate(principal, p.siteId as string, p.candidateId as string); return { ok: true };
+                case 'edit.reject':
+                    await editing.rejectCandidate(principal, p.siteId as string, p.candidateId as string);
+                    return { ok: true };
                 case 'edit.list': return editing.list(principal, p.siteId as string);
                 case 'chat.list': return editing.getConversation(principal, p.siteId as string);
                 case 'site.publish': return editing.publish(principal, p.siteId as string, p.expectedRevision as number);
@@ -249,7 +355,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                     });
                     let first = true;
                     context.on('page', page => {
-                        if (!first) void page.close();
+                        if (!first)
+                            void page.close();
                         first = false;
                         page.on('download', download => void download.cancel());
                     });
@@ -261,26 +368,29 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             }
         },
         async close() {
-            if (closed) return;
+            if (closed)
+                return;
             closed = true;
             await managedRuntime.stop();
             clearInterval(timer);
             abort.abort();
             await pumping;
             await Promise.allSettled([...active]);
-            await Promise.allSettled([...previews].map(async preview => {
+            await Promise.allSettled([...previews].map(async (preview) => {
                 await preview.browser.close();
                 await preview.server.close();
             }));
             await queue.close();
             await sites.close();
+            await database.close();
         }
     };
 }
 function browserEnvironment() {
     const env: Record<string, string> = {};
     for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LOCALAPPDATA']) {
-        if (process.env[key]) env[key] = process.env[key];
+        if (process.env[key])
+            env[key] = process.env[key];
     }
     return env;
 }

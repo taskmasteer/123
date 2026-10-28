@@ -1,33 +1,51 @@
+import { PostgresBatches } from '../../../../packages/adapters/src/postgres-batches.js';
+import { PostgresImportResources } from '../../../../packages/adapters/src/postgres-import-resources.js';
 import { AppError } from '../../../../packages/contracts/src/model.js';
 import { integer, leaseDto, object, string, uuid } from '../../../../packages/contracts/src/http.js';
 import type { PostgresQueue } from '../../../../packages/adapters/src/postgres-queue.js';
 import type { R2Store } from '../../../../packages/adapters/src/r2-store.js';
 import type { PostgresPublication } from '../../../../packages/adapters/src/postgres-publication.js';
-export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store | undefined, workerId: string, path: string, body: unknown, publication?:PostgresPublication): Promise<unknown> {
+export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store | undefined, workerId: string, path: string, body: unknown, publication?: PostgresPublication): Promise<unknown> {
     if (!queue)
         throw new AppError('UNAVAILABLE', 'Очередь не подключена.');
-    if(path==='/worker/publications/tick'){
-        object(body,[]);
-        const worker=(await queue.repository.pool.query('select id from private.workers where id=$1 and revoked_at is null',[workerId])).rows[0];
-        if(!worker)throw new AppError('STALE_LEASE','Устройство отозвано.');
-        if(publication)await publication.tick();return {ok:true};
+    if (path === '/worker/publications/tick') {
+        object(body, []);
+        const worker = (await queue.repository.pool.query('select id from private.workers where id=$1 and revoked_at is null', [workerId])).rows[0];
+        if (!worker)
+            throw new AppError('STALE_LEASE', 'Устройство отозвано.');
+        const outcomes = await Promise.allSettled([new PostgresBatches(queue.repository).advance(), publication?.tick()]);
+        const failed = outcomes.find(outcome => outcome.status === 'rejected');
+        if (failed?.status === 'rejected')
+            throw failed.reason;
+        return { ok: true };
     }
-    const receipt=/^\/worker\/jobs\/([^/]+)\/publication-receipt$/.exec(path);
-    if(receipt){const p=object(body,['lease']),lease=leaseDto(p.lease);if(lease.jobId!==uuid(receipt[1])||lease.workerId!==workerId)throw new AppError('STALE_LEASE','Чужое задание.');
-        return publication?publication.receipt(workerId,lease):null;
+    const receipt = /^\/worker\/jobs\/([^/]+)\/publication-receipt$/.exec(path);
+    if (receipt) {
+        const p = object(body, ['lease']), lease = leaseDto(p.lease);
+        if (lease.jobId !== uuid(receipt[1]) || lease.workerId !== workerId)
+            throw new AppError('STALE_LEASE', 'Чужое задание.');
+        return publication ? publication.receipt(workerId, lease) : null;
     }
     if (path === '/worker/jobs/claim') {
         object(body, []);
         return queue.claim(workerId);
     }
-    const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog)$/.exec(path);
+    const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo)$/.exec(path);
     if (!route)
         throw new AppError('NOT_FOUND', 'Маршрут исполнителя не найден.');
-    const fields: Record<string, string[]> = { checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
+    const fields: Record<string, string[]> = { logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
     const p = object(body, ['lease', ...(fields[route[2]!] ?? [])]), lease = leaseDto(p.lease);
     if (lease.jobId !== uuid(route[1]) || lease.workerId !== workerId)
         throw new AppError('STALE_LEASE', 'Чужая аренда.');
     switch (route[2]) {
+        case 'logo': {
+            const bound = await queue.repository.transaction(tx => queue.assertCurrent(tx, workerId, lease));
+            const site = await queue.repository.get(bound.siteId);
+            if (site?.input.logoAssetId !== uuid(p.id))
+                throw new AppError('FORBIDDEN', 'Чужой логотип.');
+            const file = await new PostgresImportResources(new PostgresBatches(queue.repository)).readLogo(String(p.id), bound.siteId);
+            return new Response(Buffer.from(file.bytes), { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } });
+        }
         case 'catalog': return queue.repository.transaction(async (tx) => {
             await queue.assertCurrent(tx, workerId, lease);
             return (await tx.query("select data from private.catalog where kind='style' order by id")).rows.map(r => r.data);
@@ -105,7 +123,10 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             if (saved.checkpoint.jobId !== lease.jobId || saved.state.revisionId !== b.revisionId || saved.state.manifestId !== b.manifestId)
                 throw new AppError('CONFLICT', 'Публикация не соответствует приватному снимку.');
             const reservation = await queue.reservePublication(lease, { requestKey: string(b.requestKey, 200), manifestId: uuid(b.manifestId), revisionId: uuid(b.revisionId), expectedRevision: integer(b.expectedRevision), checkpointId: uuid(b.checkpointId) });
-            if(publication){const intent=await publication.attach(reservation.id);return {id:intent.id,state:intent.phase};}
+            if (publication) {
+                const intent = await publication.attach(reservation.id);
+                return { id: intent.id, state: intent.phase };
+            }
             return { id: reservation.id, state: 'pending' };
         }
     }

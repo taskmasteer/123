@@ -3,7 +3,7 @@
 Task 1 provides a registry and local demonstration persistence. It does not yet
 generate or publish websites, call a real model, or synchronize cloud state.
 
-Use Node 24 LTS and npm. From the repository root:
+Use Node 24.21.0 or newer in the 24 LTS line and npm. Local normalized storage uses the built-in node:sqlite API; extension loading is disabled. From the repository root:
 
 ```powershell
 npm.cmd ci
