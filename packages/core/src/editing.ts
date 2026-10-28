@@ -7,9 +7,11 @@ import type { ArtifactStore,Revision } from '../../contracts/src/model.js';
 import { elementPatch } from '../../contracts/src/visual.js';
 import type { ElementPatch,VisualProducer,VisualSave,SaveView } from '../../contracts/src/visual.js';
 import { createEditableMap,digest } from './visual/editable-map.js';
+import {completeVisualAcceptance,failVisualAcceptance,type VisualAcceptanceReceipt} from './visual/acceptance.js';
 export interface EditingDeps {
     artifacts?:ArtifactStore;
     visualCompareAndSet?:(actorId:string,siteId:string,expectedRevision:number,draftId:string)=>Promise<Site>;
+    visualAcceptance?:(candidate:Candidate)=>Promise<VisualAcceptanceReceipt>;
     sites: SiteRepository;
     store: EditingStore;
     revisions: RevisionRepository;
@@ -147,8 +149,13 @@ export function createEditing(deps: EditingDeps) {
             }
         });
     }
-    async function settleAcceptance(candidate: Candidate): Promise<Site> {
+    async function settleAcceptance(candidate: Candidate): Promise<{site:Site;journalCommitted?:true}|{error:AppError;journalCommitted:true}> {
         const intent = candidate.acceptance!;
+        if(candidate.visualSave&&deps.visualAcceptance){
+            await evidence(candidate);const receipt=await deps.visualAcceptance(candidate);
+            if(receipt.state==='failed'){Object.assign(candidate,failVisualAcceptance(candidate,receipt.message));return {error:new AppError(receipt.code,receipt.message),journalCommitted:true};}
+            Object.assign(candidate,completeVisualAcceptance(candidate));return {site:receipt.site,journalCommitted:true};
+        }
         const site = await deps.sites.get(candidate.siteId);
         if (!site)
             throw new AppError('NOT_FOUND', 'Сайт не найден.');
@@ -157,7 +164,7 @@ export function createEditing(deps: EditingDeps) {
             intent.state = 'completed';
             if(candidate.visualSave)candidate.visualSave.state='completed';
             await updateCandidate(candidate);
-            return site;
+            return {site};
         }
         if (site.revision !== intent.expectedRevision || (site.draftId ?? site.publishedId) !== candidate.baseDraftId) {
             candidate.status = 'conflict';
@@ -183,7 +190,7 @@ export function createEditing(deps: EditingDeps) {
         intent.state = 'completed';
         if(candidate.visualSave)candidate.visualSave.state='completed';
         await updateCandidate(candidate);
-        return accepted;
+        return {site:accepted};
     }
     async function settlePublication(intent: PublishIntent): Promise<Site> {
         const site = await deps.sites.get(intent.siteId);
@@ -235,14 +242,14 @@ export function createEditing(deps: EditingDeps) {
             if(candidate.status==='ready'||candidate.acceptance?.state==='pending') {
                 candidate.acceptance??={expectedRevision:candidate.baseRevision,state:'pending'};
                 await updateCandidate(candidate);
-                try{await settleAcceptance(candidate);}
+                try{const outcome=await settleAcceptance(candidate);if(outcome.journalCommitted)return candidate;}
                 catch(error){if(!(error instanceof AppError&&['CONFLICT','FORBIDDEN','NOT_FOUND'].includes(error.code)))throw error;candidate.visualSave!.state='failed';candidate.visualSave!.error=error.code==='CONFLICT'?'Черновик изменился; сохранённый вариант доступен отдельно.':'Доступ к сохранению отозван.';candidate.acceptance.state='conflict';candidate.status='conflict';await updateCandidate(candidate);}
             } else if(['failed','rejected','conflict'].includes(candidate.status)){candidate.visualSave!.state='failed';candidate.visualSave!.error=candidate.summary||'Визуальная правка не прошла проверку.';await updateCandidate(candidate);}
         }
         state = await read();
         for (const candidate of state.candidates.filter(c => c.siteId === siteId && c.acceptance?.state === 'pending')) {
             try {
-                await settleAcceptance(candidate);
+                const outcome=await settleAcceptance(candidate);if('error'in outcome)throw outcome.error;
             }
             catch (error) {
                 if (!(error instanceof AppError && error.code === 'CONFLICT'))
@@ -289,7 +296,7 @@ export function createEditing(deps: EditingDeps) {
             return api.requestEdit(actor,siteId,'Визуальная правка',expectedRevision,undefined,{producer:{kind:'visual',version:1,binding:map.binding,patch},save:{actorId:actor.userId,requestKey,payloadHash,state:'pending'}});
         },
         visualStatus(actor:Principal,siteId:string,saveId:string):Promise<SaveView> {return serial(siteId,async()=>{
-            await siteFor(actor,siteId,'site:read');await recoverSite(siteId);const c=candidateFor(await read(),siteId,saveId);
+            await siteFor(actor,siteId,'site:read');const committed=await recoverSite(siteId);await siteFor(actor,siteId,'site:read');const c=committed?.id===saveId?committed:candidateFor(await read(),siteId,saveId);
             if(!c.visualSave)throw new AppError('NOT_FOUND','Сохранение не найдено.');
             const revision=c.visualSave.state==='completed'?await deps.revisions.get(c.id):null;
             return {saveId:c.id,status:c.visualSave.state==='pending'?c.status:c.visualSave.state,...(revision?{revision}:{}),...(c.visualSave.error?{error:c.visualSave.error}:{})};
@@ -356,7 +363,7 @@ export function createEditing(deps: EditingDeps) {
                 await evidence(candidate);
                 candidate.acceptance = { expectedRevision, state: 'pending' };
                 await updateCandidate(candidate);
-                return settleAcceptance(candidate);
+                const outcome=await settleAcceptance(candidate);if('error'in outcome)throw outcome.error;return outcome.site;
             });
         },
         rejectCandidate(actor: Principal, siteId: string, candidateId: string): Promise<void> {

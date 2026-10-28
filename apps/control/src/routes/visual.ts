@@ -11,6 +11,12 @@ import { editingFor } from './editing.js';
 import { visualSaveHash } from '../../../../packages/core/src/editing.js';
 import { elementPatch } from '../../../../packages/contracts/src/visual.js';
 const caches = new WeakMap<SupabaseRepository, ReturnType<typeof createProjectionCache>>();
+async function terminalSave(repo:SupabaseRepository,siteId:string,saveId:string):Promise<SaveView|undefined>{
+    const candidate=(await repo.editingState(siteId)).candidates.find(c=>c.id===saveId&&c.visualSave);
+    if(!candidate||candidate.visualSave!.state==='pending')return undefined;
+    const revision=candidate.visualSave!.state==='completed'?await repo.revision(candidate.id):null;
+    return {saveId:candidate.id,status:candidate.visualSave!.state,...(revision?{revision}:{}),...(candidate.visualSave!.error?{error:candidate.visualSave!.error}:{})};
+}
 export async function visualRoute(repo: SupabaseRepository, store: R2Store | undefined, actor: Principal, request: Request, url: URL, body: unknown) {
     const m = /^\/sites\/([^/]+)\/visual\/(projection|saves)(?:\/([^/]+))?$/.exec(url.pathname);
     if (!m)
@@ -21,6 +27,7 @@ export async function visualRoute(repo: SupabaseRepository, store: R2Store | und
     const site = await repo.scoped(actor, siteId, request.method === 'GET' && m[2] === 'saves' ? 'site:read' : 'site:edit');
     if (!store)
         throw new AppError('UNAVAILABLE', 'Хранилище недоступно.');
+    if(request.method==='GET'&&m[2]==='saves'&&m[3]){const receipt=await terminalSave(repo,siteId,uuid(m[3]));if(receipt)return receipt;}
     if (m[2] === 'projection' && request.method === 'GET') {
         if (!url.searchParams.has('expectedRevision') || site.revision !== integer(Number(url.searchParams.get('expectedRevision'))))
             throw new AppError('CONFLICT', 'Черновик изменился.');
@@ -72,6 +79,13 @@ export async function visualRoute(repo: SupabaseRepository, store: R2Store | und
         }
         if (request.method === 'GET' && m[3])
             return await editing.visualStatus(actor, siteId, uuid(m[3]));
+    }
+    catch(error){
+        if(error instanceof AppError&&error.code==='FORBIDDEN'&&request.method==='GET'&&m[2]==='saves'&&m[3]){
+            await repo.denyRevokedVisualSave(actor,siteId,uuid(m[3]),true);
+            await repo.scoped(actor,siteId,'site:read');const receipt=await terminalSave(repo,siteId,uuid(m[3]));if(receipt)return receipt;
+        }
+        throw error;
     }
     finally {
         if (admission)

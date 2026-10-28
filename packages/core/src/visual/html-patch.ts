@@ -4,7 +4,8 @@ import type { EditableMap } from './editable-map.js';
 import { digest, createEditableMap } from './editable-map.js';
 import { elementPatch } from '../../../contracts/src/visual.js';
 import { AppError } from '../../../contracts/src/model.js';
-import { patchStyles } from './css-patch.js';
+import { patchStyles,styleEdits } from './css-patch.js';
+import {attributeSpan} from './attribute-spans.js';
 import { localReference } from '../references.js';
 import { parse } from 'parse5';
 export const escapeText = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -27,10 +28,11 @@ export function patchFiles(files: ArtifactFile[], map: EditableMap, input: Eleme
     }[] = [];
     function attribute(name: string, value: string) {
         const range = loc!.attrs?.[name];
-        if (range)
-            spans.push({ start: range.startOffset, end: range.endOffset, value: `${name}="${escapeAttribute(value)}"` });
-        else if (name === 'style')
-            spans.push({ start: loc!.startTag!.endOffset - 1, end: loc!.startTag!.endOffset - 1, value: ` style="${escapeAttribute(value)}"` });
+        if (range){const lexical=attributeSpan(source,range.startOffset,range.endOffset);spans.push({start:lexical.start,end:lexical.end,value:lexical.encode(value)});}
+        else if (name === 'style'){
+            let at=loc!.startTag!.endOffset-1;const slashInValue=Object.values(loc!.attrs??{}).some(range=>range.startOffset<=at-1&&range.endOffset>at-1);if(source[at-1]==='/'&&!slashInValue)at--;while(/[\t\n\f\r ]/.test(source[at-1]??''))at--;
+            spans.push({ start:at,end:at,value:` style="${escapeAttribute(value)}"` });
+        }
         else
             return bad('У атрибута нет однозначного исходного диапазона.');
     }
@@ -82,8 +84,13 @@ export function patchFiles(files: ArtifactFile[], map: EditableMap, input: Eleme
             extra.push(image);
         attribute('src', '../'.repeat(e.documentPath.split('/').length - 1) + expected);
     }
-    if (patch.styles)
-        attribute('style', patchStyles(node.attrs.find(a => a.name === 'style')?.value ?? '', patch.styles));
+    if (patch.styles){
+        const range=loc.attrs?.style;
+        if(!range)attribute('style',patchStyles('',patch.styles));
+        else {const lexical=attributeSpan(source,range.startOffset,range.endOffset);if(lexical.decoded!==node.attrs.find(a=>a.name==='style')?.value)return bad('Неоднозначное значение CSS.');
+            for(const edit of styleEdits(lexical.decoded,patch.styles))spans.push({start:lexical.offset(edit.start),end:lexical.offset(edit.end),value:lexical.encode(edit.value)});
+        }
+    }
     let next = source;
     let last = source.length + 1;
     for (const span of spans.sort((a, b) => b.start - a.start)) {
@@ -92,7 +99,7 @@ export function patchFiles(files: ArtifactFile[], map: EditableMap, input: Eleme
         last = span.start;
         next = next.slice(0, span.start) + span.value + next.slice(span.end);
     }
-    const output = [...files.map(f => f.path === e.documentPath ? { ...f, bytes: new TextEncoder().encode(next) } : f), ...extra];
+    const output = [...files.map(f => f.path === e.documentPath ? { ...f, bytes: Buffer.concat([f.bytes[0]===0xef&&f.bytes[1]===0xbb&&f.bytes[2]===0xbf?f.bytes.subarray(0,3):new Uint8Array(),new TextEncoder().encode(next)]) } : f), ...extra];
     const rebuilt = createEditableMap(output, map.binding);
     if (!rebuilt.nodes.has(e.elementId))
         return bad('Правка изменила структуру.');

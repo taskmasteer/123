@@ -35,32 +35,29 @@ export function validStyle(key: string, value: string) {
         return abs <= (m[2] === 'px' ? 512 : m[2] === '%' ? 100 : 32);
     });
 }
-export function patchStyles(source: string, styles: NonNullable<ElementPatch['styles']>): string {
+export interface StyleEdit {start:number;end:number;value:string}
+export function styleEdits(source: string, styles: NonNullable<ElementPatch['styles']>): StyleEdit[] {
     const bad = () => { throw new AppError('INVALID_INPUT', 'Недопустимое значение CSS.'); };
     const entries = Object.entries(styles);
     if (!entries.length || entries.some(([k, v]) => typeof v !== 'string' || !validStyle(k, v)))
         return bad();
     const ast = css.parse(source, { context: 'declarationList', positions: true, parseCustomProperty: true, onParseError: bad });
-    const removes: {
-        start: number;
-        end: number;
-    }[] = [];
+    const declarations:{start:number;end:number;touched:boolean;terminated:boolean}[]=[];
     const touched = new Set(entries.map(([k]) => names[k as keyof typeof names]));
     ast.type === 'DeclarationList' && ast.children.forEach(node => {
         if (node.type !== 'Declaration' || !node.loc)
             return bad();
-        if (touched.has(node.property.toLowerCase())) {
-            let end = node.loc.end.offset;
-            if (source[end] === ';')
-                end++;
-            removes.push({ start: node.loc.start.offset, end });
-        }
+        const terminated=source[node.loc.end.offset]===';';
+        declarations.push({start:node.loc.start.offset,end:node.loc.end.offset+(terminated?1:0),terminated,touched:touched.has(node.property.toLowerCase())});
     });
-    let next = source;
-    for (const span of removes.sort((a, b) => b.start - a.start))
-        next = next.slice(0, span.start) + next.slice(span.end);
-    next = next.trimEnd();
-    if (next && !next.endsWith(';'))
-        next += ';';
-    return next + (next ? ' ' : '') + entries.map(([key, value]) => `${names[key as keyof typeof names]}: ${value.trim()} !important;`).join(' ');
+    const replacement=entries.map(([key,value])=>`${names[key as keyof typeof names]}: ${value.trim()} !important;`).join(' ');
+    let suffix=declarations.length;
+    while(suffix>0&&declarations[suffix-1]!.touched&&(suffix===declarations.length||/^[\t\n\f\r ]*$/.test(source.slice(declarations[suffix-1]!.end,declarations[suffix]!.start))))suffix--;
+    const edits:StyleEdit[]=declarations.slice(0,suffix).filter(d=>d.touched).map(d=>({start:d.start,end:d.end,value:''}));
+    if(suffix<declarations.length)edits.push({start:declarations[suffix]!.start,end:declarations.at(-1)!.end,value:replacement});
+    else {const last=declarations.at(-1);const at=last?.end??0;edits.push({start:at,end:at,value:(last?(last.terminated?' ':'; '):'')+replacement});}
+    return edits;
+}
+export function patchStyles(source:string,styles:NonNullable<ElementPatch['styles']>):string {
+    let next=source;for(const e of styleEdits(source,styles).sort((a,b)=>b.start-a.start))next=next.slice(0,e.start)+e.value+next.slice(e.end);return next;
 }

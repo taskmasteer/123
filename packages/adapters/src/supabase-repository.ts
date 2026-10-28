@@ -8,6 +8,8 @@ import type { EditingState, EditingStore } from '../../contracts/src/editing.js'
 import { normalizeDomain } from '../../core/src/sites.js';
 import { authorize } from '../../core/src/permissions.js';
 import { parseSiteInput, parseSitePatch } from '../../contracts/src/inputs.js';
+import {completeVisualAcceptance,failVisualAcceptance,installedVisualAcceptance,type VisualAcceptanceReceipt} from '../../core/src/visual/acceptance.js';
+import type {Candidate} from '../../contracts/src/editing.js';
 export type SqlTransaction = PoolClient;
 /** Task8 must lock sites -> workers -> jobs -> site_operations; sample clock_timestamp AFTER locks. */
 export interface LeaseAuthority {
@@ -141,25 +143,53 @@ export class SupabaseRepository {
     }
     async release(a: Admission) { await this.transaction(async (tx) => { await tx.query('select id from public.sites where id=$1 for update', [a.siteId]); await tx.query("delete from private.site_operations where site_id=$1 and operation_id=$2 and kind='controller'", [a.siteId, a.token]); }); }
     /** Monotone denial only; never grants admission or changes source/pointers, even while a worker owns the site. */
-    async denyRevokedVisualSave(actor:Principal,siteId:string,saveId:string):Promise<boolean> {
+    async denyRevokedVisualSave(actor:Principal,siteId:string,saveId:string,observedOwnDenial=false):Promise<boolean> {
         return this.transaction(async tx=>{
             await tx.query('select id from public.sites where id=$1 for update',[siteId]);
             const row=(await tx.query("select data from private.edit_requests where id=$1 and site_id=$2 and data#>>'{visualSave,actorId}'=$3 for update",[saveId,siteId,actor.userId])).rows[0];
             if(!row||row.data.visualSave.state!=='pending')return false;
-            let denied=false;try{const site=await this.get(siteId,tx);if(!site)throw new AppError('NOT_FOUND','Нет сайта.');authorize(await this.fresh(tx,actor),'site:edit',site);}catch(error){if(!(error instanceof AppError&&['FORBIDDEN','NOT_FOUND'].includes(error.code)))throw error;denied=true;}
+            const candidate=row.data as Candidate,site=await this.get(siteId,tx),revision=await this.revision(saveId,tx);
+            if(site&&installedVisualAcceptance(site,candidate,revision)){await tx.query('update private.edit_requests set data=$2 where id=$1',[saveId,completeVisualAcceptance(candidate)]);return false;}
+            let denied=observedOwnDenial;try{if(!site)throw new AppError('NOT_FOUND','Нет сайта.');authorize(await this.fresh(tx,actor),'site:edit',site);}catch(error){if(!(error instanceof AppError&&['FORBIDDEN','NOT_FOUND'].includes(error.code)))throw error;denied=true;}
             if(!denied)return false;
-            const candidate=row.data as import('../../contracts/src/editing.js').Candidate;candidate.visualSave!.state='failed';candidate.visualSave!.error='Доступ к сохранению отозван.';if(candidate.acceptance?.state==='pending')candidate.acceptance.state='conflict';
-            await tx.query('update private.edit_requests set data=$2 where id=$1',[saveId,candidate]);return true;
+            await tx.query('update private.edit_requests set data=$2 where id=$1',[saveId,failVisualAcceptance(candidate,'Доступ к сохранению отозван.')]);return true;
+        });
+    }
+    /** Same acceptance intent as core; authority decision, pointer CAS and its terminal journal receipt are atomic. */
+    async commitVisualSave(siteId:string,expectedRevision:number,patch:SitePatch,a:Admission,actorId:string):Promise<VisualAcceptanceReceipt>{
+        if(a.siteId!==siteId||Object.keys(patch).length!==1||typeof patch.draftId!=='string')throw new AppError('INVALID_INPUT','Недопустимая установка сохранения.');
+        return this.transaction(async tx=>{
+            await tx.query('select id from public.sites where id=$1 for update',[siteId]);
+            const candidate=(await tx.query('select data from private.edit_requests where id=$1 and site_id=$2 for update',[patch.draftId,siteId])).rows[0]?.data as Candidate|undefined;
+            if(!candidate?.visualSave||candidate.visualSave.actorId!==actorId||candidate.baseRevision!==expectedRevision||candidate.job.edit?.candidateId!==candidate.id||candidate.job.baseRevision!==expectedRevision)throw new AppError('INVALID_INPUT','Намерение сохранения не совпадает.');
+            const site=await this.get(siteId,tx);if(!site)throw new AppError('NOT_FOUND','Нет сайта.');
+            const revision=await this.revision(candidate.id,tx);
+            const save=async(value:Candidate)=>{await tx.query('update private.edit_requests set data=$2 where id=$1',[candidate.id,value]);};
+            if(candidate.visualSave.state==='completed'||installedVisualAcceptance(site,candidate,revision)){
+                await save(completeVisualAcceptance(candidate));return {state:'completed',site,journalCommitted:true};
+            }
+            if(candidate.visualSave.state==='failed')return {state:'failed',code:'FORBIDDEN',message:candidate.visualSave.error??'Сохранение отклонено.',journalCommitted:true};
+            if(candidate.acceptance?.expectedRevision!==expectedRevision)throw new AppError('INVALID_INPUT','Намерение принятия не совпадает.');
+            try{authorize(await this.fresh(tx,{userId:actorId,role:'user'}),'site:edit',site);}catch(error){
+                if(!(error instanceof AppError&&error.code==='FORBIDDEN'))throw error;
+                const message='Доступ к сохранению отозван.';await save(failVisualAcceptance(candidate,message));return {state:'failed',code:'FORBIDDEN',message,journalCommitted:true};
+            }
+            const admitted=(await tx.query("select 1 from private.site_operations where site_id=$1 and operation_id=$2 and kind='controller' and expires_at>clock_timestamp() for update",[siteId,a.token])).rowCount;
+            if(!admitted)throw new AppError('STALE_LEASE','Срок операции истёк.');
+            if(candidate.visualSave.state!=='pending'||candidate.acceptance.state!=='pending'||revision?.siteId!==siteId||revision.manifestId!==candidate.manifestId||revision.parentId!==candidate.parentRevisionId)throw new AppError('INVALID_INPUT','Проверенная версия не совпадает.');
+            if(site.revision!==expectedRevision||(site.draftId??site.publishedId)!==candidate.baseDraftId){const message='Черновик изменился; сохранённый вариант доступен отдельно.';await save(failVisualAcceptance(candidate,message));return {state:'failed',code:'CONFLICT',message,journalCommitted:true};}
+            await tx.query('update public.sites set revision=revision+1,draft_id=$3 where id=$1 and revision=$2',[siteId,expectedRevision,candidate.id]);
+            await save(completeVisualAcceptance(candidate));return {state:'completed',site:(await this.get(siteId,tx))!,journalCommitted:true};
         });
     }
     async compareAndSet(siteId: string, expectedRevision: number, patch: SitePatch, a?: Admission, visualActorId?:string): Promise<Site> {
         if (!a || a.siteId !== siteId)
             throw new AppError('UNAVAILABLE', 'Требуется полномочие операции.');
         patch = parseSitePatch(patch);
+        if(visualActorId){const receipt=await this.commitVisualSave(siteId,expectedRevision,patch,a,visualActorId);if(receipt.state==='failed')throw new AppError(receipt.code,receipt.message);return receipt.site;}
         return this.transaction(async (tx) => {
             await this.guard(tx, a);
             const s = (await this.get(siteId, tx))!;
-            if(visualActorId){authorize(await this.fresh(tx,{userId:visualActorId,role:'user'}),'site:edit',s);const save=(await tx.query("select 1 from private.edit_requests where id=$1 and site_id=$2 and data#>>'{visualSave,actorId}'=$3 and data#>>'{visualSave,state}'='pending'",[patch.draftId,siteId,visualActorId])).rowCount;if(!save)throw new AppError('FORBIDDEN','Сохранение больше не разрешено.');}
             if (s.revision !== expectedRevision)
                 throw new AppError('CONFLICT', 'Версия изменилась.');
             if (patch.assignedUserIds || patch.input)
@@ -193,7 +223,8 @@ export class SupabaseRepository {
                         if (c.siteId !== a.siteId)
                             throw new AppError('FORBIDDEN', 'Чужой вариант.');
                         const previous=(await tx.query('select data from private.edit_requests where id=$1',[c.id])).rows[0]?.data;
-                        if(previous?.visualSave?.state==='failed'&&c.visualSave?.state!=='failed')throw new AppError('CONFLICT','Отозванное сохранение нельзя возобновить.');
+                        const terminal=previous?.visualSave?.state;
+                        if((terminal==='failed'||terminal==='completed')&&(c.visualSave?.state!==terminal||(terminal==='completed'&&(c.status!=='accepted'||c.acceptance?.state!=='completed'))||(terminal==='failed'&&c.acceptance?.state==='pending')))throw new AppError('CONFLICT','Завершённое сохранение нельзя изменить.');
                         // Write-ahead candidate and queued job are atomic; enqueue below transfers admission.
                         await tx.query('insert into private.jobs(id,site_id,data) values($1,$2,$3) on conflict(id) do nothing', [c.jobId, a.siteId, c.job]);
                         const inserted = !(await tx.query('select 1 from private.edit_requests where id=$1', [c.id])).rowCount;

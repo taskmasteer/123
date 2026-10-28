@@ -6,6 +6,37 @@ import { projectSelection } from '../src/visual/projection.js';
 const identity = { siteId: 'site', revisionId: 'revision', manifestId: 'manifest' };
 const html = '<!doctype html>\r\n<html lang="en"><head></head><body><h1>Same 😀</h1><p>Same 😀</p><p>Mixed <em>child</em></p><a href="#x">Link</a><div id="x">Target</div></body></html>';
 const files = [{ path: 'index.html', mediaType: 'text/html', bytes: new TextEncoder().encode(html) }];
+test('text edits retain an unrelated UTF-8 BOM and every surrounding original byte',()=>{
+ const source='<!doctype html><html lang="en"><head></head><body><h1>Old</h1></body></html>';
+ const bytes=Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),Buffer.from(source)]),input=[{path:'index.html',mediaType:'text/html',bytes}];
+ const map=createEditableMap(input,identity),result=patchFiles(input,map,{elementId:map.elements.find(e=>e.tag==='h1')!.elementId,text:'New'});
+ expect(Buffer.from(result[0]!.bytes)).toEqual(Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),Buffer.from(source.replace('Old','New'))]));
+});
+test.each([
+ `STYLE='--custom: "a&b"; display: grid;   '`,
+ `StYlE = "--custom: &quot;a&amp;b&quot;; display: grid;\r\n  "`,
+ `STYLE='--custom: &#34;a&#x26;b&#34;; color: blue; display: grid;   '`,
+ `style=color:blue`,
+ `STYLE`,
+])('style patch preserves untouched lexical attribute bytes: %s',attribute=>{
+ const source=`<!doctype html><html lang="en"><head></head><body><h1 ${attribute}>Old</h1></body></html>`,input=[{path:'index.html',mediaType:'text/html',bytes:Buffer.from(source)}];
+ const map=createEditableMap(input,identity),target=map.elements.find(e=>e.tag==='h1')!;
+ const expected=attribute==='STYLE'?'STYLE="color: red !important;"':attribute==='style=color:blue'?'style=color:&#32;red&#32;!important;':attribute.replace('color: blue;','').replace(/(display: grid;)/,'$1 color: red !important;');
+ const result=patchFiles(input,map,{elementId:target.elementId,styles:{color:'red'}});
+ expect(Buffer.from(result[0]!.bytes)).toEqual(Buffer.from(source.replace(attribute,expected)));
+ const nextMap=createEditableMap(result,map.binding);expect(Buffer.from(patchFiles(result,nextMap,{elementId:target.elementId,styles:{color:'red'}})[0]!.bytes)).toEqual(Buffer.from(result[0]!.bytes));
+});
+test.each(['<img/>','<img />','<img src="old.png"/>','<img src="old.png" />'])('style insertion preserves valid self-closing image markup: %s',image=>{
+ const source=`<!doctype html><html lang="en"><head></head><body>${image}</body></html>`,input=[{path:'index.html',mediaType:'text/html',bytes:Buffer.from(source)}],map=createEditableMap(input,identity),target=map.elements.find(e=>e.tag==='img')!;
+ expect(target.fields).toContain('styles');const changed=patchFiles(input,map,{elementId:target.elementId,styles:{margin:'1px'}});
+ const at=image.replace(/\s*\/>$/,'').length;
+ expect(Buffer.from(changed[0]!.bytes)).toEqual(Buffer.from(source.replace(image,image.slice(0,at)+' style="margin: 1px !important;"'+image.slice(at))));
+});
+test('a slash in an unquoted img attribute remains part of that attribute during style insertion',()=>{
+ const source='<!doctype html><html lang="en"><head></head><body><img src=old.png/></body></html>',input=[{path:'index.html',mediaType:'text/html',bytes:Buffer.from(source)}],map=createEditableMap(input,identity);
+ const result=patchFiles(input,map,{elementId:map.elements.find(e=>e.tag==='img')!.elementId,styles:{margin:'1px'}});
+ expect(Buffer.from(result[0]!.bytes)).toEqual(Buffer.from(source.replace('<img src=old.png/>','<img src=old.png/ style="margin: 1px !important;">')));
+});
 test('patches only the selected original span, escaping script text and preserving unrelated CRLF/non-BMP bytes', () => {
     const map = createEditableMap(files, identity), target = map.elements.find(e => e.tag === 'h1')!;
     const result = patchFiles(files, map, { elementId: target.elementId, text: '<script>alert("x")</script> & 😀' });

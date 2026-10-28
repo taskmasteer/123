@@ -67,6 +67,23 @@ test('edit refinement survives restart, accepts only a draft, publishes explicit
 }, 90000);
 
 const admin = { userId: 'admin', role: 'admin' } as const;
+test.each(['before-CAS','after-CAS'] as const)('managed atomic visual receipt survives revoked ordinary journal guard %s',async(window)=>{
+ const h=await harness();try{
+  const {map}=await h.editor.visualMap(admin,h.before.id,1),patch={elementId:map.elements.find(e=>e.tag==='h1')!.elementId,text:'Atomic manual save'};
+  const job=await h.editor.requestVisual(admin,h.before.id,1,patch,map.binding.mapId,'atomic-save');await h.run(new FakeModel(),async f=>validateStatic(f),false);
+  let authorized=true,commits=0;const guarded:EditingStore={transaction(operation){if(!authorized)return Promise.reject(new AppError('FORBIDDEN','Ordinary admission revoked'));return h.deps.store.transaction(operation);}};
+  const editor=createEditing({...h.deps,store:guarded,visualAcceptance:async(candidate)=>{
+   commits++;let site=h.before;
+   if(window==='after-CAS')site=await h.deps.sites.compareAndSet(h.before.id,1,{draftId:candidate.id});
+   const completed=window==='after-CAS';candidate.status=completed?'accepted':'conflict';candidate.acceptance!.state=completed?'completed':'conflict';candidate.visualSave!.state=completed?'completed':'failed';
+   await h.deps.store.transaction(state=>{state.candidates[state.candidates.findIndex(c=>c.id===candidate.id)]=structuredClone(candidate);return {value:state,result:undefined};});authorized=false;
+   return completed?{state:'completed' as const,site,journalCommitted:true as const}:{state:'failed' as const,code:'FORBIDDEN' as const,message:'Denied before installation',journalCommitted:true as const};
+  }});
+  expect((await editor.visualStatus(admin,h.before.id,job.edit!.candidateId)).status).toBe(window==='after-CAS'?'completed':'failed');expect(commits).toBe(1);
+  authorized=true;const reopened=createEditing({...h.deps,store:guarded});expect((await reopened.requestVisual(admin,h.before.id,1,patch,map.binding.mapId,'atomic-save')).id).toBe(job.id);
+  expect((await reopened.visualStatus(admin,h.before.id,job.edit!.candidateId)).status).toBe(window==='after-CAS'?'completed':'failed');expect((await h.deps.sites.get(h.before.id))!.revision).toBe(window==='after-CAS'?2:1);
+ }finally{await h.close();}
+});
 test.each(['validation','revocation','conflict'] as const)('visual %s failure preserves draft/public pointers and never requests AI repair',async(mode)=>{const h=await harness();try{
  const {map}=await h.editor.visualMap(admin,h.before.id,1);const job=await h.editor.requestVisual(admin,h.before.id,1,{elementId:map.elements.find(e=>e.tag==='h1')!.elementId,text:'Manual save'},map.binding.mapId,'failed-save');let calls=0;
  if(mode==='revocation')h.deps.visualCompareAndSet=async()=>{throw new AppError('FORBIDDEN','Access revoked');};
@@ -107,10 +124,11 @@ async function harness() {
   const before = await sites.compareAndSet(created.id, 0, { publishedId: revisionId });
   const deps = { sites, queue, artifacts, revisions, checkpoints, store, clock, ids: { next: randomUUID }, publication: new FakePublication(),visualCompareAndSet:async(actorId:string,siteId:string,expected:number,draftId:string)=>{if(actorId!==admin.userId)throw new AppError('FORBIDDEN','Revoked');return sites.compareAndSet(siteId,expected,{draftId});} };
   let editor = createEditing(deps);
-  async function run(model: ModelPort = new FakeModel(),validate:(files:ArtifactFile[])=>Promise<ValidationReport>=async files=>validateStatic(files)) {
+  async function run(model: ModelPort = new FakeModel(),validate:(files:ArtifactFile[])=>Promise<ValidationReport>=async files=>validateStatic(files),recover=true) {
     const claim = (await queue.claim('test-device'))!;
     expect(claim).not.toBeNull();
     await runJob(claim.job, claim.lease, { ...deps, model, templates: { async prepare() { throw new Error('Disabled catalog must not prevent editing existing files'); }, async load() { throw new Error('An edit must not regenerate a template'); } }, workspace: join(root, 'work'), validate }, new AbortController().signal);
+    if(!recover)return deps.store.transaction(state=>({result:state.candidates.at(-1)!}));
     await editor.recover(before.id);
     return (await editor.list(admin, before.id)).candidates.at(-1)!;
   }

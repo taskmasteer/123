@@ -24,8 +24,9 @@ class MemoryObjects implements ObjectTransport {
     async head(key: string) { const v = this.data.get(key)!; return { size: v.bytes.length, mediaType: v.mediaType }; }
     async get(key: string) { return this.data.get(key)!.bytes; }
 }
-test.each(['normal', 'final-revoked', 'observed-restored'])('unenrolled spec-user scoped projection and durable Save, authority scenario=%s', async (scenario) => {
-    const revoke = scenario !== 'normal';
+test.each(['normal', 'final-revoked', 'observed-restored','late-own-revoke','post-cas-revoke','legacy-pending-receipt'])('unenrolled spec-user scoped projection and durable Save, authority scenario=%s', async (scenario) => {
+    const postCas=scenario==='post-cas-revoke'||scenario==='legacy-pending-receipt';
+    const revoke = scenario !== 'normal'&&!postCas;
     const pool = await database();
     try {
         await seedUsers(pool);
@@ -34,7 +35,7 @@ test.each(['normal', 'final-revoked', 'observed-restored'])('unenrolled spec-use
         await pool.query("insert into public.revisions values($1,$2,null,$3,'published',1)", [baseRevision, site.id, base.id]);
         await pool.query('update public.sites set published_id=$2 where id=$1', [site.id, baseRevision]);
         await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"completed\"') where site_id=$1", [site.id]);
-        const app = createApp({ repository: repo, queue, store, auth: { verifyUser: async (token) => token === 'admin' ? { userId: identities.admin, role: 'admin' } : actor, verifyWorker: async () => { throw new AppError('UNAUTHENTICATED', 'Not enrolled'); } } });
+        const makeApp=(repository=repo)=>createApp({ repository, queue, store, auth: { verifyUser: async (token) => token === 'admin' ? { userId: identities.admin, role: 'admin' } : actor, verifyWorker: async () => { throw new AppError('UNAUTHENTICATED', 'Not enrolled'); } } });let app=makeApp();
         const request = (path: string, method = 'GET', body?: unknown, token = 'spec') => app(new Request('https://control.test' + path, { method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) }));
         const descriptor = await (await request(`/sites/${site.id}/visual/projection?expectedRevision=0`)).json();
         expect(descriptor.size).toBeGreaterThan(0);
@@ -58,7 +59,7 @@ test.each(['normal', 'final-revoked', 'observed-restored'])('unenrolled spec-use
         await pool.query("insert into private.workers(id,name,token_hash) values($1,'visual worker',$2)", [worker, worker.replaceAll('-', '').repeat(2)]);
         const claim = (await queue.claim(worker, 'visual'))!;
         const cachedCandidate = structuredClone((await repo.editingState(site.id)).candidates[0]!);
-        if (revoke)
+        if (scenario==='final-revoked'||scenario==='observed-restored')
             await pool.query("update public.memberships set role='user' where user_id=$1", [actor.userId]);
         if (scenario === 'observed-restored') {
             expect((await request(`/sites/${site.id}/visual/saves/${save.saveId}`)).status).toBe(403);
@@ -66,13 +67,37 @@ test.each(['normal', 'final-revoked', 'observed-restored'])('unenrolled spec-use
             await pool.query("update public.memberships set role='spec-user' where user_id=$1", [actor.userId]);
         }
         await runJob(claim.job, claim.lease, { queue, sites: { get: id => repo.get(id), create: (v, p) => repo.create(v, p), list: (p, c, l) => repo.list(p, c, l), compareAndSet: async () => { throw new Error('Worker cannot install visual draft'); } }, artifacts: store, checkpoints: store, revisions: { get: id => repo.revision(id), put: async () => { throw new Error('Controller registers visual candidate'); } }, model: { identity: 'unavailable', run: async () => { throw new Error('No configured model'); } }, clock: { now: Date.now }, templates: { load: async () => { throw new Error('No template reload'); } }, publication: { advance: async () => { throw new Error('No implicit publish'); } }, workspace: await directory(), validate: async (f) => validateStatic(f) }, new AbortController().signal);
-        const status = await request(`/sites/${site.id}/visual/saves/${save.saveId}`, 'GET', undefined, 'admin');
+        let afterCasDenied:boolean|undefined,afterCasState:string|undefined;
+        if(scenario==='late-own-revoke'||postCas){
+            // Pause exactly at the real core→repository final authority boundary, after admission/evidence.
+            const method='commitVisualSave' in repo?'commitVisualSave':'compareAndSet',target=repo as any,original=target[method].bind(repo);let first=true;
+            target[method]=async(...args:unknown[])=>{
+                if(!first)return original(...args);first=false;
+                if(scenario==='late-own-revoke')await pool.query("update public.memberships set role='user' where user_id=$1",[actor.userId]);
+                const result=await original(...args);
+                if(postCas){
+                    if(scenario==='legacy-pending-receipt'){
+                        const pending=structuredClone((await repo.editingState(site.id)).candidates[0]!);pending.visualSave!.state='pending';pending.acceptance!.state='pending';pending.status='ready';
+                        await pool.query('update private.edit_requests set data=$2 where id=$1',[save.saveId,pending]);
+                    }
+                    await pool.query("update public.memberships set role='user' where user_id=$1",[actor.userId]);
+                    // A second own-status request runs while the first is paused after the actual SQL commit.
+                    const concurrent=await request(`/sites/${site.id}/visual/saves/${save.saveId}`);expect(concurrent.status).toBe(200);expect((await concurrent.json()).status).toBe('completed');
+                    afterCasDenied=await repo.denyRevokedVisualSave(actor,site.id,save.saveId);
+                    afterCasState=(await repo.editingState(site.id)).candidates[0]!.visualSave!.state;
+                }
+                return result;
+            };
+        }
+        const status = await request(`/sites/${site.id}/visual/saves/${save.saveId}`, 'GET', undefined, postCas||scenario==='late-own-revoke'?'spec':'admin');
         expect(status.status, await status.clone().text()).toBe(200);
         const result = await status.json();
         expect(result.status).toBe(revoke ? 'failed' : 'completed');
+        if(postCas){expect(afterCasDenied).toBe(false);expect(afterCasState).toBe('completed');expect((await repo.editingState(site.id)).candidates[0]!.acceptance?.state).toBe('completed');}
         const installed = (await repo.get(site.id))!;
         expect(installed.publishedId).toBe(baseRevision);
         expect(installed.revision).toBe(revoke ? 0 : 1);
+        app=makeApp(new SupabaseRepository(pool));
         if (revoke) {
             await pool.query("update public.memberships set role='spec-user' where user_id=$1", [actor.userId]);
             const replayed = await request(`/sites/${site.id}/visual/saves`, 'POST', body);
@@ -90,6 +115,10 @@ test.each(['normal', 'final-revoked', 'observed-restored'])('unenrolled spec-use
             expect((await repo.get(site.id))!.revision).toBe(0);
         }
         if (!revoke) {
+            await pool.query("update public.memberships set role='spec-user' where user_id=$1",[actor.userId]);
+            expect((await (await request(`/sites/${site.id}/visual/saves`,'POST',body)).json()).status).toBe('completed');
+            expect((await (await request(`/sites/${site.id}/visual/saves/${save.saveId}`)).json()).status).toBe('completed');expect((await repo.get(site.id))!.revision).toBe(1);
+            if(postCas){const admission=await repo.acquire(actor,site.id);try{await expect(repo.editingStore(admission).transaction(state=>{state.candidates[0]=cachedCandidate;return {value:state,result:undefined};})).rejects.toMatchObject({code:'CONFLICT'});}finally{await repo.release(admission);}}
             expect(result.revision.id).toBe(installed.draftId);
             expect(new TextDecoder().decode((await store.read(result.revision.manifestId))[0]!.bytes)).toContain('Managed manual saved title');
         }
