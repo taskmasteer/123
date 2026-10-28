@@ -19,12 +19,15 @@ class Storage implements ObjectTransport {
         mediaType: string;
     }>();
     async signPut(key: string) { return 'https://fixture.r2.cloudflarestorage.com/' + key; }
-    async put(key: string, bytes: Uint8Array, mediaType: string) { if (this.objects.has(key))
-        throw new Error('Immutable'); this.objects.set(key, { bytes, mediaType }); }
+    async put(key: string, bytes: Uint8Array, mediaType: string) {
+        if (this.objects.has(key))
+            throw new Error('Immutable');
+        this.objects.set(key, { bytes, mediaType });
+    }
     async get(key: string) { return this.objects.get(key)!.bytes; }
     async head(key: string) { const f = this.objects.get(key)!; return { size: f.bytes.length, mediaType: f.mediaType }; }
 }
-async function fixture(before?: (path: string) => Promise<void>) {
+async function fixture(before?: (path: string) => Promise<void>, reserve = true) {
     const pool = await database();
     await seedUsers(pool);
     const repo = new SupabaseRepository(pool), queue = new PostgresQueue(repo), storage = new Storage(), store = new R2Store(repo, storage, queue), worker = randomUUID();
@@ -37,7 +40,8 @@ async function fixture(before?: (path: string) => Promise<void>) {
     const cp = await store.save({ ...claim.job, stage: 'publication' }, claim.lease, state, files);
     await queue.checkpoint(claim.lease, cp, null);
     const binding = { requestKey, revisionId, manifestId: manifest.id, checkpointId: cp.id, expectedRevision: 0 };
-    const reservation = await queue.reservePublication(claim.lease, binding);
+    // Crash-boundary fixtures let the actual HTTP route make the first reservation.
+    const reservation = (reserve ? await queue.reservePublication(claim.lease, binding) : undefined)!;
     let createCount = 0, promoteCount = 0, uploads = 0, verified = 0, timeoutCreate = true, wrongAlias = false, dnsReady = true, quota = false, ownershipChallenge = false, domainVerified = false;
     let deployment: any = null, readyState = 'READY';
     const calls: string[] = [];
@@ -70,8 +74,8 @@ async function fixture(before?: (path: string) => Promise<void>) {
                 expect(body).not.toHaveProperty('target');
                 expect(body.files).toHaveLength(2);
                 expect(body.projectSettings).toMatchObject({ framework: null, buildCommand: '', installCommand: '' });
-                const id=createCount===1?'dpl_fixture':'dpl_fixture_'+createCount;
-                deployment = { id, uid:id, projectId: 'prj_fixture', meta: body.meta, readyState };
+                const id = createCount === 1 ? 'dpl_fixture' : 'dpl_fixture_' + createCount;
+                deployment = { id, uid: id, projectId: 'prj_fixture', meta: body.meta, readyState };
                 if (timeoutCreate) {
                     timeoutCreate = false;
                     throw new Error('connection lost after provider accepted');
@@ -80,7 +84,7 @@ async function fixture(before?: (path: string) => Promise<void>) {
             }
             if (path === '/v7/deployments')
                 return Response.json(url.searchParams.has('until') ? { deployments: [deployment], pagination: { next: null } } : { deployments: [], pagination: { next: 100 } });
-            if (path === '/v13/deployments/'+deployment?.id)
+            if (path === '/v13/deployments/' + deployment?.id)
                 return Response.json({ ...deployment, readyState });
             if (path.includes('/promote/')) {
                 promoteCount++;
@@ -95,6 +99,152 @@ async function fixture(before?: (path: string) => Promise<void>) {
     return { pool, repo, queue, store, site, claim, binding, reservation, publication, advance, storage, manifest,
         counts: () => ({ createCount, promoteCount, uploads, verified }), calls, requireOwnershipChallenge: () => { ownershipChallenge = true; }, setReadyState: (v: string) => { readyState = v; }, setWrongAlias: (v: boolean) => { wrongAlias = v; }, setDns: (v: boolean) => { dnsReady = v; }, setQuota: () => { quota = true; } };
 }
+it.each([false, true])('generation attachment outbox survives process loss, expired lease and temporary R2 failure (cancel=%s)', async (cancel) => {
+    const f = await fixture(undefined, false);
+    try {
+        const actor = { userId: identities.admin, role: 'admin' as const };
+        const application = (publication: PostgresPublication) => createApp({ repository: f.repo, queue: f.queue, store: f.store, publication, auth: { verifyUser: async () => actor, verifyWorker: async () => ({ workerId: f.claim.lease.workerId }) } });
+        const request = (app: ReturnType<typeof createApp>, path: string, body?: unknown) => app(new Request('https://control.test' + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer fixture', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+        // The real route commits admission, then the process stops before attach runs.
+        f.publication.attach = async () => { throw new Error('process stopped after reservation commit'); };
+        expect((await request(application(f.publication), `/worker/jobs/${f.claim.job.id}/publication`, { lease: f.claim.lease, binding: f.binding })).status).toBe(503);
+        const reservation = (await f.pool.query('select * from private.publication_reservations where site_id=$1', [f.site.id])).rows[0];
+        expect(reservation.binding).toEqual(f.binding);
+        expect((await f.pool.query('select count(*) from private.provider_publications')).rows[0].count).toBe('0');
+        await f.pool.query('update private.jobs set expires_at=clock_timestamp() where id=$1', [f.claim.job.id]);
+        expect(await f.queue.claim(f.claim.lease.workerId)).toBeNull();
+        if (cancel)
+            await f.queue.cancel(f.claim.job.id);
+        const recovered = () => new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
+        const first = application(recovered()), second = application(recovered());
+        const get = f.storage.get.bind(f.storage);
+        f.storage.get = async (key) => { if (key.startsWith('private/checkpoints/'))
+            throw new Error('temporary R2 outage'); return get(key); };
+        expect((await request(first, '/worker/publications/tick', {})).status).toBe(503);
+        expect((await f.pool.query('select count(*) from private.provider_publications')).rows[0].count).toBe('0');
+        expect(f.calls).toEqual([]);
+        f.storage.get = get;
+        await f.pool.query('update private.publication_reservations set attachment_retry_at=clock_timestamp() where id=$1', [reservation.id]);
+        for (const tick of await Promise.all([request(first, '/worker/publications/tick', {}), request(second, '/worker/publications/tick', {})]))
+            expect(tick.status).toBe(200);
+        const status = await request(first, `/sites/${f.site.id}/publication`);
+        expect(status.status).toBe(200);
+        expect((await status.json()).publication).toMatchObject({ id: reservation.id, revisionId: f.binding.revisionId, origin: 'generation' });
+        expect((await f.pool.query('select count(*) from private.provider_publications')).rows[0].count).toBe('1');
+        for (let i = 0; i < 24; i++) {
+            await f.pool.query('update private.provider_publications set retry_at=null');
+            expect((await request(first, '/worker/publications/tick', {})).status).toBe(200);
+        }
+        expect(await recovered().view(reservation.id)).toMatchObject({ settlement: cancel ? 'cancelled' : 'settled', cancelRequested: cancel });
+        expect(f.counts().createCount).toBe(cancel ? 0 : 1);
+        expect((await f.repo.get(f.site.id))!.publishedId).toBe(cancel ? null : f.binding.revisionId);
+    }
+    finally {
+        await f.pool.end();
+    }
+});
+it('accepted-draft attachment outbox recovers through scoped latest and Resume without the original UI request key', async () => {
+    const f = await fixture();
+    try {
+        await f.publication.attach(f.reservation.id);
+        for (let i = 0; i < 24; i++)
+            await f.advance();
+        let actor = { userId: identities.admin, role: 'admin' as 'admin' | 'user' };
+        const application = (publication: PostgresPublication) => createApp({ repository: f.repo, queue: f.queue, store: f.store, publication, auth: { verifyUser: async () => actor, verifyWorker: async () => ({ workerId: f.claim.lease.workerId }) } });
+        const request = (app: ReturnType<typeof createApp>, path: string, body?: unknown) => app(new Request('https://control.test' + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer fixture', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+        const original = application(f.publication);
+        const edited = await request(original, `/sites/${f.site.id}/edits`, { instruction: 'Keep checked content', expectedRevision: 1 });
+        expect(edited.status).toBe(200);
+        const claim = (await f.queue.claim(f.claim.lease.workerId))!, candidateId = claim.job.edit!.candidateId;
+        const cp = await f.store.save({ ...claim.job, stage: 'completed' }, claim.lease, { jobId: claim.job.id, siteId: f.site.id, baseRevision: 1, revisionId: candidateId, manifestId: f.manifest.id, validation: { ok: true, issues: [], screenshotIds: [] } }, []);
+        await f.queue.checkpoint(claim.lease, cp, null);
+        await f.queue.finish(claim.lease, 'completed');
+        expect((await request(original, `/sites/${f.site.id}/candidates`)).status).toBe(200);
+        expect((await request(original, `/sites/${f.site.id}/candidates/${candidateId}/accept`, { expectedRevision: 1 })).status).toBe(200);
+        f.publication.attach = async () => { throw new Error('process stopped after controller reservation commit'); };
+        expect((await request(original, `/sites/${f.site.id}/publication`, { revisionId: candidateId, expectedRevision: 2, requestKey: randomUUID() })).status).toBe(503);
+        const reservation = (await f.pool.query('select * from private.publication_reservations where site_id=$1 and resolution is null', [f.site.id])).rows[0];
+        expect(reservation.binding).toEqual({ revisionId: candidateId, manifestId: f.manifest.id, expectedRevision: 2 });
+        expect((await f.pool.query('select id from private.provider_publications where id=$1', [reservation.id])).rowCount).toBe(0);
+        const recovered = () => new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
+        const first = application(recovered()), second = application(recovered());
+        const journal = (await f.pool.query('select data from private.deployments where id::text=lower($1)', [reservation.request_key])).rows[0].data;
+        await f.pool.query("update private.deployments set data=jsonb_set(data,'{manifestId}',to_jsonb($2::text)) where id::text=lower($1)", [reservation.request_key, randomUUID()]);
+        expect((await request(first, `/sites/${f.site.id}/publication`)).status).toBe(409);
+        expect((await f.pool.query('select id from private.provider_publications where id=$1', [reservation.id])).rowCount).toBe(0);
+        await f.pool.query('update private.deployments set data=$2 where id::text=lower($1)', [reservation.request_key, journal]);
+        const statuses = await Promise.all([request(first, `/sites/${f.site.id}/publication`), request(second, `/sites/${f.site.id}/publication`)]);
+        for (const response of statuses) {
+            expect(response.status).toBe(200);
+            const value = await response.json();
+            expect(value.publication).toMatchObject({ id: reservation.id, revisionId: candidateId, origin: 'draft' });
+            expect(value.publication).not.toHaveProperty('requestKey');
+        }
+        expect((await f.pool.query('select count(*) from private.provider_publications where id=$1', [reservation.id])).rows[0].count).toBe('1');
+        await f.pool.query('update public.sites set owner_id=$2 where id=$1', [f.site.id, identities.user]);
+        actor = { userId: identities.user, role: 'user' };
+        expect((await request(first, `/sites/${f.site.id}/publication/resume`, { id: reservation.id })).status).toBe(403);
+        actor = { userId: identities.admin, role: 'admin' };
+        expect((await request(second, `/sites/${f.site.id}/publication/resume`, { id: reservation.id })).status).toBe(200);
+        for (let i = 0; i < 20; i++) {
+            await f.pool.query('update private.provider_publications set retry_at=null');
+            expect((await request(first, '/worker/publications/tick', {})).status).toBe(200);
+        }
+        expect((await f.repo.get(f.site.id))!).toMatchObject({ publishedId: candidateId, revision: 3 });
+        expect(await recovered().view(reservation.id)).toMatchObject({ settlement: 'settled', origin: 'draft' });
+        expect(f.counts().createCount).toBe(2);
+    }
+    finally {
+        await f.pool.end();
+    }
+});
+it('attachment outbox durably backs off an unreadable oldest reservation so another site can finish', async () => {
+    const f = await fixture();
+    try {
+        const site = await f.repo.create({ domain: 'unreadable.example' }, { userId: identities.admin, role: 'admin' }), claim = (await f.queue.claim(f.claim.lease.workerId))!;
+        expect(claim.job.siteId).toBe(site.id);
+        const manifest = await f.store.put(site.id, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('unreadable checkpoint fixture') }], '1'), revisionId = randomUUID();
+        const cp = await f.store.save({ ...claim.job, stage: 'publication' }, claim.lease, { jobId: claim.job.id, siteId: site.id, revisionId, revisionCreatedAt: 1, parentRevisionId: null, manifestId: manifest.id }, []);
+        await f.queue.checkpoint(claim.lease, cp, null);
+        const bad = await f.queue.reservePublication(claim.lease, { requestKey: claim.job.id + ':' + manifest.id, revisionId, manifestId: manifest.id, checkpointId: cp.id, expectedRevision: 0 });
+        await f.pool.query("update private.publication_reservations set created_at=created_at-interval '1 day' where id=$1", [bad.id]);
+        const get = f.storage.get.bind(f.storage);
+        f.storage.get = async (key) => { if (key.startsWith('private/checkpoints/' + site.id + '/'))
+            throw new Error('unreadable oldest checkpoint'); return get(key); };
+        const recovered = () => new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
+        await expect(recovered().tick()).rejects.toThrow('unreadable oldest checkpoint');
+        await expect(recovered().tick()).resolves.toBeUndefined();
+        expect((await f.pool.query('select attachment_retry_at>clock_timestamp() waiting from private.publication_reservations where id=$1', [bad.id])).rows[0].waiting).toBe(true);
+        expect((await f.pool.query('select id from private.provider_publications where id=$1', [bad.id])).rowCount).toBe(0);
+        for (let i = 0; i < 24; i++) {
+            await f.pool.query('update private.provider_publications set retry_at=null');
+            await recovered().tick();
+        }
+        expect((await f.repo.get(f.site.id))!.publishedId).toBe(f.binding.revisionId);
+        expect(f.counts().createCount).toBe(1);
+        expect((await f.pool.query('select kind,operation_id from private.site_operations where site_id=$1', [site.id])).rows[0]).toEqual({ kind: 'publication', operation_id: bad.id });
+    }
+    finally {
+        await f.pool.end();
+    }
+});
+it('repeated attachment preserves the frozen ledger during checkpoint outage and rejects a different journal', async () => {
+    const f = await fixture();
+    try {
+        await f.publication.attach(f.reservation.id);
+        const frozen = (await f.pool.query('select * from private.provider_publications where id=$1', [f.reservation.id])).rows[0];
+        f.storage.get = async () => { throw new Error('checkpoint unavailable after attachment'); };
+        const recovered = new PostgresPublication(f.queue, f.store, f.publication.client, f.publication.verify);
+        expect(await recovered.latest(f.site.id)).toMatchObject({ id: f.reservation.id, phase: 'pending' });
+        expect(await recovered.attach(f.reservation.id)).toMatchObject({ id: f.reservation.id, phase: 'pending' });
+        await expect(recovered.attach(f.reservation.id, randomUUID())).rejects.toMatchObject({ code: 'CONFLICT' });
+        expect((await f.pool.query('select * from private.provider_publications where id=$1', [f.reservation.id])).rows[0]).toEqual(frozen);
+        expect(f.calls).toEqual([]);
+    }
+    finally {
+        await f.pool.end();
+    }
+});
 it('publication completes provider domain ownership verification after the supplied TXT challenge is ready', async () => {
     const f = await fixture();
     try {
@@ -154,10 +304,12 @@ it('cancellation of an accepted building deployment retains account capacity unt
 it('expired create owner cannot install its late response and the replacement reconciles without a second create', async () => {
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>(r => entered = r), gate = new Promise<void>(r => release = r);
-    const f = await fixture(async (path) => { if (path === '/v13/deployments') {
-        entered();
-        await gate;
-    } });
+    const f = await fixture(async (path) => {
+        if (path === '/v13/deployments') {
+            entered();
+            await gate;
+        }
+    });
     try {
         await f.publication.attach(f.reservation.id);
         for (let i = 0; i < 5; i++)
@@ -286,10 +438,10 @@ it('configured publication API exposes safe status, continuation and exact settl
         const receipt = await call(`/worker/jobs/${f.claim.job.id}/publication-receipt`, { lease: f.claim.lease });
         expect(receipt.status).toBe(200);
         expect(await receipt.json()).toEqual({ jobId: f.claim.job.id, siteId: f.site.id, ...f.binding });
-        expect((await call('/worker/publications/tick',{id:f.reservation.id})).status).toBe(400);
+        expect((await call('/worker/publications/tick', { id: f.reservation.id })).status).toBe(400);
         await f.queue.revokeWorker(f.claim.lease.workerId);
-        expect((await call('/worker/publications/tick',{})).status).toBe(409);
-        expect((await call(`/worker/jobs/${f.claim.job.id}/publication-receipt`,{lease:f.claim.lease})).status).toBe(409);
+        expect((await call('/worker/publications/tick', {})).status).toBe(409);
+        expect((await call(`/worker/jobs/${f.claim.job.id}/publication-receipt`, { lease: f.claim.lease })).status).toBe(409);
         const absent = createApp({ repository: f.repo, queue: f.queue, store: f.store, auth });
         expect((await (await absent(new Request('https://control.example/session', { headers: { authorization: 'Bearer fixture' } }))).json()).capabilities.publish).toBe(false);
     }
@@ -335,10 +487,11 @@ it('direct publication routes require current publish permission and accepted ch
         expect((await f.publication.view(intent.id)).phase).toBe('pending');
         await f.pool.query("update public.memberships set role='spec-user' where user_id=$1", [identities.spec]);
         expect((await call(`/sites/${f.site.id}/publication/resume`, { id: intent.id })).status).toBe(200);
-        for(let i=0;i<20;i++)await f.publication.advancePublication(intent.id);
-        expect((await f.repo.get(f.site.id))!).toMatchObject({publishedId:candidateId,revision:3});
+        for (let i = 0; i < 20; i++)
+            await f.publication.advancePublication(intent.id);
+        expect((await f.repo.get(f.site.id))!).toMatchObject({ publishedId: candidateId, revision: 3 });
         expect((await f.repo.revision(candidateId))!.kind).toBe('candidate');
-        expect((await f.publication.history(f.site.id)).map(p=>({revision:p.revisionId,settlement:p.settlement}))).toEqual(expect.arrayContaining([{revision:candidateId,settlement:'settled'},{revision:f.binding.revisionId,settlement:'settled'}]));
+        expect((await f.publication.history(f.site.id)).map(p => ({ revision: p.revisionId, settlement: p.settlement }))).toEqual(expect.arrayContaining([{ revision: candidateId, settlement: 'settled' }, { revision: f.binding.revisionId, settlement: 'settled' }]));
     }
     finally {
         await f.pool.end();
@@ -411,8 +564,12 @@ it('actual remote runWorker automatically publishes multiple generated sites, re
         const fake = new FakeModel(), local = { clock: { now: Date.now }, workspace: join(root, 'attempts'), model: { async run(...args: Parameters<FakeModel['run']>) { models++; return fake.run(...args); } }, templates: { async load() { return [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('<html><main><h1 data-topic>Topic</h1><p data-description>Description</p></main></html>') }]; } }, validate: async () => ({ ok: true, issues: [], screenshotIds: [] }), delay: async () => { await new Promise(setImmediate); } } as unknown as WorkerDeps;
         const remote = createRemoteWorker({ controlOrigin: 'https://control.test', workerId: worker, workerToken: 'fixture', fetch: transport }, local), abort = new AbortController();
         const tick = remote.queue.continuePublications!;
-        remote.queue.continuePublications = async () => { await pool.query('update private.provider_publications set retry_at=null'); await tick(); if ((await Promise.all(sites.map(s => repo.get(s.id)))).every(s => s!.publishedId))
-            abort.abort(); };
+        remote.queue.continuePublications = async () => {
+            await pool.query('update private.provider_publications set retry_at=null');
+            await tick();
+            if ((await Promise.all(sites.map(s => repo.get(s.id)))).every(s => s!.publishedId))
+                abort.abort();
+        };
         await runWorker(remote, worker, AbortSignal.any([abort.signal, AbortSignal.timeout(10000)]));
         expect((await Promise.all(sites.map(s => repo.get(s.id)))).every(s => s!.publishedId), JSON.stringify((await pool.query('select phase,data,settlement from private.provider_publications')).rows)).toBe(true);
         expect({ creates, promotes, models, lost }).toEqual({ creates: 2, promotes: 2, models: 2, lost: true });

@@ -101,11 +101,43 @@ export class PostgresPublication {
             return { jobId: job.id, siteId: site.id, ...r.binding };
         });
     }
-    /** This only attaches an already authorized immutable reservation. No HTTP yet. */
-    async attach(id: string, editingIntentId: string | null = null): Promise<PublicationView> {
+    /** Reservations are a discoverable attachment outbox. No worker lease, caller
+     * replay key or external HTTP is needed to recover their authorized binding. */
+    async attach(id: string, editingIntentId?: string | null): Promise<PublicationView> {
         const r = (await this.repo.pool.query('select * from private.publication_reservations where id=$1', [id])).rows[0];
         if (!r)
             throw new AppError('NOT_FOUND', 'Публикация не найдена.');
+        const attached = (await this.repo.pool.query('select account_id,editing_intent_id from private.provider_publications where id=$1', [id])).rows[0];
+        if (attached) {
+            if (attached.account_id !== this.client.options.accountId || (editingIntentId !== undefined && attached.editing_intent_id !== (editingIntentId?.toLowerCase() ?? null)))
+                throw new AppError('CONFLICT', 'Настройки публикации изменились.');
+            return this.view(id); // Never reload bytes or replace an existing frozen ledger.
+        }
+        const preparing = await this.repo.transaction(async (tx) => {
+            const current = await this.lockReservation(tx, id);
+            if ((await tx.query('select id from private.provider_publications where id=$1', [id])).rowCount)
+                return false;
+            const operation = (await tx.query('select kind,operation_id from private.site_operations where site_id=$1', [r.site_id])).rows[0];
+            if (current.resolution || operation?.kind !== 'publication' || operation.operation_id !== id)
+                throw new AppError('CONFLICT', 'Владение публикацией изменилось.');
+            // Commit before any fallible preparation: a crash or unavailable R2
+            // cannot make this oldest orphan monopolize the next machine tick.
+            await tx.query("update private.publication_reservations set attachment_retry_at=clock_timestamp()+interval '15 seconds' where id=$1", [id]);
+            return true;
+        });
+        if (!preparing)
+            return this.attach(id, editingIntentId);
+        let journalId: string | null = null;
+        if (r.origin_controller_id) {
+            const journal = (await this.repo.pool.query('select id,data from private.deployments where id::text=lower($1) and site_id=$2', [r.request_key, r.site_id])).rows[0];
+            const intent = journal?.data;
+            if (!intent || intent.id !== r.request_key || intent.siteId !== r.site_id || intent.revisionId !== r.binding.revisionId || intent.manifestId !== r.binding.manifestId || intent.expectedRevision !== r.binding.expectedRevision || intent.state !== 'pending')
+                throw new AppError('CONFLICT', 'Журнал не соответствует переданной публикации.');
+            journalId = journal.id;
+        }
+        if (editingIntentId !== undefined && (editingIntentId?.toLowerCase() ?? null) !== journalId)
+            throw new AppError('CONFLICT', 'Журнал публикации изменился.');
+        editingIntentId = journalId;
         let revision = await this.repo.revision(r.binding.revisionId);
         if (r.origin_job_id) {
             const saved = await this.store.load(r.binding.checkpointId);
@@ -121,12 +153,18 @@ export class PostgresPublication {
         const hash = manifestHash(manifest), site = (await this.repo.get(r.site_id))!;
         const progress: Progress = { action: 'project', dispatched: false, projectId: null, projectName: 'sf-' + site.id, domain: site.domain, uploaded: 0, cursor: null, matches: [], promotionSent: false, domainSetup: { records: [], verified: false }, revision, policyVersion: publisherPolicyVersion, policyHash: digest(publisherConfiguration.bytes) };
         await this.repo.transaction(async (tx) => {
-            await this.lockReservation(tx, id);
+            const current = await this.lockReservation(tx, id);
+            if (!(await tx.query('select id from private.provider_publications where id=$1', [id])).rowCount) {
+                const operation = (await tx.query('select kind,operation_id from private.site_operations where site_id=$1', [r.site_id])).rows[0];
+                if (current.resolution || operation?.kind !== 'publication' || operation.operation_id !== id)
+                    throw new AppError('CONFLICT', 'Владение публикацией изменилось.');
+            }
             await tx.query('insert into private.provider_accounts(id) values($1) on conflict do nothing', [this.client.options.accountId]);
             await tx.query('insert into private.provider_publications(id,site_id,revision_id,manifest_id,manifest_hash,account_id,editing_intent_id,data) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(id) do nothing', [id, site.id, revision.id, manifest.id, hash, this.client.options.accountId, editingIntentId, progress]);
             const existing = (await tx.query('select * from private.provider_publications where id=$1', [id])).rows[0];
             if (existing.manifest_hash !== hash || existing.account_id !== this.client.options.accountId || existing.editing_intent_id !== editingIntentId)
                 throw new AppError('CONFLICT', 'Настройки публикации изменились.');
+            await tx.query('update private.publication_reservations set attachment_retry_at=null where id=$1', [id]);
         });
         return this.view(id);
     }
@@ -148,8 +186,11 @@ export class PostgresPublication {
             throw new AppError('NOT_FOUND', 'Публикация не найдена.');
         return { id: r.id, siteId: r.site_id, revisionId: r.revision_id, manifestId: r.manifest_id, manifestHash: r.manifest_hash, deploymentId: r.deployment_id, phase: r.phase, retryAt: r.retry === null ? null : Number(r.retry), cancelRequested: r.cancel_requested, settlement: r.settlement, verifiedAt: r.verified_at === null ? null : Number(r.verified_at), origin: r.editing_intent_id ? 'draft' : 'generation' };
     }
-    async getDomainSetup(siteId: string): Promise<DomainSetup> { return (await this.repo.pool.query('select data from private.provider_publications where site_id=$1 order by created_at desc limit 1', [siteId])).rows[0]?.data.domainSetup ?? { records: [], verified: false }; }
-    async latest(siteId: string) { const r = (await this.repo.pool.query('select id from private.provider_publications where site_id=$1 order by created_at desc limit 1', [siteId])).rows[0]; return r ? this.view(r.id) : null; }
+    async getDomainSetup(siteId: string): Promise<DomainSetup> { const latest = await this.latest(siteId); return latest ? (await this.repo.pool.query('select data from private.provider_publications where id=$1', [latest.id])).rows[0].data.domainSetup : { records: [], verified: false }; }
+    async latest(siteId: string) {
+        const r = (await this.repo.pool.query('select r.id,p.id is not null attached from private.publication_reservations r left join private.provider_publications p on p.id=r.id where r.site_id=$1 and (r.resolution is null or p.id is not null) order by (r.resolution is null) desc,r.created_at desc,r.id limit 1', [siteId])).rows[0];
+        return r ? r.attached ? this.view(r.id) : this.attach(r.id) : null;
+    }
     async history(siteId: string) { return Promise.all((await this.repo.pool.query('select id from private.provider_publications where site_id=$1 and verified_at is not null order by verified_at desc,id', [siteId])).rows.map(r => this.view(r.id))); }
     private async claim(id: string) {
         return this.repo.transaction(async (tx) => {
@@ -213,6 +254,7 @@ export class PostgresPublication {
     }
     /** One bounded server step, including dispatch journaling before external I/O. */
     async advancePublication(id: string): Promise<PublicationState> {
+        await this.attach(id);
         const claimed = await this.claim(id);
         if (!claimed)
             return (await this.view(id)).phase;
@@ -415,7 +457,7 @@ export class PostgresPublication {
         }
         const existing = await this.repo.revision(row.revision_id, tx);
         // jsonb canonicalizes object key order; immutable identity is field equality.
-        if (existing && (['id','siteId','parentId','manifestId','kind','createdAt'] as const).some(key=>existing[key]!==p.revision[key]))
+        if (existing && (['id', 'siteId', 'parentId', 'manifestId', 'kind', 'createdAt'] as const).some(key => existing[key] !== p.revision[key]))
             throw new AppError('CONFLICT', 'Неизменяемая версия изменилась.');
         if (!existing)
             await tx.query('insert into public.revisions values($1,$2,$3,$4,$5,$6)', [p.revision.id, p.revision.siteId, p.revision.parentId, p.revision.manifestId, p.revision.kind, p.revision.createdAt]);
@@ -426,7 +468,7 @@ export class PostgresPublication {
         await tx.query("update private.provider_publications set settlement='settled',phase='published' where id=$1", [id]);
     }
     async tick(): Promise<void> {
-        const due = (await this.repo.pool.query("select id from private.provider_publications where settlement='pending' and (retry_at is null or retry_at<=clock_timestamp()) and (step_expires is null or step_expires<=clock_timestamp()) order by created_at,id limit 1")).rows[0];
+        const due = (await this.repo.pool.query("select r.id from private.publication_reservations r join private.site_operations o on o.site_id=r.site_id and o.operation_id=r.id and o.kind='publication' left join private.provider_publications p on p.id=r.id where r.resolution is null and ((p.id is null and (r.attachment_retry_at is null or r.attachment_retry_at<=clock_timestamp())) or (p.settlement='pending' and (p.retry_at is null or p.retry_at<=clock_timestamp()) and (p.step_expires is null or p.step_expires<=clock_timestamp()))) order by r.created_at,r.id limit 1")).rows[0];
         if (due)
             await this.advancePublication(due.id);
     }
