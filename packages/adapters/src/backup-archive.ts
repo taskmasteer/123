@@ -10,11 +10,12 @@ import * as yauzl from 'yauzl';
 import type { Entry } from 'yauzl';
 import { AppError } from '../../contracts/src/model.js';
 import { privateDirectory } from './safe-files.js';
+import { recoveryPath } from './recovery-records.js';
 import { artifactPath } from '../../core/src/artifacts.js';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 // 48GiB < GCM's per-message limit (2^36-32 bytes); streaming is not unbounded.
 export const maximumArchiveBytes = 48 * 1024 ** 3, maximumArchiveEntries = 1000000, maximumEntryBytes = 32 * 1024 ** 2;
-export const maximumMetadataRecords = 500000, maximumMetadataBytes = 256 * 1024 ** 2;
+export const maximumMetadataRecords = 1000000, maximumMetadataBytes = 768 * 1024 ** 2;
 const maximumIndexBytes = 192 * 1024 ** 2, indexChunkBytes = 1024 ** 2, magic = Buffer.from('SFBAK001');
 const failure = () => new AppError('INVALID_INPUT', 'Неверный пароль или повреждённая резервная копия.');
 /** Streaming resource preflight, independent of blob allocation and ZIP compression. */
@@ -24,12 +25,21 @@ export class ArchiveCapacity {
     metadataBytes = 0;
     metadataRecords = 0;
     indexBytes = 0;
-    add(name: string, size: number, sha256: string) { backupName(name); if (!Number.isSafeInteger(size) || size < 0 || size > maximumEntryBytes || !/^[a-f0-9]{64}$/.test(sha256))
-        throw failure(); this.entries++; this.bytes += size; this.indexBytes += Buffer.byteLength(JSON.stringify({ name, size, sha256 }) + '\n'); if (name.startsWith('records/')) {
-        this.metadataBytes += size;
-        this.metadataRecords++;
-    } if (this.bytes > maximumArchiveBytes || this.entries + Math.ceil(this.indexBytes / indexChunkBytes) > maximumArchiveEntries || this.metadataBytes > maximumMetadataBytes || this.metadataRecords > maximumMetadataRecords || this.indexBytes > maximumIndexBytes)
-        throw new AppError('INVALID_INPUT', 'Копия превышает техническую ёмкость одного зашифрованного файла.'); }
+    metadata(size: number) { this.metadataBytes += size; this.metadataRecords++; if (this.metadataBytes > maximumMetadataBytes || this.metadataRecords > maximumMetadataRecords)
+        throw failure(); }
+    add(name: string, size: number, sha256: string) {
+        backupName(name);
+        if (!Number.isSafeInteger(size) || size < 0 || size > maximumEntryBytes || !/^[a-f0-9]{64}$/.test(sha256))
+            throw failure();
+        this.entries++;
+        this.bytes += size;
+        this.indexBytes += Buffer.byteLength(JSON.stringify({ name, size, sha256 }) + '\n');
+        if (name.startsWith('records/')) {
+            this.metadata(size);
+        }
+        if (this.bytes > maximumArchiveBytes || this.entries + Math.ceil(this.indexBytes / indexChunkBytes) > maximumArchiveEntries || this.metadataBytes > maximumMetadataBytes || this.metadataRecords > maximumMetadataRecords || this.indexBytes > maximumIndexBytes)
+            throw new AppError('INVALID_INPUT', 'Копия превышает техническую ёмкость одного зашифрованного файла.');
+    }
 }
 const sum = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 /** Private disk index: input entry count never determines the live JS heap. */
@@ -39,7 +49,7 @@ export class ArchiveInventory {
     private readonly insertName: StatementSync;
     private readonly insertValue: StatementSync;
     private readonly removeValue: StatementSync;
-    constructor(path: string) { this.db = new DatabaseSync(path); this.db.exec('pragma journal_mode=off;pragma cache_size=-4096;pragma temp_store=file;create table names(name text primary key) without rowid;create table inventory(name text primary key,size integer not null,sha256 text not null) without rowid;begin'); this.insertName = this.db.prepare('insert into names values(?)'); this.insertValue = this.db.prepare('insert into inventory values(?,?,?)'); this.removeValue = this.db.prepare('delete from inventory where name=? returning *'); }
+    constructor(path: string) { this.db = new DatabaseSync(path); this.db.exec('pragma journal_mode=off;pragma cache_size=-4096;pragma temp_store=file;create table names(name text primary key) without rowid;create table inventory(name text primary key,size integer not null,sha256 text not null,file_descriptor text,used integer not null default 0) without rowid;create table bindings(payload text primary key,record_name text unique) without rowid;begin'); this.insertName = this.db.prepare('insert into names values(?)'); this.insertValue = this.db.prepare('insert into inventory(name,size,sha256,file_descriptor) values(?,?,?,?)'); this.removeValue = this.db.prepare('update inventory set used=1 where name=? and used=0 returning *'); }
     name(name: string) { try {
         this.insertName.run(name);
     }
@@ -50,18 +60,38 @@ export class ArchiveInventory {
         name: string;
         size: number;
         sha256: string;
-    }) { this.capacity.add(value.name, value.size, value.sha256); try {
-        this.insertValue.run(value.name, value.size, value.sha256);
+        fileDescriptorV1?: EmbeddedFile;
+    }) {
+        this.capacity.add(value.name, value.size, value.sha256);
+        try {
+            if (Object.hasOwn(value, 'fileDescriptorV1')) {
+                const file = validateEmbedded(value.name, value.fileDescriptorV1);
+                this.name(file.recordName);
+                this.capacity.metadata(encodedDescriptor(value, file).length);
+                this.db.prepare('insert into bindings values(?,?)').run(value.name, file.recordName);
+            }
+            this.insertValue.run(value.name, value.size, value.sha256, value.fileDescriptorV1 ? JSON.stringify(value.fileDescriptorV1) : null);
+        }
+        catch {
+            throw failure();
+        }
+    }
+    take(name: string) {
+        return this.removeValue.get(name) as {
+            name: string;
+            size: number;
+            sha256: string;
+            file_descriptor: string | null;
+        } | undefined;
+    }
+    explicit(name: string, value: any) { const file = explicitDescriptor(name, value), payload = this.db.prepare('select size,sha256 from inventory where name=?').get(value.payload); if (!payload || payload.size !== value.size || payload.sha256 !== value.sha256)
+        throw failure(); try {
+        this.db.prepare('insert into bindings values(?,?)').run(value.payload, file.recordName);
     }
     catch {
         throw failure();
     } }
-    take(name: string) { return this.removeValue.get(name) as {
-        name: string;
-        size: number;
-        sha256: string;
-    } | undefined; }
-    remaining() { return Number(this.db.prepare('select count(*) n from inventory').get()!.n); }
+    remaining() { return Number(this.db.prepare('select count(*) n from inventory where used=0').get()!.n); }
     close() { try {
         if (this.db.isTransaction)
             this.db.exec('commit');
@@ -70,6 +100,21 @@ export class ArchiveInventory {
         this.db.close();
     } }
 }
+type EmbeddedFile = {
+    recordName: string;
+    root: 'data' | 'catalog' | 'object';
+    path: string;
+    mediaType: string;
+};
+function validateEmbedded(payload: string, value: any): EmbeddedFile { if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== 'mediaType,path,recordName,root' || typeof payload !== 'string' || !/^payloads\/[0-9]{1,12}\.bin$/.test(payload) || typeof value.recordName !== 'string' || !/^records\/(0|[1-9][0-9]{0,5})\.json$/.test(value.recordName) || !['data', 'catalog', 'object'].includes(value.root) || typeof value.mediaType !== 'string' || value.mediaType.length > 100 || !value.mediaType || /[\x00-\x1f]/.test(value.mediaType))
+    throw failure(); recoveryPath(value.path); return value; }
+function encodedDescriptor(payload: {
+    name: string;
+    size: number;
+    sha256: string;
+}, file: EmbeddedFile) { return Buffer.from(JSON.stringify({ type: 'file', root: file.root, path: file.path, payload: payload.name, size: payload.size, sha256: payload.sha256, mediaType: file.mediaType })); }
+function explicitDescriptor(recordName: string, value: any): EmbeddedFile { if (Object.keys(value).sort().join(',') !== 'mediaType,path,payload,root,sha256,size,type' || value.type !== 'file' || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > maximumEntryBytes || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256))
+    throw failure(); return validateEmbedded(value.payload, { recordName, root: value.root, path: value.path, mediaType: value.mediaType }); }
 function backupName(name: string) { if (!/^(records\/[0-9]{1,12}\.json|payloads\/[0-9]{1,12}\.bin)$/.test(name))
     throw failure(); return name; }
 function bound(maximum: number) { let total = 0; return new Transform({ transform(chunk: Buffer, _encoding, callback) { total += chunk.length; callback(total > maximum ? failure() : null, chunk); } }); }
@@ -85,6 +130,12 @@ export async function writeZip(path: string, entries: AsyncIterable<BackupEntry>
     let offset = 0, count = 0, centralBytes = 0, indexTotal = 0, indexBytes = 0, indexOrdinal = 0, index: Awaited<ReturnType<typeof open>> | null = null;
     const capacity = new ArchiveCapacity();
     let success = false;
+    let pending: {
+        file: EmbeddedFile;
+        payload: string;
+        size: number;
+        sha256: string;
+    } | null = null;
     async function append(name: string, bytes: Uint8Array) {
         names.name(name.toLowerCase());
         if (++count > maximumArchiveEntries || offset + bytes.length > maximumArchiveBytes)
@@ -133,21 +184,48 @@ export async function writeZip(path: string, entries: AsyncIterable<BackupEntry>
         if (offset + centralBytes + 98 > maximumArchiveBytes)
             throw failure();
     }
-    async function flush() { if (!index)
-        return; await index.close(); index = null; const file = indexPath! + '.' + indexOrdinal; await append('indexes/' + indexOrdinal++ + '.ndjson', await readFile(file)); await rm(file); indexBytes = 0; }
+    async function flush() {
+        if (!index)
+            return;
+        await index.close();
+        index = null;
+        const file = indexPath! + '.' + indexOrdinal;
+        await append('indexes/' + indexOrdinal++ + '.ndjson', await readFile(file));
+        await rm(file);
+        indexBytes = 0;
+    }
     try {
         for await (const entry of entries) {
             (indexPath ? backupName : artifactPath)(entry.name);
             if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > maximumEntryBytes || !/^[a-f0-9]{64}$/.test(entry.sha256))
                 throw failure();
-            if (indexPath)
-                capacity.add(entry.name, entry.size, entry.sha256);
             const bytes = await entry.read();
             if (bytes.length !== entry.size || sum(bytes) !== entry.sha256)
                 throw failure();
+            let embedded: EmbeddedFile | undefined;
+            if (indexPath && entry.name.startsWith('records/')) {
+                const record = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(bytes));
+                if (record.type === 'file') {
+                    if (pending)
+                        throw failure();
+                    const file = explicitDescriptor(entry.name, record);
+                    names.name(entry.name);
+                    capacity.metadata(bytes.length);
+                    pending = { file, payload: record.payload, size: record.size, sha256: record.sha256 };
+                    continue;
+                }
+            }
+            if (pending) {
+                if (entry.name !== pending.payload || entry.size !== pending.size || entry.sha256 !== pending.sha256)
+                    throw failure();
+                embedded = pending.file;
+                pending = null;
+            }
+            if (indexPath)
+                capacity.add(entry.name, entry.size, entry.sha256);
             await append(entry.name, bytes);
             if (indexPath) {
-                const line = Buffer.from(JSON.stringify({ name: entry.name, size: entry.size, sha256: entry.sha256 }) + '\n');
+                const line = Buffer.from(JSON.stringify({ name: entry.name, size: entry.size, sha256: entry.sha256, ...(embedded ? { fileDescriptorV1: embedded } : {}) }) + '\n');
                 if (indexBytes + line.length > indexChunkBytes)
                     await flush();
                 if (!index)
@@ -159,6 +237,8 @@ export async function writeZip(path: string, entries: AsyncIterable<BackupEntry>
                 await writeFully(index, line);
             }
         }
+        if (pending)
+            throw failure();
         await flush();
         await central.close();
         const start = offset;
@@ -280,7 +360,7 @@ async function extractIndexed(path: string, directory: string, inventory: Archiv
                 throw failure();
             for (const line of new TextDecoder('utf8', { fatal: true }).decode(Buffer.concat(chunks)).split('\n').filter(Boolean)) {
                 const value = JSON.parse(line);
-                if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'name,sha256,size')
+                if (!value || typeof value !== 'object' || !['name,sha256,size', 'fileDescriptorV1,name,sha256,size'].includes(Object.keys(value).sort().join(',')))
                     throw failure();
                 inventory.add(value);
             }
@@ -311,7 +391,23 @@ async function extractIndexed(path: string, directory: string, inventory: Archiv
             await pipeline(await readEntry(zip, entry), checked, createWriteStream(file, { flags: 'wx', mode: 0o600 }));
             if (size !== expected.size || crc !== entry.crc32 || hash.digest('hex') !== expected.sha256)
                 throw failure();
+            if (expected.name.startsWith('records/')) {
+                const record = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(await readFile(file)));
+                if (record?.type === 'file')
+                    inventory.explicit(expected.name, record);
+            }
             descriptors.prepare('insert into entries values(?,?,?,?,?)').run(count++, expected.name, expected.size, expected.sha256, file);
+            if (expected.file_descriptor) {
+                const descriptor = validateEmbedded(expected.name, JSON.parse(expected.file_descriptor)), bytes = encodedDescriptor(expected, descriptor), metadataFile = join(directory, 'entry-' + count);
+                const target = await open(metadataFile, 'wx', 0o600);
+                try {
+                    await writeFully(target, bytes);
+                }
+                finally {
+                    await target.close();
+                }
+                descriptors.prepare('insert into entries values(?,?,?,?,?)').run(count++, descriptor.recordName, bytes.length, sum(bytes), metadataFile);
+            }
         }
         if (inventory.remaining())
             throw failure();

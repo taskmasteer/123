@@ -43,8 +43,8 @@ it('copies actual managed original source, validation PNGs, import bytes and pin
             await objects.put(prepared.files[0]!.objectKey, f.bytes, f.mediaType);
             await store.complete(worker, prepared.uploadId, claim.lease);
         }
-        const manifest = await store.put(site.id, files, '1.0.0'), revisionId = randomUUID(), state = { jobId: site.id, siteId: site.id, baseRevision: 0, revisionId, parentRevisionId: null, revisionCreatedAt: 1, manifestId: manifest.id, selection: { seed: 1, styleId: 'editorial', templateVersion: '1.0.0' }, validation: report, transcript: [{ inputTokens: 7, outputTokens: 5 }], modelIdentity: 'demo' }, cp = await store.save({ ...claim.job, stage: 'completed' }, claim.lease, state, []);
-        await queue.checkpoint(claim.lease, cp, null, projectCheckpoint(cp, state, [], null));
+        const manifest = await store.put(site.id, files, '1.0.0'), revisionId = randomUUID(), state = { jobId: site.id, siteId: site.id, baseRevision: 0, revisionId, parentRevisionId: null, revisionCreatedAt: 1, manifestId: manifest.id, selection: { seed: 1, styleId: 'editorial', templateVersion: '1.0.0' }, validation: report, transcript: [{ inputTokens: 7, outputTokens: 5 }], modelIdentity: 'demo' }, cp = await store.save({ ...claim.job, stage: 'completed' }, claim.lease, state, files);
+        await queue.checkpoint(claim.lease, cp, null, projectCheckpoint(cp, state, files, null));
         await queue.finish(claim.lease, 'completed');
         await repo.transaction(async (tx) => { await tx.query("insert into public.revisions values($1,$2,null,$3,'published',1)", [revisionId, site.id, manifest.id]); await tx.query('update public.sites set published_id=$2,revision=1 where id=$1', [site.id, revisionId]); });
         const csv = Buffer.from('domain,about\nimport-source.example,Original import data\n'), imports = new PostgresImportResources(new PostgresBatches(repo)), resource = await imports.request(actor, 'resource.begin', { name: 'original.csv', size: csv.length, sha256: createHash('sha256').update(csv).digest('hex') }) as {
@@ -54,8 +54,16 @@ it('copies actual managed original source, validation PNGs, import bytes and pin
         await imports.request(actor, 'import.prepare', { id: resource.id });
         let app = createApp({ repository: repo, queue, store, backup: new PostgresBackup(repo, store), auth: { verifyUser: async () => actor, verifyWorker: async () => { throw new Error('unused'); } } });
         const native = new NativeArchives({ native: true, root: local.root, baseRoot: join(root, 'native'), sourceRoot: resolve('.'), database: local, sites, revisions, artifacts, quiesce: async (capture) => capture(), close: async () => { throw new Error('Managed restore never switches local root'); }, fetch: async (input, init) => { const url = String(input); requests.push(String(init?.body ?? '')); return app(new Request(url, init)); } }), source = { origin: 'https://source.test', accessToken: 'source-admin-token' };
-        const completed = async (id: string, remote: typeof source) => { let result: any; await expect.poll(async () => { result = await native.request({ action: 'status', id, remote }); if (result.state === 'failed')
-            throw new Error(result.error); return result.state; }, { timeout: 30000 }).toBe('ready'); return result.result; };
+        const completed = async (id: string, remote: typeof source) => {
+            let result: any;
+            await expect.poll(async () => {
+                result = await native.request({ action: 'status', id, remote });
+                if (result.state === 'failed')
+                    throw new Error(result.error);
+                return result.state;
+            }, { timeout: 30000 }).toBe('ready');
+            return result.result;
+        };
         const made = await native.request({ action: 'backup', passphrase: 'independent managed password', remote: source }) as {
             id: string;
         }, handle = await completed(made.id, source);
@@ -85,6 +93,7 @@ it('copies actual managed original source, validation PNGs, import bytes and pin
         };
         expect(await completed(installed.id, target)).toMatchObject({ restoredSites: 1, quarantined: true });
         expect((await targetRepo.get(site.id))!.ownerId).toBe(destination);
+        expect((await targetStore.load(cp.id)).files).toEqual(files.map(f => ({ ...f, bytes: Buffer.from(f.bytes) })));
         expect(Buffer.from((await targetStore.read(manifest.id))[0]!.bytes)).toEqual(Buffer.from(files[0]!.bytes));
         for (const id of report.screenshotIds)
             expect(Buffer.from((await targetStore.readValidation(site.id, cp.id, id)).bytes)).toEqual(await readFile(join(validationRoot, id.slice(11))));

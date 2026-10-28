@@ -4,7 +4,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { createApp } from '../src/app.js';
 import { configuredInvitations } from '../src/invitations.js';
 import { createAuth } from '../src/auth.js';
-import { SupabaseRepository } from '../../../packages/adapters/src/supabase-repository.js';
+import { SupabaseRepository, configureSnapshotConnection } from '../../../packages/adapters/src/supabase-repository.js';
 import { PostgresQueue } from '../../../packages/adapters/src/postgres-queue.js';
 import { R2Store, R2Transport } from '../../../packages/adapters/src/r2-store.js';
 import { errorResponse, unavailable } from '../src/errors.js';
@@ -19,7 +19,7 @@ export async function handler(request: Request) {
             const env = process.env;
             if (!env.DATABASE_URL || !env.SUPABASE_URL)
                 return unavailable();
-            const repository = new SupabaseRepository(new Pool({ connectionString: env.DATABASE_URL, max: 4 }));
+            const repository = new SupabaseRepository(configureSnapshotConnection(new Pool({ connectionString: env.DATABASE_URL, max: 4 }), env.DATABASE_CONNECTION_MODE));
             const queue = new PostgresQueue(repository), issuer = new URL('/auth/v1', env.SUPABASE_URL).href;
             const auth = createAuth({ issuer, audience: 'authenticated', membership: id => repository.membership(id), worker: hash => repository.worker(hash) });
             const store = env.R2_ENDPOINT && env.R2_BUCKET && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY

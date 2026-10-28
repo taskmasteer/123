@@ -82,7 +82,7 @@ export function recoveryResponse(method: string, value: unknown) {
     }
     if (method === 'recovery.publications') {
         const p = object(value, ['restoreId', 'items', 'nextOffset', 'remaining']);
-        integer(p.remaining, 0, 500000);
+        integer(p.remaining, 0, 1000000);
         if (p.restoreId !== null)
             uuid(p.restoreId);
         if (!Array.isArray(p.items) || p.items.length > 20)

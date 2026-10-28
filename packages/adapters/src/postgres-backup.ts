@@ -1,4 +1,4 @@
-import { createHash, randomUUID, randomBytes } from 'node:crypto';
+import { preflightPostgres } from './retention-sql.js';import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import type { Principal } from '../../contracts/src/model.js';
 import { AppError } from '../../contracts/src/model.js';
 import type { RestoreReport } from '../../contracts/src/recovery.js';
@@ -8,7 +8,6 @@ import { managedRecoveryTables, recoveryPath, validateLogicalRecoveryRecord } fr
 import { SupabaseRepository, type SqlTransaction } from './supabase-repository.js';
 import type { R2Store } from './r2-store.js';
 import { PostgresRetention } from './postgres-retention.js';
-import { payloadRoots, retentionClosure, type PayloadEdge } from '../../core/src/retention.js';
 import { checkArtifacts, artifactLimits, artifactPath } from '../../core/src/artifacts.js';
 import { assertPostgresPayload } from './postgres-retention.js';
 import { verifyValidationPng } from './import-resources.js';
@@ -38,11 +37,16 @@ export class PostgresBackup {
         throw new AppError('NOT_FOUND', 'Снимок истёк или принадлежит другой сессии.'); return row; }
     async beginSnapshot(actor: Principal) {
         await this.admin(actor);
+        this.repository.requireSnapshotConnection();
         const retention = new PostgresRetention(this.repository, this.store.transport);
+        await this.repository.transaction(async (tx) => { await tx.query("set local statement_timeout='15s';set local work_mem='4MB'"); await preflightPostgres(tx, true); });
         await retention.backfill(this.store);
         const id = randomUUID(), now = Date.now();
-        return this.repository.transaction(async (tx) => {
+        return this.repository.captureSnapshot(async (tx) => {
             await this.admin(actor, tx);
+            await tx.query("set local statement_timeout='15s';set local work_mem='4MB'");
+            await preflightPostgres(tx, true);
+            await retention.closure(tx, now, true);
             await tx.query('insert into private.recovery_snapshots values($1,$2,to_timestamp($3/1000.0),$4)', [id, actor.userId, now + ttl, { kind: 'backup', adapter: 'managed' }]);
             let seq = 0;
             await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3)', [id, seq++, { type: 'header', adapter: 'managed', version: 1, schema: 8, sourceId: id, createdAt: now }]);
@@ -50,8 +54,8 @@ export class PostgresBackup {
                 const expression = table === 'private.workers' ? "to_jsonb(t)-'token_hash'" : table === 'private.provider_publications' || table === 'private.provider_accounts' ? "to_jsonb(t)||jsonb_build_object('step_token',null,'step_expires',null)" : 'to_jsonb(t)';
                 const inserted = await tx.query('insert into private.recovery_snapshot_records select $1,$2+row_number() over()-1,jsonb_build_object(\'type\',\'row\',\'table\',$3::text,\'row\',' + expression + ') from ' + table + ' t' + (table === 'private.site_operations' ? " where kind<>'controller'" : ''), [id, seq, table]);
                 seq += inserted.rowCount ?? 0;
-                if (seq > 500000)
-                    throw new AppError('INVALID_INPUT', 'Снимок превышает 500000 записей.');
+                if (seq > 1000000)
+                    throw new AppError('INVALID_INPUT', 'Снимок превышает 1000000 записей.');
             }
             const objectSource = `select f->>'objectKey' path,f from private.artifacts a left join private.payload_inventory p on p.kind='artifact' and p.id=a.id::text cross join lateral jsonb_array_elements(a.manifest->'files') f where a.verified and coalesce(p.state,'available')='available'
    union all select f->>'objectKey',f from private.checkpoints c left join private.payload_inventory p on p.kind='checkpoint' and p.id=c.id::text cross join lateral jsonb_array_elements((c.metadata#>'{manifest,files}')||jsonb_build_array(c.metadata->'state')) f where coalesce(p.state,'available')='available'
@@ -59,20 +63,20 @@ export class PostgresBackup {
             if ((await tx.query("with objects as (" + objectSource + ") select 1 from objects group by path having path is null or count(distinct f)>1 limit 1")).rowCount)
                 throw new AppError('INVALID_INPUT', 'Противоречивая опись объектов.');
             await tx.query("insert into private.payload_pins select $1,kind,id,to_timestamp($2/1000.0) from private.payload_inventory where state='available'", [id, now + ttl]);
-            const state = await retention.state(tx), evidence = (await tx.query('select id from private.checkpoint_evidence')).rows.map(r => String(r.id)), closure = retentionClosure(state, (await tx.query('select * from private.payload_edges')).rows as PayloadEdge[], new Set(evidence));
-            const screenshotIds = new Set([...closure].filter(k => k.startsWith('screenshot:')).map(k => k.slice(11)));
-            const pinnedCatalogs = [...closure].filter(k => k.startsWith('catalog:') && k.includes('@')).map(k => k.slice(8)), storedCatalogs = [...new Set((await tx.query("select s.data from private.recovery_state s where s.key='catalog' or (s.key like 'catalog:%' and exists(select 1 from private.payload_inventory p where p.kind='catalog' and p.id='restore-'||split_part(s.key,':',2) and p.state='available'))")).rows.flatMap(r => Array.isArray(r.data.versions) ? r.data.versions : []))];
+            if ((await tx.query("select 1 from retention_protected r left join private.payload_inventory p on p.kind=r.kind and p.id=r.id where r.kind='screenshot' and (p.state is null or p.state<>'available') limit 1")).rowCount)
+                throw new AppError('NEEDS_ATTENTION', 'Снимки проверки отсутствуют; полная копия пока недоступна.');
+            const versions = async (query: string) => { const n = Number((await tx.query('select count(*) n from (' + query + ') versions')).rows[0].n); if (n > 10000)
+                throw new AppError('INVALID_INPUT', 'Заголовок содержит более10000 версий каталога.'); return (await tx.query(query)).rows.map(r => String(r.version)); };
+            const pinnedCatalogs = await versions("select distinct id version from retention_protected where kind='catalog' and position('@' in id)>0");
+            const storedCatalogs = await versions("select distinct v version from private.recovery_state s cross join lateral jsonb_array_elements_text(s.data->'versions') v where s.key='catalog' or (s.key like 'catalog:%' and exists(select 1 from private.payload_inventory p where p.kind='catalog' and p.id='restore-'||split_part(s.key,':',2) and p.state='available'))");
             await tx.query("update private.recovery_snapshot_records set data=data||jsonb_build_object('pinnedCatalogs',$2::jsonb,'storedCatalogs',$3::jsonb,'hasInstalledCatalog',exists(select 1 from private.recovery_state where key='installed-catalog')) where snapshot_id=$1 and seq=0", [id, JSON.stringify(pinnedCatalogs), JSON.stringify(storedCatalogs)]);
-            for (const png of screenshotIds)
-                if (!(await tx.query("select 1 from private.payload_inventory where kind='screenshot' and id=$1 and state='available'", [png])).rowCount)
-                    throw new AppError('NEEDS_ATTENTION', 'Снимки проверки отсутствуют в управляемом хранилище; полная копия пока недоступна.');
             const files = await tx.query("with objects as (" + objectSource + "),unique_objects as (select distinct path,f from objects) insert into private.recovery_snapshot_records select $1,$2+row_number() over(order by path)-1,jsonb_build_object('type','file','root','object','path',path,'payload','payloads/'||($2+row_number() over(order by path)-1)::text||'.bin','size',f->'size','sha256',f->'sha256','mediaType',f->'mediaType') from unique_objects", [id, seq]);
             seq += files.rowCount ?? 0;
             const size = Number((await tx.query('select coalesce(sum(octet_length(data::text)),0) n from private.recovery_snapshot_records where snapshot_id=$1', [id])).rows[0].n);
-            if (seq > 500000 || size > (256 * 1024 ** 2))
-                throw new AppError('INVALID_INPUT', 'Снимок превышает проверенную ёмкость 500000 записей / 256 МиБ.');
+            if (seq > 1000000 || size > (768 * 1024 ** 2))
+                throw new AppError('INVALID_INPUT', 'Снимок превышает проверенную ёмкость 1000000 записей / 768 МиБ.');
             return { id, records: seq, expiresAt: now + ttl, adapter: 'managed' };
-        }, 'exclusive');
+        }, async (tx) => { await this.admin(actor, tx); }).catch(async (error) => { await this.repository.transaction(async (tx) => { await tx.query('delete from private.payload_pins where id=$1', [id]); await tx.query('delete from private.recovery_snapshot_records where snapshot_id=$1', [id]); await tx.query('delete from private.recovery_snapshots where id=$1', [id]); }); throw error; });
     }
     async record(actor: Principal, id: string, seq: number, offset: number) { const data = await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); const row = (await tx.query('select data::text text from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq])).rows[0]; if (!row)
         throw new AppError('NOT_FOUND', 'Запись не найдена.'); return row.text as string; }); const bytes = Buffer.from(data); if (offset < 0 || offset > bytes.length)
@@ -93,7 +97,7 @@ export class PostgresBackup {
         return; await tx.query('delete from private.recovery_snapshot_records where snapshot_id=$1', [id]); await tx.query('delete from private.recovery_snapshots where id=$1', [id]); }); }
     async beginRestore(actor: Principal, header: RecoveryRecord, mappings: IdentityMapping[], records: number) {
         await this.admin(actor);
-        if (header.type !== 'header' || header.adapter !== 'managed' || header.version !== 1 || header.schema !== 8 || !Number.isSafeInteger(records) || records < 1 || records > 500000 || mappings.length > 5000)
+        if (header.type !== 'header' || header.adapter !== 'managed' || header.version !== 1 || header.schema !== 8 || !Number.isSafeInteger(records) || records < 1 || records > 1000000 || mappings.length > 5000)
             throw new AppError('INVALID_INPUT', 'Неверный формат восстановления.');
         if (!this.verifyIdentity)
             throw new AppError('UNAVAILABLE', 'Проверка получателей Auth не настроена.');
@@ -108,11 +112,16 @@ export class PostgresBackup {
             verified[mapping.sourceId] = identity;
         }
         const id = randomUUID();
-        return this.repository.transaction(async (tx) => { await this.admin(actor, tx); if ((await tx.query('select 1 from public.sites union all select 1 from private.jobs union all select 1 from private.artifacts limit 1')).rowCount)
-            throw new AppError('CONFLICT', 'Целевая установка уже содержит сайты.'); await tx.query("insert into private.recovery_snapshots values($1,$2,clock_timestamp()+interval '1 hour',$3)", [id, actor.userId, { kind: 'restore', header, verified, records }]); return { id }; }, 'exclusive');
+        return this.repository.transaction(async (tx) => {
+            await this.admin(actor, tx);
+            if ((await tx.query('select 1 from public.sites union all select 1 from private.jobs union all select 1 from private.artifacts limit 1')).rowCount)
+                throw new AppError('CONFLICT', 'Целевая установка уже содержит сайты.');
+            await tx.query("insert into private.recovery_snapshots values($1,$2,clock_timestamp()+interval '1 hour',$3)", [id, actor.userId, { kind: 'restore', header, verified, records }]);
+            return { id };
+        }, 'exclusive');
     }
     async stageRecord(actor: Principal, id: string, seq: number, record: RecoveryRecord) {
-        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 500000 || Buffer.byteLength(JSON.stringify(record)) > 1000000 || !record || !['header', 'row', 'file'].includes(record.type))
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000 || Buffer.byteLength(JSON.stringify(record)) > 1000000 || !record || !['header', 'row', 'file'].includes(record.type))
             throw new AppError('INVALID_INPUT', 'Неверная запись восстановления.');
         validateLogicalRecoveryRecord(record);
         if (record.type === 'row' && !(managedRecoveryTables as readonly string[]).includes(record.table))
@@ -122,14 +131,21 @@ export class PostgresBackup {
             if (!['object', 'catalog'].includes(record.root) || !Number.isSafeInteger(record.size) || record.size > (32 * 1024 ** 2) || record.size < 0 || !/^[a-f0-9]{64}$/.test(record.sha256))
                 throw new AppError('INVALID_INPUT', 'Неверный объект восстановления.');
         }
-        await this.repository.transaction(async (tx) => { const snapshot = await this.snapshot(actor, id, tx); if (snapshot.data.kind !== 'restore' || seq >= snapshot.data.records)
-            throw new AppError('CONFLICT', 'Неверный сеанс восстановления.'); const old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq, record])).rows[0]; if (old && !old.same)
-            throw new AppError('CONFLICT', 'Запись уже подготовлена с другим содержимым.'); await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, seq, record]); if (!old) {
-            const metadataBytes = Number(snapshot.data.metadataBytes ?? 0) + Buffer.byteLength(JSON.stringify(record)), payloadBytes = Number(snapshot.data.payloadBytes ?? 0) + (record.type === 'file' ? record.size : 0);
-            if (metadataBytes > 256 * 1024 ** 2 || payloadBytes + metadataBytes > 48 * 1024 ** 3)
-                throw new AppError('INVALID_INPUT', 'Превышена ёмкость метаданных или зашифрованного файла.');
-            await tx.query("update private.recovery_snapshots set data=data||jsonb_build_object('metadataBytes',$2::bigint,'payloadBytes',$3::bigint) where id=$1", [id, metadataBytes, payloadBytes]);
-        } });
+        await this.repository.transaction(async (tx) => {
+            const snapshot = await this.snapshot(actor, id, tx);
+            if (snapshot.data.kind !== 'restore' || seq >= snapshot.data.records)
+                throw new AppError('CONFLICT', 'Неверный сеанс восстановления.');
+            const old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq, record])).rows[0];
+            if (old && !old.same)
+                throw new AppError('CONFLICT', 'Запись уже подготовлена с другим содержимым.');
+            await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, seq, record]);
+            if (!old) {
+                const metadataBytes = Number(snapshot.data.metadataBytes ?? 0) + Buffer.byteLength(JSON.stringify(record)), payloadBytes = Number(snapshot.data.payloadBytes ?? 0) + (record.type === 'file' ? record.size : 0);
+                if (metadataBytes > 768 * 1024 ** 2 || payloadBytes + metadataBytes > 48 * 1024 ** 3)
+                    throw new AppError('INVALID_INPUT', 'Превышена ёмкость метаданных или зашифрованного файла.');
+                await tx.query("update private.recovery_snapshots set data=data||jsonb_build_object('metadataBytes',$2::bigint,'payloadBytes',$3::bigint) where id=$1", [id, metadataBytes, payloadBytes]);
+            }
+        });
     }
     async addMappings(actor: Principal, id: string, mappings: IdentityMapping[]) { await this.admin(actor); if (!this.verifyIdentity || mappings.length > 50)
         throw new AppError('INVALID_INPUT', 'Неверная привязка Auth.'); const verified: Record<string, {
@@ -145,55 +161,115 @@ export class PostgresBackup {
         id: string;
     }[]; if (values.length > 5000 || new Set(values.map(v => v.id)).size !== values.length)
         throw new AppError('INVALID_INPUT', 'Привязки должны сохранять отдельные подтверждённые личности.'); await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, merged]); }); return { ok: true }; }
-    async stageMetadataChunk(actor: Principal, id: string, seq: number, index: number, base64: string) { if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 500000 || !Number.isSafeInteger(index) || index < 0 || index > 42 || base64.length > 32000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64))
-        throw new AppError('INVALID_INPUT', 'Неверная часть метаданных.'); const ordinal = 3000000000 + seq * 100 + index, chunk = { type: 'metadata-chunk', index, base64 }; await this.repository.transaction(async (tx) => { const s = await this.snapshot(actor, id, tx); if (s.data.kind !== 'restore' || seq >= s.data.records)
-        throw new AppError('CONFLICT', 'Неверный сеанс восстановления.'); const old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, ordinal, chunk])).rows[0]; if (old && !old.same)
-        throw new AppError('CONFLICT', 'Часть метаданных уже изменена.'); await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, ordinal, chunk]); if (!old) {
-        const size = Number(s.data.metadataChunkBytes ?? 0) + Buffer.byteLength(base64, 'base64');
-        if (size > 256 * 1024 ** 2)
-            throw new AppError('INVALID_INPUT', 'Части метаданных превышают 256 МиБ.');
-        await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{metadataChunkBytes}',to_jsonb($2::bigint)) where id=$1", [id, size]);
-    } }); }
-    async finishMetadata(actor: Principal, id: string, seq: number) { const chunks = await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); return (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 order by seq', [id, 3000000000 + seq * 100, 3000000000 + (seq + 1) * 100])).rows.map(r => r.data); }); let size = 0; const bytes = chunks.map((c, i) => { if (c.index !== i)
-        throw new AppError('INVALID_INPUT', 'Часть метаданных отсутствует.'); const bytes = Buffer.from(c.base64, 'base64'); size += bytes.length; if (size > 1000000)
-        throw new AppError('INVALID_INPUT', 'Метаданные слишком велики.'); return bytes; }); const record = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(Buffer.concat(bytes))) as RecoveryRecord; await this.stageRecord(actor, id, seq, record); }
-    async stageChunk(actor: Principal, id: string, seq: number, index: number, base64: string) { if (!Number.isSafeInteger(index) || index < 0 || index > 1400 || base64.length > 32000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64))
-        throw new AppError('INVALID_INPUT', 'Неверная часть объекта.'); const ordinal = 1000000000 + seq * 2000 + index; await this.repository.transaction(async (tx) => { const s = await this.snapshot(actor, id, tx); if (s.data.kind !== 'restore')
-        throw new AppError('CONFLICT', 'Не сеанс восстановления.'); const file = (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq])).rows[0]?.data; if (file?.type !== 'file')
-        throw new AppError('NOT_FOUND', 'Нет описи объекта.'); if ((await tx.query('select 1 from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, 2000000000 + seq])).rowCount)
-        throw new AppError('CONFLICT', 'Объект уже проверен; продолжите установку.'); const chunk = { type: 'chunk', seq, index, base64 }, old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, ordinal, chunk])).rows[0]; if (old && !old.same)
-        throw new AppError('CONFLICT', 'Часть уже изменена.'); await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, ordinal, chunk]); if (!old) {
-        const size = Number(s.data.objectStagingBytes ?? 0) + Buffer.byteLength(base64, 'base64');
-        if (size > 64 * 1024 ** 2)
-            throw new AppError('INVALID_INPUT', 'Завершите проверку подготовленного объекта перед следующим.');
-        await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{objectStagingBytes}',to_jsonb($2::bigint)) where id=$1", [id, size]);
-    } }); }
+    async stageMetadataChunk(actor: Principal, id: string, seq: number, index: number, base64: string) {
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000 || !Number.isSafeInteger(index) || index < 0 || index > 42 || base64.length > 32000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64))
+            throw new AppError('INVALID_INPUT', 'Неверная часть метаданных.');
+        const ordinal = 5000000000 + seq * 100 + index, chunk = { type: 'metadata-chunk', index, base64 };
+        await this.repository.transaction(async (tx) => {
+            const s = await this.snapshot(actor, id, tx);
+            if (s.data.kind !== 'restore' || seq >= s.data.records)
+                throw new AppError('CONFLICT', 'Неверный сеанс восстановления.');
+            const old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, ordinal, chunk])).rows[0];
+            if (old && !old.same)
+                throw new AppError('CONFLICT', 'Часть метаданных уже изменена.');
+            await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, ordinal, chunk]);
+            if (!old) {
+                const size = Number(s.data.metadataChunkBytes ?? 0) + Buffer.byteLength(base64, 'base64');
+                if (size > 768 * 1024 ** 2)
+                    throw new AppError('INVALID_INPUT', 'Части метаданных превышают 768 МиБ.');
+                await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{metadataChunkBytes}',to_jsonb($2::bigint)) where id=$1", [id, size]);
+            }
+        });
+    }
+    async finishMetadata(actor: Principal, id: string, seq: number) {
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000)
+            throw new AppError('INVALID_INPUT', 'Неверный номер записи.');
+        const chunks = await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); return (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 order by seq', [id, 5000000000 + seq * 100, 5000000000 + (seq + 1) * 100])).rows.map(r => r.data); });
+        let size = 0;
+        const bytes = chunks.map((c, i) => {
+            if (c.index !== i)
+                throw new AppError('INVALID_INPUT', 'Часть метаданных отсутствует.');
+            const bytes = Buffer.from(c.base64, 'base64');
+            size += bytes.length;
+            if (size > 1000000)
+                throw new AppError('INVALID_INPUT', 'Метаданные слишком велики.');
+            return bytes;
+        });
+        const record = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(Buffer.concat(bytes))) as RecoveryRecord;
+        await this.stageRecord(actor, id, seq, record);
+    }
+    async stageChunk(actor: Principal, id: string, seq: number, index: number, base64: string) {
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000 || !Number.isSafeInteger(index) || index < 0 || index > 1400 || base64.length > 32000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64))
+            throw new AppError('INVALID_INPUT', 'Неверная часть объекта.');
+        const ordinal = 1000000000 + seq * 2000 + index;
+        await this.repository.transaction(async (tx) => {
+            const s = await this.snapshot(actor, id, tx);
+            if (s.data.kind !== 'restore')
+                throw new AppError('CONFLICT', 'Не сеанс восстановления.');
+            const file = (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq])).rows[0]?.data;
+            if (file?.type !== 'file')
+                throw new AppError('NOT_FOUND', 'Нет описи объекта.');
+            if ((await tx.query('select 1 from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, 4000000000 + seq])).rowCount)
+                throw new AppError('CONFLICT', 'Объект уже проверен; продолжите установку.');
+            const chunk = { type: 'chunk', seq, index, base64 }, old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, ordinal, chunk])).rows[0];
+            if (old && !old.same)
+                throw new AppError('CONFLICT', 'Часть уже изменена.');
+            await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, ordinal, chunk]);
+            if (!old) {
+                const size = Number(s.data.objectStagingBytes ?? 0) + Buffer.byteLength(base64, 'base64');
+                if (size > 64 * 1024 ** 2)
+                    throw new AppError('INVALID_INPUT', 'Завершите проверку подготовленного объекта перед следующим.');
+                await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{objectStagingBytes}',to_jsonb($2::bigint)) where id=$1", [id, size]);
+            }
+        });
+    }
     private remap(key: string, id: string) { recoveryPath(key); if (!/^private\/(artifacts|checkpoints|validation|catalog)\//.test(key))
         throw new AppError('INVALID_INPUT', 'Неизвестное пространство объектов.'); const parts = key.split('/'), prefix = parts[1] === 'validation' ? 3 : 4; return [...parts.slice(0, prefix), 'restore-' + id, ...parts.slice(prefix)].join('/'); }
-    async finishObject(actor: Principal, id: string, seq: number) { const staged = await this.repository.transaction(async (tx) => { const s = await this.snapshot(actor, id, tx); if (s.data.kind !== 'restore')
-        throw new AppError('CONFLICT', 'Не сеанс восстановления.'); return { verified: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, 2000000000 + seq])).rows[0]?.data, file: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq])).rows[0]?.data as RecoveryRecord, chunks: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 order by seq', [id, 1000000000 + seq * 2000, 1000000000 + (seq + 1) * 2000])).rows.map(r => r.data) }; }); if (staged.file?.type !== 'file')
-        throw new AppError('NOT_FOUND', 'Нет объекта.'); const file = staged.file; if (staged.verified) {
-        if (staged.verified.source !== file.path || staged.verified.sha256 !== file.sha256 || staged.verified.size !== file.size)
-            throw new AppError('CONFLICT', 'Проверенный объект изменился.');
+    async finishObject(actor: Principal, id: string, seq: number) {
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000)
+            throw new AppError('INVALID_INPUT', 'Неверный номер записи.');
+        const staged = await this.repository.transaction(async (tx) => {
+            const s = await this.snapshot(actor, id, tx);
+            if (s.data.kind !== 'restore')
+                throw new AppError('CONFLICT', 'Не сеанс восстановления.');
+            return { verified: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, 4000000000 + seq])).rows[0]?.data, file: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq])).rows[0]?.data as RecoveryRecord, chunks: (await tx.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 order by seq', [id, 1000000000 + seq * 2000, 1000000000 + (seq + 1) * 2000])).rows.map(r => r.data) };
+        });
+        if (staged.file?.type !== 'file')
+            throw new AppError('NOT_FOUND', 'Нет объекта.');
+        const file = staged.file;
+        if (staged.verified) {
+            if (staged.verified.source !== file.path || staged.verified.sha256 !== file.sha256 || staged.verified.size !== file.size)
+                throw new AppError('CONFLICT', 'Проверенный объект изменился.');
+            return { ok: true };
+        }
+        let size = 0;
+        const buffers: Buffer[] = [];
+        for (const [index, chunk] of staged.chunks.entries()) {
+            if (chunk.index !== index)
+                throw new AppError('INVALID_INPUT', 'Часть объекта отсутствует.');
+            const bytes = Buffer.from(chunk.base64, 'base64');
+            size += bytes.length;
+            if (size > file.size)
+                throw new AppError('INVALID_INPUT', 'Размер объекта превышен.');
+            buffers.push(bytes);
+        }
+        const bytes = Buffer.concat(buffers);
+        if (size !== file.size || sha(bytes) !== file.sha256)
+            throw new AppError('INVALID_INPUT', 'Хэш объекта не совпадает.');
+        if (file.root === 'object' && file.path.startsWith('private/validation/'))
+            verifyValidationPng(bytes);
+        const key = file.root === 'catalog' ? 'private/catalog/restored/' + id + '/' + file.path : this.remap(file.path, id);
+        try {
+            await this.store.transport.put(key, bytes, file.mediaType);
+        }
+        catch {
+            const existing = await this.store.transport.get(key, file.size);
+            if (sha(existing) !== file.sha256)
+                throw new AppError('CONFLICT', 'Подготовленный объект изменился.');
+        }
+        await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, 4000000000 + seq, { type: 'verified', source: file.path, key, size: file.size, sha256: file.sha256 }]); const removed = await tx.query("with removed as (delete from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 returning octet_length(decode(data->>'base64','base64')) size) select coalesce(sum(size),0) released from removed", [id, 1000000000 + seq * 2000, 1000000000 + (seq + 1) * 2000]), released = Number(removed.rows[0].released); await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{objectStagingBytes}',to_jsonb(greatest(0,coalesce((data->>'objectStagingBytes')::bigint,0)-$2::bigint))) where id=$1", [id, released]); });
         return { ok: true };
-    } let size = 0; const buffers: Buffer[] = []; for (const [index, chunk] of staged.chunks.entries()) {
-        if (chunk.index !== index)
-            throw new AppError('INVALID_INPUT', 'Часть объекта отсутствует.');
-        const bytes = Buffer.from(chunk.base64, 'base64');
-        size += bytes.length;
-        if (size > file.size)
-            throw new AppError('INVALID_INPUT', 'Размер объекта превышен.');
-        buffers.push(bytes);
-    } const bytes = Buffer.concat(buffers); if (size !== file.size || sha(bytes) !== file.sha256)
-        throw new AppError('INVALID_INPUT', 'Хэш объекта не совпадает.'); if (file.root === 'object' && file.path.startsWith('private/validation/'))
-        verifyValidationPng(bytes); const key = file.root === 'catalog' ? 'private/catalog/restored/' + id + '/' + file.path : this.remap(file.path, id); try {
-        await this.store.transport.put(key, bytes, file.mediaType);
     }
-    catch {
-        const existing = await this.store.transport.get(key, file.size);
-        if (sha(existing) !== file.sha256)
-            throw new AppError('CONFLICT', 'Подготовленный объект изменился.');
-    } await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict do nothing', [id, 2000000000 + seq, { type: 'verified', source: file.path, key, size: file.size, sha256: file.sha256 }]); const removed = await tx.query("with removed as (delete from private.recovery_snapshot_records where snapshot_id=$1 and seq>=$2 and seq<$3 returning octet_length(decode(data->>'base64','base64')) size) select coalesce(sum(size),0) released from removed", [id, 1000000000 + seq * 2000, 1000000000 + (seq + 1) * 2000]), released = Number(removed.rows[0].released); await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{objectStagingBytes}',to_jsonb(greatest(0,coalesce((data->>'objectStagingBytes')::bigint,0)-$2::bigint))) where id=$1", [id, released]); }); return { ok: true }; }
     async install(actor: Principal, id: string): Promise<RestoreReport> {
         const initial = await this.repository.transaction(async (tx) => { const snapshot = await this.snapshot(actor, id, tx); const installed = (await tx.query("select data from private.recovery_state where key='quarantine' and data->>'restoreId'=$1", [id])).rows[0]; return { snapshot, installed: installed?.data, count: Number((await tx.query('select count(*) n from private.recovery_snapshot_records where snapshot_id=$1 and seq<1000000000', [id])).rows[0].n), bytes: Number((await tx.query('select coalesce(sum(octet_length(data::text)),0) n from private.recovery_snapshot_records where snapshot_id=$1 and seq<1000000000', [id])).rows[0].n) }; });
         const mappings = initial.snapshot.data.verified as Record<string, {
@@ -205,9 +281,9 @@ export class PostgresBackup {
         if (initial.snapshot.data.kind !== 'restore' || initial.count !== initial.snapshot.data.records)
             throw new AppError('INVALID_INPUT', 'Метаданные восстановления неполны.');
         // Logical rows and physical remapping remain in staged SQL, never whole-installation JS maps.
-        if (initial.bytes > 256 * 1024 ** 2)
-            throw new AppError('INVALID_INPUT', 'Метаданные превышают 256 МиБ.');
-        const stats = (await this.repository.pool.query("select count(*) n,count(distinct data->>'source') unique_n from private.recovery_snapshot_records where snapshot_id=$1 and seq>=2000000000 and seq<3000000000 and data->>'type'='verified'", [id])).rows[0];
+        if (initial.bytes > 768 * 1024 ** 2)
+            throw new AppError('INVALID_INPUT', 'Метаданные превышают 768 МиБ.');
+        const stats = (await this.repository.pool.query("select count(*) n,count(distinct data->>'source') unique_n from private.recovery_snapshot_records where snapshot_id=$1 and seq>=4000000000 and seq<5000000000 and data->>'type'='verified'", [id])).rows[0];
         if (stats.n !== stats.unique_n)
             throw new AppError('INVALID_INPUT', 'Повторный физический объект.');
         const keys = { size: Number(stats.n), get: async (source: string): Promise<{
@@ -239,13 +315,18 @@ export class PostgresBackup {
         }[] = [];
         let installedVersions: string[] | null = null;
         const identityColumns: Record<string, string[]> = { 'public.sites': ['owner_id'], 'public.memberships': ['user_id'], 'public.assignments': ['user_id'], 'private.batches': ['owner_id'], 'private.batch_assignments': ['user_id'], 'private.import_resources': ['owner_id'], 'private.workers': ['enrollment_actor'], 'private.audit': ['actor_id'] };
-        const remapFile = async (file: any, required: boolean) => { const mapped = await keys.get(file.objectKey); if (!mapped) {
-            if (required)
-                throw new AppError('INVALID_INPUT', 'Обязательное содержимое копии отсутствует.');
-            file.objectKey = this.remap(file.objectKey, id);
-            return;
-        } if (mapped.size !== file.size || mapped.sha256 !== file.sha256)
-            throw new AppError('INVALID_INPUT', 'Опись содержимого не совпадает с метаданными.'); file.objectKey = mapped.key; };
+        const remapFile = async (file: any, required: boolean) => {
+            const mapped = await keys.get(file.objectKey);
+            if (!mapped) {
+                if (required)
+                    throw new AppError('INVALID_INPUT', 'Обязательное содержимое копии отсутствует.');
+                file.objectKey = this.remap(file.objectKey, id);
+                return;
+            }
+            if (mapped.size !== file.size || mapped.sha256 !== file.sha256)
+                throw new AppError('INVALID_INPUT', 'Опись содержимого не совпадает с метаданными.');
+            file.objectKey = mapped.key;
+        };
         for (let after = -1;;) {
             const page = (await this.repository.pool.query('select seq,data from private.recovery_snapshot_records where snapshot_id=$1 and seq>$2 and seq<1000000000 order by seq limit 20', [id, after])).rows;
             if (!page.length)
@@ -362,9 +443,15 @@ export class PostgresBackup {
                         const c = row.metadata.checkpoint, stateFile = row.metadata.state;
                         if (!c || c.id !== row.id || c.jobId !== row.job_id || c.manifestId !== row.manifest_id || !stateFile || c.stateKey !== stateFile.objectKey)
                             throw new AppError('INVALID_INPUT', 'Привязка контрольной точки повреждена.');
-                        const read = async (f: any) => { const physical = await keys.get(f.objectKey); if (!physical)
-                            throw new AppError('INVALID_INPUT', 'Файл проверки отсутствует.'); const bytes = await this.store.transport.get(physical.key, f.size); if (bytes.length !== f.size || sha(bytes) !== f.sha256 || createHash('sha1').update(bytes).digest('hex') !== f.sha1)
-                            throw new AppError('INVALID_INPUT', 'Файл проверки повреждён.'); return bytes; }, state = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(await read(stateFile)));
+                        const read = async (f: any) => {
+                            const physical = await keys.get(f.objectKey);
+                            if (!physical)
+                                throw new AppError('INVALID_INPUT', 'Файл проверки отсутствует.');
+                            const bytes = await this.store.transport.get(physical.key, f.size);
+                            if (bytes.length !== f.size || sha(bytes) !== f.sha256 || createHash('sha1').update(bytes).digest('hex') !== f.sha1)
+                                throw new AppError('INVALID_INPUT', 'Файл проверки повреждён.');
+                            return bytes;
+                        }, state = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(await read(stateFile)));
                         if (state.siteId !== row.site_id || state.jobId !== row.job_id || state.manifestId !== undefined && state.manifestId !== row.manifest_id)
                             throw new AppError('INVALID_INPUT', 'Состояние принадлежит другому заданию.');
                         const files = [];
@@ -381,7 +468,7 @@ export class PostgresBackup {
                     else {
                         const metadata = row.metadata, sourceKey = metadata.checkpoint.stateKey;
                         for (const file of metadata.manifest.files)
-                            remapFile(file, required);
+                            await remapFile(file, required);
                         if (metadata.state)
                             await remapFile(metadata.state, required);
                         const mappedState = await keys.get(sourceKey);
@@ -461,10 +548,13 @@ export class PostgresBackup {
                     else
                         row.key = 'provenance:' + initial.snapshot.data.header.sourceId + ':' + row.key;
                 }
-                prepared.push({ seq: 4000000000 + seq, data: { type: 'prepared', table, row, pointers } });
+                prepared.push({ seq: 6000000000 + seq, data: { type: 'prepared', table, row, pointers } });
             }
-            await this.repository.transaction(async (tx) => { await this.snapshot(actor, id, tx); for (const r of prepared)
-                await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict(snapshot_id,seq) do update set data=excluded.data', [id, r.seq, r.data]); });
+            await this.repository.transaction(async (tx) => {
+                await this.snapshot(actor, id, tx);
+                for (const r of prepared)
+                    await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3) on conflict(snapshot_id,seq) do update set data=excluded.data', [id, r.seq, r.data]);
+            });
         }
         if (seen !== initial.count || fileCount !== keys.size)
             throw new AppError('INVALID_INPUT', 'Состав объектов не совпадает с копией.');
@@ -486,11 +576,11 @@ export class PostgresBackup {
             await this.snapshot(actor, id, tx);
             if ((await tx.query('select 1 from public.sites union all select 1 from private.jobs union all select 1 from private.artifacts limit 1')).rowCount)
                 throw new AppError('CONFLICT', 'Цель перестала быть пустой.');
-            await tx.query("select set_config('site_factory.restore','1',true)");
+            await tx.query("select set_config('site_factory.restore','1',true),set_config('site_factory.restore_import','1',true)");
             for (const table of order) {
-                const conflict = table === 'public.users' || table === 'public.memberships' ? ' on conflict do nothing' : '', source = "select data->'row' row from private.recovery_snapshot_records where snapshot_id=$1 and seq>=4000000000 and data->>'table'=$2";
+                const conflict = table === 'public.users' || table === 'public.memberships' ? ' on conflict do nothing' : '', source = "select data->'row' row from private.recovery_snapshot_records where snapshot_id=$1 and seq>=6000000000 and data->>'table'=$2";
                 if (table === 'private.checkpoints' || table === 'public.revisions') {
-                    const parent = table === 'public.revisions' ? 'parent_id' : 'expected_checkpoint_id', tree = "with recursive source as (" + source + "), tree as (select row,0 depth from source where row->>'" + parent + "' is null union all select s.row,t.depth+1 from source s join tree t on s.row->>'" + parent + "'=t.row->>'id' where t.depth<500000) ";
+                    const parent = table === 'public.revisions' ? 'parent_id' : 'expected_checkpoint_id', tree = "with recursive source as (" + source + "), tree as (select row,0 depth from source where row->>'" + parent + "' is null union all select s.row,t.depth+1 from source s join tree t on s.row->>'" + parent + "'=t.row->>'id' where t.depth<1000000) ";
                     const counts = (await tx.query(tree + 'select (select count(*) from source) total,(select count(*) from tree) reachable', [id, table])).rows[0];
                     if (counts.total !== counts.reachable)
                         throw new AppError('INVALID_INPUT', 'Цикл предшественников.');
@@ -499,8 +589,8 @@ export class PostgresBackup {
                 else
                     await tx.query('insert into ' + table + (table === 'private.audit' ? ' overriding system value' : '') + ' select (jsonb_populate_record(null::' + table + ',row)).* from (' + source + ') s' + conflict, [id, table]);
             }
-            await tx.query("update public.sites s set draft_id=(p.data#>>'{pointers,draft_id}')::uuid,published_id=(p.data#>>'{pointers,published_id}')::uuid from private.recovery_snapshot_records p where p.snapshot_id=$1 and p.seq>=4000000000 and p.data->>'table'='public.sites' and s.id=(p.data#>>'{row,id}')::uuid", [id]);
-            await tx.query("update private.jobs j set checkpoint_id=(p.data#>>'{pointers,checkpoint_id}')::uuid,data=p.data#>'{pointers,data}' from private.recovery_snapshot_records p where p.snapshot_id=$1 and p.seq>=4000000000 and p.data->>'table'='private.jobs' and j.id=(p.data#>>'{row,id}')::uuid", [id]);
+            await tx.query("update public.sites s set draft_id=(p.data#>>'{pointers,draft_id}')::uuid,published_id=(p.data#>>'{pointers,published_id}')::uuid from private.recovery_snapshot_records p where p.snapshot_id=$1 and p.seq>=6000000000 and p.data->>'table'='public.sites' and s.id=(p.data#>>'{row,id}')::uuid", [id]);
+            await tx.query("update private.jobs j set checkpoint_id=(p.data#>>'{pointers,checkpoint_id}')::uuid,data=p.data#>'{pointers,data}' from private.recovery_snapshot_records p where p.snapshot_id=$1 and p.seq>=6000000000 and p.data->>'table'='private.jobs' and j.id=(p.data#>>'{row,id}')::uuid", [id]);
             if (catalog.length) {
                 await tx.query('insert into private.recovery_state values($1,$2)', ['catalog:' + id, { sourceId: initial.snapshot.data.header.sourceId, files: catalog, versions: catalogVersions }]);
                 await tx.query('insert into private.payload_inventory values($1,$2,null,$3,$4,null,null)', ['catalog', 'restore-' + id, { kind: 'catalog', id: 'restore-' + id, siteId: null, objects: catalog.map(f => ({ key: f.key, size: f.size, sha256: f.sha256, mediaType: 'application/octet-stream' })), createdAt: Date.now(), protectUntil: 0, state: 'available', firstOrphanAt: null, claimToken: null }, 'available']);

@@ -264,7 +264,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             if (projection) {
                 if (projection.evidence.checkpoint.id !== checkpoint.id || projection.usage.predecessor !== predecessor)
                     throw new AppError('CONFLICT', 'Проекция контрольной точки устарела.');
-                await commitPostgresProjection(tx, projection);
+                await commitPostgresProjection(tx, projection, true, lease);
             }
             await tx.query("update private.payload_inventory set data=data||jsonb_build_object('accepted',true) where kind='checkpoint' and id=$1", [checkpoint.id]);
             await tx.query("update private.jobs set checkpoint_id=$2,data=data||jsonb_build_object('checkpointId',($2::uuid)::text,'stage',$3::text) where id=$1", [lease.jobId, checkpoint.id, checkpoint.stage]);

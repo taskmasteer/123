@@ -74,3 +74,50 @@ it('rejects authenticated malicious ZIP paths, symlinks, compression, CRC mismat
         await rm(root, { recursive: true, force: true });
     }
 }, 15000);
+async function indexedFixture(root: string, files: {
+    name: string;
+    bytes: Buffer;
+}[], index: any[]) { const path = join(root, 'fixture-' + Math.random() + '.zip'), all = [...files, { name: 'indexes/0.ndjson', bytes: Buffer.from(index.map(v => JSON.stringify(v) + '\n').join('')) }], aliases = all.map(f => ({ actual: f.name, safe: f.name.startsWith('records/') ? f.name.replace('.json', '.html') : f.name.startsWith('payloads/') ? f.name.replace('.bin', '.css') : 'indexes/0.a.html', bytes: f.bytes })); await writeZip(path, (async function* () { for (const f of aliases)
+    yield { name: f.safe, size: f.bytes.length, sha256: hash(f.bytes), read: async () => f.bytes }; })()); const bytes = await readFile(path); for (const f of aliases) {
+    const from = Buffer.from(f.safe), to = Buffer.from(f.actual);
+    expect(from.length).toBe(to.length);
+    let start = 0;
+    while (true) {
+        const offset = bytes.indexOf(from, start);
+        if (offset < 0)
+            break;
+        to.copy(bytes, offset);
+        start = offset + from.length;
+    }
+} return bytes; }
+it('reads old explicit file records and new authenticated embedded descriptors while rejecting malformed duplicate mixed and unmatched forms', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'embedded-descriptor-')), body = Buffer.from('<h1>Original payload</h1>'), payload = { name: 'payloads/0.bin', size: body.length, sha256: hash(body) }, file = { recordName: 'records/0.json', root: 'data', path: 'artifacts/manifests/11111111-1111-4111-8111-111111111111/0.bin', mediaType: 'text/html' }, logical = Buffer.from(JSON.stringify({ type: 'file', root: file.root, path: file.path, payload: payload.name, size: payload.size, sha256: payload.sha256, mediaType: file.mediaType })), record = { name: file.recordName, size: logical.length, sha256: hash(logical) };
+    let ordinal = 0;
+    const verify = async (zip: Buffer) => { const path = join(root, 'case' + ordinal++ + '.sfbak'); await writeFile(path, encrypted(zip)); return portableArchive(join(root, 'verified')).verify(path, 'secret test pass'); };
+    try {
+        const old = await verify(await indexedFixture(root, [{ name: record.name, bytes: logical }, { name: payload.name, bytes: body }], [record, payload]));
+        expect(old.entries.length).toBe(2);
+        await rm(old.directory, { recursive: true, force: true });
+        const plain = join(root, 'new.zip');
+        await writeZip(plain, (async function* () { yield { ...record, read: async () => logical }; yield { ...payload, read: async () => body }; })(), join(root, 'new-index'));
+        const current = await verify(await readFile(plain));
+        expect(current.entries.length).toBe(2);
+        let metadata;
+        for (const entry of current.entries)
+            if (entry.name === record.name)
+                metadata = JSON.parse((await readFile(entry.file)).toString());
+        expect(metadata).toEqual(JSON.parse(logical.toString()));
+        await rm(current.directory, { recursive: true, force: true });
+        const malformed = [null, { ...file, root: 'any' }, { ...file, path: '../secret' }, { ...file, mediaType: 'image/png\nheader' }, { ...file, recordName: 'records/1000000.json' }, { ...file, extra: true }];
+        for (const descriptor of malformed)
+            await expect(verify(await indexedFixture(root, [{ name: payload.name, bytes: body }], [{ ...payload, fileDescriptorV1: descriptor }]))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await expect(verify(await indexedFixture(root, [{ name: payload.name, bytes: body }], [{ ...payload, fileDescriptorV2: file }]))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await expect(verify(await indexedFixture(root, [{ name: record.name, bytes: logical }, { name: payload.name, bytes: body }], [record, { ...payload, fileDescriptorV1: file }]))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        const another = { ...payload, name: 'payloads/1.bin' };
+        await expect(verify(await indexedFixture(root, [{ name: payload.name, bytes: body }, { name: another.name, bytes: body }], [{ ...payload, fileDescriptorV1: file }, { ...another, fileDescriptorV1: file }]))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await expect(verify(await indexedFixture(root, [{ name: record.name, bytes: logical }], [record]))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    finally {
+        await rm(root, { recursive: true, force: true });
+    }
+}, 30000);

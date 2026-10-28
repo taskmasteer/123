@@ -1,4 +1,7 @@
-import { expect, it, afterEach } from 'vitest';
+import * as editingModule from '../../../packages/core/src/editing.js';
+import * as queueModule from '../../../packages/adapters/src/local-queue.js';
+import { existingLocalDatabase } from '../../../packages/adapters/src/local-database.js';
+import { vi } from 'vitest';import { expect, it, afterEach } from 'vitest';
 import { resolve, join } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
@@ -52,3 +55,53 @@ it('keeps passphrase/archive paths off ordinary dispatch and installs a verified
         await runtime.close();
     }
 }, 45000);
+it('quiesce fences an already admitted visual claim before snapshot capture and starts no later visual work', async () => {
+    const originalQueue = queueModule.createLocalQueue, originalEditing = editingModule.createEditing;
+    let editor: ReturnType<typeof originalEditing>, held = false, entered!: () => void, release!: () => void;
+    const claimEntered = new Promise<void>(r => entered = r), claimHold = new Promise<void>(r => release = r);
+    const queueSpy = vi.spyOn(queueModule, 'createLocalQueue').mockImplementation(async (...args) => { const queue = await originalQueue(...args), claim = queue.claim.bind(queue); queue.claim = async (...params) => { const result = await claim(...params); if (held && result?.job.edit?.producer) {
+        entered();
+        await claimHold;
+    } return result; }; return queue; });
+    const editingSpy = vi.spyOn(editingModule, 'createEditing').mockImplementation(deps => (editor = originalEditing(deps)));
+    const root = await directory(), runtime = await createDesktopRuntime(root, resolve('.'), { native: true }), request = (method: string, params: unknown = {}): Promise<any> => runtime.request({ id: 'visual-drain', version: 1, method, params });
+    let captureRelease!: () => void;
+    const captureHold = new Promise<void>(r => captureRelease = r);
+    try {
+        await runtime.configure({ mode: 'demo' });
+        const created = await request('site.create', { domain: 'visual-quiesce.test' });
+        await expect.poll(async () => (await request('job.status', { siteId: created.site.id })).state, { timeout: 20000 }).toBe('completed');
+        await runtime.configure({ mode: 'blocked' });
+        const site = (await request('site.list')).items[0], { map } = await editor!.visualMap({ userId: 'local-demo-admin', role: 'admin' }, site.id, site.revision);
+        held = true;
+        const job = await editor!.requestVisual({ userId: 'local-demo-admin', role: 'admin' }, site.id, site.revision, { elementId: map.elements.find(e => e.tag === 'h1')!.elementId, text: 'Queued during drain' }, map.binding.mapId, 'queued-visual-drain');
+        await claimEntered;
+        const db = (await existingLocalDatabase(root))!, snapshot = db.snapshot.bind(db);
+        let capturing = false;
+        db.snapshot = async (target) => { capturing = true; await captureHold; return snapshot(target); };
+        const operation = await runtime.archive({ action: 'backup', passphrase: 'visual drain password' }) as {
+            id: string;
+        };
+        await expect.poll(async () => { try {
+            await request('device.status');
+            return false;
+        }
+        catch (e: any) {
+            return e.code === 'CONFLICT';
+        } }).toBe(true);
+        release();
+        await expect.poll(() => capturing).toBe(true);
+        expect(db.sql.prepare('select state from jobs where id=?').get(job.id)?.state).toBe('paused');
+        expect(db.sql.prepare('select count(*) n from checkpoint_evidence where job_id=?').get(job.id)?.n).toBe(0);
+        captureRelease();
+        await expect.poll(async () => (await runtime.archive({ action: 'status', id: operation.id }) as any).state, { timeout: 15000 }).toBe('ready');
+        expect(db.sql.prepare('select state from jobs where id=?').get(job.id)?.state).toBe('paused');
+    }
+    finally {
+        release();
+        captureRelease();
+        await runtime.close();
+        queueSpy.mockRestore();
+        editingSpy.mockRestore();
+    }
+}, 30000);

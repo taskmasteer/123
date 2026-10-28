@@ -39,7 +39,7 @@ export async function recoveryRoute(backup: PostgresBackup | undefined, actor: P
         if (!Array.isArray(p.mappings) || p.mappings.length > 50)
             throw new AppError('INVALID_INPUT', 'Не более 50 привязок в запросе.');
         const mappings = p.mappings.map(v => { const m = object(v, ['sourceId', 'destinationId']); return { sourceId: uuid(m.sourceId), destinationId: uuid(m.destinationId) }; });
-        return backup.beginRestore(actor, p.header as RecoveryRecord, mappings, integer(p.records, 1, 500000));
+        return backup.beginRestore(actor, p.header as RecoveryRecord, mappings, integer(p.records, 1, 1000000));
     }
     const match = /^\/admin\/recovery\/(snapshots|restores)\/([^/]+)\/(record|resource|record-part|record-complete|chunk|object-complete|install|close|mappings)$/.exec(url.pathname);
     if (!match)
@@ -52,7 +52,7 @@ export async function recoveryRoute(backup: PostgresBackup | undefined, actor: P
         return backup.addMappings(actor, id, p.mappings.map(v => { const m = object(v, ['sourceId', 'destinationId']); return { sourceId: uuid(m.sourceId), destinationId: uuid(m.destinationId) }; }));
     }
     if (request.method === 'GET' && ['record', 'resource'].includes(action!)) {
-        const seq = integer(Number(url.searchParams.get('seq')), 0, 500000), offset = integer(Number(url.searchParams.get('offset') ?? 0), 0, (32 * 1024 ** 2));
+        const seq = integer(Number(url.searchParams.get('seq')), 0, 999999), offset = integer(Number(url.searchParams.get('offset') ?? 0), 0, (32 * 1024 ** 2));
         return action === 'record' ? backup.record(actor, id, seq, offset) : backup.resource(actor, id, seq, offset);
     }
     if (request.method === 'POST') {
@@ -67,22 +67,22 @@ export async function recoveryRoute(backup: PostgresBackup | undefined, actor: P
         }
         if (action === 'record-part') {
             const p = object(body, ['seq', 'index', 'base64']);
-            await backup.stageMetadataChunk(actor, id, integer(p.seq, 0, 499999), integer(p.index, 0, 42), string(p.base64, 32000));
+            await backup.stageMetadataChunk(actor, id, integer(p.seq, 0, 999999), integer(p.index, 0, 42), string(p.base64, 32000));
             return { ok: true };
         }
         if (action === 'record-complete') {
             const p = object(body, ['seq']);
-            await backup.finishMetadata(actor, id, integer(p.seq, 0, 499999));
+            await backup.finishMetadata(actor, id, integer(p.seq, 0, 999999));
             return { ok: true };
         }
         if (action === 'chunk') {
             const p = object(body, ['seq', 'index', 'base64']);
-            await backup.stageChunk(actor, id, integer(p.seq, 0, 499999), integer(p.index, 0, 1400), string(p.base64, 32000));
+            await backup.stageChunk(actor, id, integer(p.seq, 0, 999999), integer(p.index, 0, 1400), string(p.base64, 32000));
             return { ok: true };
         }
         if (action === 'object-complete') {
             const p = object(body, ['seq']);
-            return backup.finishObject(actor, id, integer(p.seq, 0, 499999));
+            return backup.finishObject(actor, id, integer(p.seq, 0, 999999));
         }
     }
     throw new AppError('NOT_FOUND', 'Операция копии не найдена.');

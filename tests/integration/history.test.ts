@@ -23,6 +23,23 @@ class HistoryObjects implements ObjectTransport {
     async head(key: string) { const f = this.objects.get(key)!; return { size: f.bytes.length, mediaType: f.mediaType }; }
     async delete(key: string) { this.objects.delete(key); }
 }
+it('protects an unknown checkpoint subject reached only from a durable read pin', async () => {
+    const pool = await database();
+    await seedUsers(pool);
+    const repo = new SupabaseRepository(pool), store = new R2Store(repo, new HistoryObjects(), new PostgresQueue(repo)), actor = { userId: identities.admin, role: 'admin' as const };
+    try {
+        const site = await repo.create({ domain: 'unknown-pin.example' }, actor), artifact = await store.put(site.id, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('unknown dependency') }], '1'), checkpointId = randomUUID(), pin = randomUUID(), now = Date.now() + 32 * 86400000, collector = new PostgresRetention(repo, store.transport);
+        await repo.transaction(async (tx) => { await registerPostgresPayload(tx, { kind: 'checkpoint', id: checkpointId, siteId: site.id, objects: [], accepted: false, createdAt: 1, protectUntil: 0, state: 'available', firstOrphanAt: null, claimToken: null }); await tx.query("insert into private.payload_pins values($1,'checkpoint',$2,to_timestamp($3/1000.0))", [pin, checkpointId, now + 10 * 86400000]); });
+        expect((await collector.planCleanup(now)).deletableManifestIds).toEqual([]);
+        expect((await collector.planCleanup(now + 86400000)).deletableManifestIds).toEqual([]);
+        await repo.transaction(tx => tx.query('delete from private.payload_pins where id=$1', [pin]));
+        expect((await collector.planCleanup(now + 2 * 86400000)).deletableManifestIds).toEqual([]);
+        expect((await collector.planCleanup(now + 3 * 86400000)).deletableManifestIds).toEqual([artifact.id]);
+    }
+    finally {
+        await pool.end();
+    }
+});
 it('takes the shared writer fence before row locks and excludes collectors across connections', async () => {
     const pool = await database();
     await seedUsers(pool);
@@ -37,15 +54,11 @@ it('takes the shared writer fence before row locks and excludes collectors acros
         const siteIds = [randomUUID(), randomUUID()];
         const writers = siteIds.map(siteId => repo.transaction(async (tx) => { await tx.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [siteId]); entered.push(1); await barrier; }));
         try {
-            for (let tries = 0; entered.length < 2 && tries < 100; tries++)
-                await pool.query('select 1');
+            await expect.poll(() => entered.length).toBe(2);
             expect(entered).toHaveLength(2);
             let collected = false;
             const collector = repo.transaction(async () => { collected = true; }, 'exclusive');
-            let waiting = false;
-            for (let tries = 0; !waiting && tries < 100; tries++)
-                waiting = (await pool.query("select 1 from pg_locks where locktype='advisory' and classid=73212 and objid=1 and not granted")).rowCount! > 0;
-            expect(waiting).toBe(true);
+            await expect.poll(async () => !!(await pool.query("select 1 from pg_locks where locktype='advisory' and classid=73212 and objid=1 and not granted")).rowCount).toBe(true);
             expect(collected).toBe(false);
             release();
             await Promise.all(writers);

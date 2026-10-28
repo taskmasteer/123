@@ -58,6 +58,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         server: Preview;
     }>();
     const workerId = randomUUID();
+    let maintaining: Promise<void> | null = null;
     let pumping: Promise<void> | null = null, closed = false, snapshotting = false;
     const activeRequests = new Set<Promise<void>>();
     let mode: 'demo' | 'live' | 'blocked' = options.native ? 'blocked' : 'demo', modelName: string | null = null, imageModel: string | null = null;
@@ -70,23 +71,40 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     let managedMode = false;
     const deps: WorkerDeps & {
         queue: typeof queue;
-    } = { readValidationScreenshot: async (id) => { if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
-            throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.'); return readRegular(await safeFile(root, id), 8000000); }, readLogo: (assetId, siteId) => imports.readLogo(assetId, siteId), sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
-        workspace: join(root, 'attempts'), validate: async (files, context) => { if (!context)
-            throw new AppError('INVALID_INPUT', 'Нет привязки проверки к заданию.'); const report = await validateSite(files, { screenshotRoot: validationRoot }); for (const id of report.screenshotIds) {
-            const bytes = await readRegular(await safeFile(root, id), 8000000), payload = { kind: 'screenshot' as const, id, siteId: context.job.siteId, producer: { jobId: context.job.id, workerId: context.lease.workerId, generation: context.lease.generation }, objects: [{ key: id.slice('validation/'.length), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'image/png' }], createdAt: clock.now(), protectUntil: clock.now() + 600000, state: 'available' as const, firstOrphanAt: null, claimToken: null };
-            database.transaction(() => registerLocalPayload(database.sql, payload));
-        } return report; } };
+    } = { readValidationScreenshot: async (id) => {
+            if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
+                throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.');
+            return readRegular(await safeFile(root, id), 8000000);
+        }, readLogo: (assetId, siteId) => imports.readLogo(assetId, siteId), sites, queue, artifacts, revisions, checkpoints, clock, templates: catalog, model: new FakeModel(), publication: new FakePublication(),
+        workspace: join(root, 'attempts'), validate: async (files, context) => {
+            if (!context)
+                throw new AppError('INVALID_INPUT', 'Нет привязки проверки к заданию.');
+            const report = await validateSite(files, { screenshotRoot: validationRoot });
+            for (const id of report.screenshotIds) {
+                const bytes = await readRegular(await safeFile(root, id), 8000000), payload = { kind: 'screenshot' as const, id, siteId: context.job.siteId, producer: { jobId: context.job.id, workerId: context.lease.workerId, generation: context.lease.generation }, objects: [{ key: id.slice('validation/'.length), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'image/png' }], createdAt: clock.now(), protectUntil: clock.now() + 600000, state: 'available' as const, firstOrphanAt: null, claimToken: null };
+                database.transaction(() => registerLocalPayload(database.sql, payload));
+            }
+            return report;
+        } };
     const retention = new LocalRetention(database);
     if (!database.sql.prepare("select 1 from recovery_state where key='quarantine'").get())
         await retention.backfill(checkpoints, false);
-    const editing = createEditing({ ...deps, canRollback: async (siteId, revisionId) => { const site = await sites.get(siteId); return !!site && retainedOutcomes(database.sql.prepare('select data from publication_outcomes where site_id=?').all(siteId).map(r => JSON.parse(String(r.data))), site.publishedId).some(o => o.settlement === 'settled' && o.revisionId === revisionId); }, visualCompareAndSet: async (actorId, siteId, expectedRevision, draftId) => { if (actorId !== principal.userId)
-            throw new AppError('FORBIDDEN', 'Доступ отозван.'); return sites.compareAndSet(siteId, expectedRevision, { draftId }); }, store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
+    const editing = createEditing({ ...deps, canRollback: async (siteId, revisionId) => { const site = await sites.get(siteId); return !!site && retainedOutcomes(database.sql.prepare('select data from publication_outcomes where site_id=?').all(siteId).map(r => JSON.parse(String(r.data))), site.publishedId).some(o => o.settlement === 'settled' && o.revisionId === revisionId); }, visualCompareAndSet: async (actorId, siteId, expectedRevision, draftId) => {
+            if (actorId !== principal.userId)
+                throw new AppError('FORBIDDEN', 'Доступ отозван.');
+            return sites.compareAndSet(siteId, expectedRevision, { draftId });
+        }, store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
     const selectionRuntime = createSelectionRuntime();
     const managedValidationRoot = await privateDirectory(join(root, '.managed-validation'));
-    const managedRuntime = createManagedRuntime(() => ({ ...deps, validate: files => validateSite(files, { screenshotRoot: managedValidationRoot }), readValidationScreenshot: async (id) => { if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
-            throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.'); const file = await safeFile(managedValidationRoot, id.slice(11)), bytes = await readRegular(file, 8000000); await rm(file, { force: true }); return bytes; } }), () => mode === 'live' && !configuring && !closed, options.transport);
-    function ready() { return !closed && !snapshotting && !configuring && !managedMode && mode !== 'blocked' && !database.sql.prepare("select 1 from recovery_state where key='quarantine'").get(); }
+    const managedRuntime = createManagedRuntime(() => ({ ...deps, validate: files => validateSite(files, { screenshotRoot: managedValidationRoot }), readValidationScreenshot: async (id) => {
+            if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
+                throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.');
+            const file = await safeFile(managedValidationRoot, id.slice(11)), bytes = await readRegular(file, 8000000);
+            await rm(file, { force: true });
+            return bytes;
+        } }), () => mode === 'live' && !configuring && !closed, options.transport);
+    function admitted() { return !closed && !snapshotting && !configuring && !managedMode && !database.sql.prepare("select 1 from recovery_state where key='quarantine'").get(); }
+    function ready() { return admitted() && mode !== 'blocked'; }
     async function updateUsage(jobId: string) {
         const job = await queue.get(jobId);
         if (!job?.checkpointId)
@@ -127,20 +145,20 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         return job;
     }
     function pump(): Promise<void> {
-        if (!ready() && (closed || configuring || managedMode || !database.sql.prepare("select 1 from jobs where json_extract(data,'$.edit.producer.kind')='visual' and json_extract(data,'$.state')='queued' limit 1").get()))
+        if (!admitted() || (!ready() && !database.sql.prepare("select 1 from jobs where json_extract(data,'$.edit.producer.kind')='visual' and json_extract(data,'$.state')='queued' limit 1").get()))
             return Promise.resolve();
         if (pumping)
             return pumping;
         pumping = (async () => {
             const pending = database.sql.prepare("select b.id from batches b where state='active' and exists(select 1 from batch_rows r where r.batch_id=b.id and site_id is null and json_array_length(json_extract(r.data,'$.issues'))=0) order by rowid limit 1").get();
-            if (pending && mode !== 'blocked')
+            if (pending && admitted() && mode !== 'blocked')
                 await batches.admit(principal, String(pending.id), 25).catch(error => console.error('Batch admission failed:', String(error)));
-            while (!closed && !configuring && !managedMode && active.size < 2) {
+            while (admitted() && active.size < 2) {
                 const claimed = await queue.claim(workerId, mode === 'blocked' ? 'visual' : 'all');
                 if (!claimed)
                     break;
                 // Closing can race an in-flight claim. Release it before closing persistence.
-                if (!ready() && !claimed.job.edit?.producer) {
+                if (!admitted() || (!ready() && !claimed.job.edit?.producer)) {
                     await queue.finish(claimed.lease, 'paused');
                     break;
                 }
@@ -194,24 +212,34 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             throw new AppError('NOT_FOUND', 'Снимок этой версии недоступен.');
         return { site, revision, validation: saved.state.validation };
     }
-    async function quiesce<T>(capture: () => Promise<T>): Promise<T> { if (snapshotting || closed)
-        throw new AppError('CONFLICT', 'Снимок уже создаётся.'); snapshotting = true; let timeout: ReturnType<typeof setTimeout> | undefined; try {
-        await Promise.race([Promise.allSettled([...activeRequests, ...(pumping ? [pumping] : []), ...active]), new Promise((_, reject) => { timeout = setTimeout(() => reject(new AppError('CONFLICT', 'Текущая операция ещё не достигла безопасной границы.')), 60000); })]);
-        return await capture();
+    async function quiesce<T>(capture: () => Promise<T>): Promise<T> {
+        if (snapshotting || closed)
+            throw new AppError('CONFLICT', 'Снимок уже создаётся.');
+        snapshotting = true;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([(async () => { await pumping; await maintaining; while (activeRequests.size || active.size)
+                    await Promise.allSettled([...activeRequests, ...active]); })(), new Promise((_, reject) => { timeout = setTimeout(() => reject(new AppError('CONFLICT', 'Текущая операция ещё не достигла безопасной границы.')), 60000); })]);
+            return await capture();
+        }
+        finally {
+            if (timeout)
+                clearTimeout(timeout);
+            snapshotting = false;
+            if (!closed)
+                void pump();
+        }
     }
-    finally {
-        if (timeout)
-            clearTimeout(timeout);
-        snapshotting = false;
-        if (!closed)
-            void pump();
-    } }
     let closeForRestore: () => Promise<void> = async () => { throw new AppError('CONFLICT', 'Исполнитель ещё запускается.'); };
     const archives = new NativeArchives({ native: !!options.native, root, baseRoot: options.baseRoot ?? root, sourceRoot, database, sites, revisions, artifacts, quiesce, close: () => closeForRestore(), ...(options.transport ? { fetch: options.transport } : {}) });
-    const source = createSourceFiles({ admin: async (actor) => { if (actor.role !== 'admin')
-            throw new AppError('FORBIDDEN', 'Исходники доступны администратору.'); }, revision: async (s, r) => { const revision = await revisions.get(r); return revision?.siteId === s ? revision : null; }, read: id => artifacts.read(id) });
-    const maintenance = setInterval(() => { if (!closed && !snapshotting && !database.sql.prepare("select 1 from recovery_state where key='quarantine'").get())
-        void retention.backfill(checkpoints, false).then(() => retention.collect(clock.now())).catch(() => { }); }, 3600000);
+    const source = createSourceFiles({ admin: async (actor) => {
+            if (actor.role !== 'admin')
+                throw new AppError('FORBIDDEN', 'Исходники доступны администратору.');
+        }, revision: async (s, r) => { const revision = await revisions.get(r); return revision?.siteId === s ? revision : null; }, read: id => artifacts.read(id) });
+    const maintenance = setInterval(() => {
+        if (!closed && !snapshotting && !maintaining && !database.sql.prepare("select 1 from recovery_state where key='quarantine'").get())
+            maintaining = retention.backfill(checkpoints, false).then(() => retention.collect(clock.now())).catch(() => { }).finally(() => { maintaining = null; });
+    }, 3600000);
     const runtime = {
         archive: (value: unknown) => archives.request(value),
         async managed(method: string, params: unknown) {
@@ -239,6 +267,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             configuring = true;
             credentialsAbort.abort();
             await pumping;
+            await maintaining;
             await Promise.allSettled([...active]);
             await Promise.allSettled([...activeRequests]);
             await selectionRuntime.close();
@@ -280,201 +309,203 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             const ended = new Promise<void>(resolve => done = resolve);
             activeRequests.add(ended);
             try {
-                if (closed)
-                    throw new AppError('CONFLICT', 'Исполнитель остановлен.');
-                const request = parseDesktopRequest(value), p = request.params;
-                if (database.sql.prepare("select 1 from recovery_state where key='quarantine'").get() && !['device.status', 'site.list', 'job.status', 'catalog.list', 'site.history', 'source.list', 'source.read', 'recovery.status', 'recovery.release'].includes(request.method))
-                    throw new AppError('CONFLICT', 'Восстановленная установка ожидает проверки и явного разрешения работы.');
-                if ((mode === 'blocked' || configuring) && ['site.create', 'edit.request', 'job.retry', 'import.commit'].includes(request.method))
-                    throw new AppError('NEEDS_ATTENTION', 'Настройте модель или включите демонстрационный режим.');
-                if (Object.hasOwn(importMethods, request.method)) {
-                    if (request.method === 'batch.retry') {
-                        batches.read(principal, String(p.id), true);
-                        const row = database.sql.prepare('select site_id from batch_rows where batch_id=? and row_number=?').get(String(p.id), Number(p.rowNumber));
-                        const job = row?.site_id ? await queue.get(String(row.site_id)) : null;
-                        if (!job || job.kind !== 'generate')
-                            throw new AppError('NOT_FOUND', 'Задание строки не найдено.');
-                        let recovery: typeof job.providerRecovery;
-                        if (job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
-                            const saved = await checkpoints.load(job.checkpointId);
-                            if (saved.checkpoint.jobId === job.id && saved.state.siteId === job.siteId && ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') && deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
-                                recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
+                return await (async () => {
+                    if (closed)
+                        throw new AppError('CONFLICT', 'Исполнитель остановлен.');
+                    const request = parseDesktopRequest(value), p = request.params;
+                    if (database.sql.prepare("select 1 from recovery_state where key='quarantine'").get() && !['device.status', 'site.list', 'job.status', 'catalog.list', 'site.history', 'source.list', 'source.read', 'recovery.status', 'recovery.release'].includes(request.method))
+                        throw new AppError('CONFLICT', 'Восстановленная установка ожидает проверки и явного разрешения работы.');
+                    if ((mode === 'blocked' || configuring) && ['site.create', 'edit.request', 'job.retry', 'import.commit'].includes(request.method))
+                        throw new AppError('NEEDS_ATTENTION', 'Настройте модель или включите демонстрационный режим.');
+                    if (Object.hasOwn(importMethods, request.method)) {
+                        if (request.method === 'batch.retry') {
+                            batches.read(principal, String(p.id), true);
+                            const row = database.sql.prepare('select site_id from batch_rows where batch_id=? and row_number=?').get(String(p.id), Number(p.rowNumber));
+                            const job = row?.site_id ? await queue.get(String(row.site_id)) : null;
+                            if (!job || job.kind !== 'generate')
+                                throw new AppError('NOT_FOUND', 'Задание строки не найдено.');
+                            let recovery: typeof job.providerRecovery;
+                            if (job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
+                                const saved = await checkpoints.load(job.checkpointId);
+                                if (saved.checkpoint.jobId === job.id && saved.state.siteId === job.siteId && ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') && deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                                    recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
+                            }
+                            if (job.state === 'needs_attention' && deps.model.identity && !recovery)
+                                throw new AppError('CONFLICT', 'Ошибка не допускает восстановления учётных данных.');
+                            await queue.retry(job.id, recovery);
+                            void pump();
+                            return { ok: true };
                         }
-                        if (job.state === 'needs_attention' && deps.model.identity && !recovery)
-                            throw new AppError('CONFLICT', 'Ошибка не допускает восстановления учётных данных.');
-                        await queue.retry(job.id, recovery);
-                        void pump();
-                        return { ok: true };
-                    }
-                    if (request.method === 'batch.assign') {
-                        await batches.assign(principal, String(p.id), p.userIds);
-                        return { ok: true };
-                    }
-                    if (request.method === 'batch.get')
-                        return batches.get(principal, String(p.id));
-                    if (request.method === 'batch.rows')
-                        return batches.page(principal, String(p.id), p.cursor as string | undefined, p.status as string | undefined);
-                    if (request.method === 'batch.list') {
-                        const rows = database.sql.prepare("select id from batches where state<>'uploading' and (? is null or id>?) order by id limit 51").all(p.cursor as string ?? null, p.cursor as string ?? null);
-                        return { items: await Promise.all(rows.slice(0, 50).map(r => batches.get(principal, String(r.id)))), nextCursor: rows.length > 50 ? String(rows[49]!.id) : null };
-                    }
-                    if (['batch.pause', 'batch.resume', 'batch.cancel'].includes(request.method)) {
-                        await (request.method === 'batch.pause' ? batches.pauseBatch(principal, String(p.id)) : request.method === 'batch.resume' ? batches.resumeBatch(principal, String(p.id)) : batches.cancelBatch(principal, String(p.id)));
-                        void pump();
-                        return { ok: true };
-                    }
-                    const result = await imports.request(principal, request.method, p);
-                    if (request.method === 'import.commit')
-                        void pump();
-                    return result;
-                }
-                switch (request.method) {
-                    case 'recovery.status': return { quarantined: !!database.sql.prepare("select 1 from recovery_state where key='quarantine'").get() };
-                    case 'recovery.release':
-                        database.transaction(() => database.sql.prepare("delete from recovery_state where key='quarantine'").run());
-                        return { ok: true };
-                    case 'site.history': {
-                        const site = await sites.get(String(p.siteId));
-                        if (!site)
-                            throw new AppError('NOT_FOUND', 'Сайт не найден.');
-                        const entries = historyEntries(database.sql.prepare('select data from publication_outcomes where site_id=?').all(site.id).map(r => JSON.parse(String(r.data))), site.publishedId, id => !['claimed', 'deleted'].includes(String(database.sql.prepare("select state from payload_inventory where kind='artifact' and id=?").get(id)?.state))), offset = Number(p.offset ?? 0);
-                        return { items: entries.slice(offset, offset + 20), nextOffset: entries.length > offset + 20 ? offset + 20 : null };
-                    }
-                    case 'site.rollback': {
-                        const result = await editing.rollback(principal, String(p.siteId), String(p.revisionId), Number(p.expectedRevision));
-                        await retention.planCleanup(clock.now());
+                        if (request.method === 'batch.assign') {
+                            await batches.assign(principal, String(p.id), p.userIds);
+                            return { ok: true };
+                        }
+                        if (request.method === 'batch.get')
+                            return batches.get(principal, String(p.id));
+                        if (request.method === 'batch.rows')
+                            return batches.page(principal, String(p.id), p.cursor as string | undefined, p.status as string | undefined);
+                        if (request.method === 'batch.list') {
+                            const rows = database.sql.prepare("select id from batches where state<>'uploading' and (? is null or id>?) order by id limit 51").all(p.cursor as string ?? null, p.cursor as string ?? null);
+                            return { items: await Promise.all(rows.slice(0, 50).map(r => batches.get(principal, String(r.id)))), nextCursor: rows.length > 50 ? String(rows[49]!.id) : null };
+                        }
+                        if (['batch.pause', 'batch.resume', 'batch.cancel'].includes(request.method)) {
+                            await (request.method === 'batch.pause' ? batches.pauseBatch(principal, String(p.id)) : request.method === 'batch.resume' ? batches.resumeBatch(principal, String(p.id)) : batches.cancelBatch(principal, String(p.id)));
+                            void pump();
+                            return { ok: true };
+                        }
+                        const result = await imports.request(principal, request.method, p);
+                        if (request.method === 'import.commit')
+                            void pump();
                         return result;
                     }
-                    case 'source.list': return { files: await source.listSourceFiles(principal, String(p.siteId), String(p.revisionId)) };
-                    case 'source.read': {
-                        const file = await source.readSourceFile(principal, String(p.siteId), String(p.revisionId), String(p.path)), offset = Number(p.offset ?? 0);
-                        if (offset > file.bytes.length)
-                            throw new AppError('INVALID_INPUT', 'Неверное смещение.');
-                        const bytes = file.bytes.slice(offset, offset + 24000);
-                        return { path: file.path, mediaType: file.mediaType, size: file.bytes.length, offset, base64: Buffer.from(bytes).toString('base64'), nextOffset: offset + bytes.length < file.bytes.length ? offset + bytes.length : null };
-                    }
-                    case 'visual.projection':
-                    case 'visual.projection.chunk': {
-                        const { map, files } = await editing.visualMap(principal, String(p.siteId), Number(p.expectedRevision));
-                        const resource = projectionResource(projectSelection(files, map));
-                        if (request.method === 'visual.projection')
-                            return resource.descriptor;
-                        if (p.mapId !== map.binding.mapId)
-                            throw new AppError('CONFLICT', 'Проекция устарела.');
-                        return resource.chunk(Number(p.index));
-                    }
-                    case 'visual.submit': {
-                        const job = await editing.requestVisual(principal, String(p.siteId), Number(p.expectedRevision), p.patch as ElementPatch, String(p.mapId), String(p.requestKey));
-                        void pump();
-                        return { saveId: job.edit!.candidateId, status: 'queued' };
-                    }
-                    case 'visual.status': return editing.visualStatus(principal, String(p.siteId), String(p.saveId));
-                    case 'visual.selection.begin':
-                    case 'visual.selection.chunk':
-                    case 'visual.selection.open':
-                    case 'visual.selection.status':
-                    case 'visual.selection.close': return selectionRuntime.request(request.method, p);
-                    case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
-                    case 'site.list': {
-                        const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;
-                        return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: page.nextCursor };
-                    }
-                    case 'site.create': {
-                        if (p.referenceId)
-                            await catalog.prepare({ id: randomUUID(), siteId: randomUUID(), kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0 }, 0, 0, p.referenceId as string);
-                        const site = await sites.create(p as unknown as Site['input'], principal);
-                        const job = await ensureJob(site);
-                        void pump();
-                        return { site, job };
-                    }
-                    case 'job.status': {
-                        const site = await sites.get(p.siteId as string);
-                        if (!site)
-                            throw new AppError('NOT_FOUND', 'Сайт не найден.');
-                        const job = await queue.current(site.id);
-                        if (!job)
-                            throw new AppError('NOT_FOUND', 'Задание не найдено.');
-                        return job;
-                    }
-                    case 'job.retry': {
-                        const job = await queue.current(p.siteId as string);
-                        if (!job)
-                            throw new AppError('NOT_FOUND', 'Задание не найдено.');
-                        if (job.kind === 'edit' && job.state === 'needs_attention')
-                            throw new AppError('CONFLICT', 'Отклоните неудачный вариант и отправьте новую правку.');
-                        let recovery: typeof job.providerRecovery;
-                        if (job.kind === 'generate' && job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
-                            const saved = await checkpoints.load(job.checkpointId);
-                            if (saved.checkpoint.jobId === job.id && saved.state.jobId === job.id && saved.state.siteId === job.siteId && saved.state.baseRevision === job.baseRevision &&
-                                ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') &&
-                                deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
-                                recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
+                    switch (request.method) {
+                        case 'recovery.status': return { quarantined: !!database.sql.prepare("select 1 from recovery_state where key='quarantine'").get() };
+                        case 'recovery.release':
+                            database.transaction(() => database.sql.prepare("delete from recovery_state where key='quarantine'").run());
+                            return { ok: true };
+                        case 'site.history': {
+                            const site = await sites.get(String(p.siteId));
+                            if (!site)
+                                throw new AppError('NOT_FOUND', 'Сайт не найден.');
+                            const entries = historyEntries(database.sql.prepare('select data from publication_outcomes where site_id=?').all(site.id).map(r => JSON.parse(String(r.data))), site.publishedId, id => !['claimed', 'deleted'].includes(String(database.sql.prepare("select state from payload_inventory where kind='artifact' and id=?").get(id)?.state))), offset = Number(p.offset ?? 0);
+                            return { items: entries.slice(offset, offset + 20), nextOffset: entries.length > offset + 20 ? offset + 20 : null };
                         }
-                        await queue.retry(job.id, recovery);
-                        void pump();
-                        return { ok: true };
-                    }
-                    case 'edit.request': {
-                        const job = await editing.requestEdit(principal, p.siteId as string, p.instruction as string, p.expectedRevision as number, p.candidateId as string | undefined);
-                        void pump();
-                        return job;
-                    }
-                    case 'edit.accept': return editing.acceptCandidate(principal, p.siteId as string, p.candidateId as string, p.expectedRevision as number);
-                    case 'edit.reject':
-                        await editing.rejectCandidate(principal, p.siteId as string, p.candidateId as string);
-                        return { ok: true };
-                    case 'edit.list': return editing.list(principal, p.siteId as string);
-                    case 'chat.list': return editing.getConversation(principal, p.siteId as string);
-                    case 'site.publish': return editing.publish(principal, p.siteId as string, p.expectedRevision as number);
-                    case 'catalog.list': return catalog.list();
-                    case 'catalog.style.update':
-                        await catalog.updateStyle(principal, p.id as string, p.enabled as boolean);
-                        return { ok: true };
-                    case 'catalog.reference.update':
-                        await catalog.updateReference(principal, p.id as string, p.description as string);
-                        return { ok: true };
-                    case 'preview.screenshot': {
-                        const { validation } = await scoped(p.siteId as string, p.revisionId as string, p.candidateId as string | undefined);
-                        const ids = validation.screenshotIds as string[], id = ids[p.width === 375 ? 0 : ids.length / 2];
-                        if (typeof id !== 'string' || !/^validation\/[0-9a-f-]{36}\.png$/.test(id))
-                            throw new AppError('NOT_FOUND', 'Снимок недоступен.');
-                        const bytes = await readRegular(await safeFile(validationRoot, id.slice('validation/'.length)), 6000000);
-                        return { dataUrl: 'data:image/png;base64,' + Buffer.from(bytes).toString('base64'), width: p.width };
-                    }
-                    case 'preview.open': {
-                        const { revision } = await scoped(p.siteId as string, p.revisionId as string), server = await serveFiles(await artifacts.read(revision.manifestId));
-                        let browser: Browser;
-                        try {
-                            browser = await chromium.launch({ headless: false, chromiumSandbox: true, env: browserEnvironment() });
+                        case 'site.rollback': {
+                            const result = await editing.rollback(principal, String(p.siteId), String(p.revisionId), Number(p.expectedRevision));
+                            await retention.planCleanup(clock.now());
+                            return result;
                         }
-                        catch (error) {
-                            await server.close();
-                            throw error;
+                        case 'source.list': return { files: await source.listSourceFiles(principal, String(p.siteId), String(p.revisionId)) };
+                        case 'source.read': {
+                            const file = await source.readSourceFile(principal, String(p.siteId), String(p.revisionId), String(p.path)), offset = Number(p.offset ?? 0);
+                            if (offset > file.bytes.length)
+                                throw new AppError('INVALID_INPUT', 'Неверное смещение.');
+                            const bytes = file.bytes.slice(offset, offset + 24000);
+                            return { path: file.path, mediaType: file.mediaType, size: file.bytes.length, offset, base64: Buffer.from(bytes).toString('base64'), nextOffset: offset + bytes.length < file.bytes.length ? offset + bytes.length : null };
                         }
-                        const entry = { browser, server };
-                        previews.add(entry);
-                        browser.on('disconnected', () => { previews.delete(entry); void server.close(); });
-                        const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false, permissions: [] }), origin = new URL(server.url).origin;
-                        await context.route('**/*', route => new URL(route.request().url()).origin === origin && ['GET', 'HEAD'].includes(route.request().method()) ? route.continue() : route.abort());
-                        await context.routeWebSocket('**/*', socket => socket.close());
-                        await context.addInitScript(() => {
-                            for (const key of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
-                                Object.defineProperty(window, key, { value: undefined, writable: false, configurable: false });
+                        case 'visual.projection':
+                        case 'visual.projection.chunk': {
+                            const { map, files } = await editing.visualMap(principal, String(p.siteId), Number(p.expectedRevision));
+                            const resource = projectionResource(projectSelection(files, map));
+                            if (request.method === 'visual.projection')
+                                return resource.descriptor;
+                            if (p.mapId !== map.binding.mapId)
+                                throw new AppError('CONFLICT', 'Проекция устарела.');
+                            return resource.chunk(Number(p.index));
+                        }
+                        case 'visual.submit': {
+                            const job = await editing.requestVisual(principal, String(p.siteId), Number(p.expectedRevision), p.patch as ElementPatch, String(p.mapId), String(p.requestKey));
+                            void pump();
+                            return { saveId: job.edit!.candidateId, status: 'queued' };
+                        }
+                        case 'visual.status': return editing.visualStatus(principal, String(p.siteId), String(p.saveId));
+                        case 'visual.selection.begin':
+                        case 'visual.selection.chunk':
+                        case 'visual.selection.open':
+                        case 'visual.selection.status':
+                        case 'visual.selection.close': return selectionRuntime.request(request.method, p);
+                        case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
+                        case 'site.list': {
+                            const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;
+                            return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: page.nextCursor };
+                        }
+                        case 'site.create': {
+                            if (p.referenceId)
+                                await catalog.prepare({ id: randomUUID(), siteId: randomUUID(), kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0 }, 0, 0, p.referenceId as string);
+                            const site = await sites.create(p as unknown as Site['input'], principal);
+                            const job = await ensureJob(site);
+                            void pump();
+                            return { site, job };
+                        }
+                        case 'job.status': {
+                            const site = await sites.get(p.siteId as string);
+                            if (!site)
+                                throw new AppError('NOT_FOUND', 'Сайт не найден.');
+                            const job = await queue.current(site.id);
+                            if (!job)
+                                throw new AppError('NOT_FOUND', 'Задание не найдено.');
+                            return job;
+                        }
+                        case 'job.retry': {
+                            const job = await queue.current(p.siteId as string);
+                            if (!job)
+                                throw new AppError('NOT_FOUND', 'Задание не найдено.');
+                            if (job.kind === 'edit' && job.state === 'needs_attention')
+                                throw new AppError('CONFLICT', 'Отклоните неудачный вариант и отправьте новую правку.');
+                            let recovery: typeof job.providerRecovery;
+                            if (job.kind === 'generate' && job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
+                                const saved = await checkpoints.load(job.checkpointId);
+                                if (saved.checkpoint.jobId === job.id && saved.state.jobId === job.id && saved.state.siteId === job.siteId && saved.state.baseRevision === job.baseRevision &&
+                                    ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') &&
+                                    deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                                    recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
                             }
-                        });
-                        let first = true;
-                        context.on('page', page => {
-                            if (!first)
-                                void page.close();
-                            first = false;
-                            page.on('download', download => void download.cancel());
-                        });
-                        const page = await context.newPage();
-                        await page.goto(server.url);
-                        return { opened: true };
+                            await queue.retry(job.id, recovery);
+                            void pump();
+                            return { ok: true };
+                        }
+                        case 'edit.request': {
+                            const job = await editing.requestEdit(principal, p.siteId as string, p.instruction as string, p.expectedRevision as number, p.candidateId as string | undefined);
+                            void pump();
+                            return job;
+                        }
+                        case 'edit.accept': return editing.acceptCandidate(principal, p.siteId as string, p.candidateId as string, p.expectedRevision as number);
+                        case 'edit.reject':
+                            await editing.rejectCandidate(principal, p.siteId as string, p.candidateId as string);
+                            return { ok: true };
+                        case 'edit.list': return editing.list(principal, p.siteId as string);
+                        case 'chat.list': return editing.getConversation(principal, p.siteId as string);
+                        case 'site.publish': return editing.publish(principal, p.siteId as string, p.expectedRevision as number);
+                        case 'catalog.list': return catalog.list();
+                        case 'catalog.style.update':
+                            await catalog.updateStyle(principal, p.id as string, p.enabled as boolean);
+                            return { ok: true };
+                        case 'catalog.reference.update':
+                            await catalog.updateReference(principal, p.id as string, p.description as string);
+                            return { ok: true };
+                        case 'preview.screenshot': {
+                            const { validation } = await scoped(p.siteId as string, p.revisionId as string, p.candidateId as string | undefined);
+                            const ids = validation.screenshotIds as string[], id = ids[p.width === 375 ? 0 : ids.length / 2];
+                            if (typeof id !== 'string' || !/^validation\/[0-9a-f-]{36}\.png$/.test(id))
+                                throw new AppError('NOT_FOUND', 'Снимок недоступен.');
+                            const bytes = await readRegular(await safeFile(validationRoot, id.slice('validation/'.length)), 6000000);
+                            return { dataUrl: 'data:image/png;base64,' + Buffer.from(bytes).toString('base64'), width: p.width };
+                        }
+                        case 'preview.open': {
+                            const { revision } = await scoped(p.siteId as string, p.revisionId as string), server = await serveFiles(await artifacts.read(revision.manifestId));
+                            let browser: Browser;
+                            try {
+                                browser = await chromium.launch({ headless: false, chromiumSandbox: true, env: browserEnvironment() });
+                            }
+                            catch (error) {
+                                await server.close();
+                                throw error;
+                            }
+                            const entry = { browser, server };
+                            previews.add(entry);
+                            browser.on('disconnected', () => { previews.delete(entry); void server.close(); });
+                            const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false, permissions: [] }), origin = new URL(server.url).origin;
+                            await context.route('**/*', route => new URL(route.request().url()).origin === origin && ['GET', 'HEAD'].includes(route.request().method()) ? route.continue() : route.abort());
+                            await context.routeWebSocket('**/*', socket => socket.close());
+                            await context.addInitScript(() => {
+                                for (const key of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
+                                    Object.defineProperty(window, key, { value: undefined, writable: false, configurable: false });
+                                }
+                            });
+                            let first = true;
+                            context.on('page', page => {
+                                if (!first)
+                                    void page.close();
+                                first = false;
+                                page.on('download', download => void download.cancel());
+                            });
+                            const page = await context.newPage();
+                            await page.goto(server.url);
+                            return { opened: true };
+                        }
+                        default: throw new AppError('INVALID_INPUT', 'Неизвестная команда.');
                     }
-                    default: throw new AppError('INVALID_INPUT', 'Неизвестная команда.');
-                }
+                })();
             }
             finally {
                 activeRequests.delete(ended);

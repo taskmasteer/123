@@ -1,4 +1,4 @@
-import { createLocalQueue } from '../../packages/adapters/src/local-queue.js';
+import { PostgresRetention } from '../../packages/adapters/src/postgres-retention.js';import { createLocalQueue } from '../../packages/adapters/src/local-queue.js';
 import { createCheckpointStore } from '../../packages/adapters/src/local-checkpoints.js';
 import { readRecoveryRecord } from '../../packages/adapters/src/recovery-records.js';
 import { cp } from 'node:fs/promises';
@@ -38,6 +38,29 @@ class BackupStorage implements ObjectTransport {
     async head(key: string) { const f = this.objects.get(key)!; return { size: f.bytes.length, mediaType: f.mediaType }; }
     async get(key: string) { return this.objects.get(key)!.bytes; }
 }
+it('keeps the maximum original, object, verified and metadata ordinals disjoint safe bigints', async () => {
+    const pool = await database();
+    await seedUsers(pool);
+    const repo = new SupabaseRepository(pool), store = new R2Store(repo, new BackupStorage(), new PostgresQueue(repo)), actor = { userId: identities.admin, role: 'admin' as const }, backup = new PostgresBackup(repo, store, async (id) => ({ id, email: 'verified@example.test' }));
+    try {
+        const header = { type: 'header' as const, version: 1 as const, adapter: 'managed' as const, schema: 8 as const, sourceId: randomUUID(), createdAt: 1 }, restore = await backup.beginRestore(actor, header, [{ sourceId: actor.userId, destinationId: actor.userId }], 1000000), bytes = Buffer.from('x');
+        await backup.stageRecord(actor, restore.id, 999999, { type: 'file', root: 'object', path: 'private/artifacts/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002/files/0', payload: 'payloads/999999.bin', size: 1, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'application/octet-stream' });
+        await backup.stageChunk(actor, restore.id, 999999, 0, bytes.toString('base64'));
+        expect((await pool.query('select seq::text seq from private.recovery_snapshot_records where snapshot_id=$1 and seq>=1000000000', [restore.id])).rows.map(r => r.seq)).toEqual(['2999998000']);
+        await backup.finishObject(actor, restore.id, 999999);
+        const row = { type: 'row', table: 'private.audit', row: { id: randomUUID(), actor_id: actor.userId, action: 'namespace', target_id: randomUUID() } };
+        await backup.stageMetadataChunk(actor, restore.id, 999998, 0, Buffer.from(JSON.stringify(row)).toString('base64'));
+        expect((await pool.query('select seq::text seq from private.recovery_snapshot_records where snapshot_id=$1 and seq>=4000000000 order by seq', [restore.id])).rows.map(r => r.seq)).toEqual(['4000999999', '5099999800']);
+        await backup.finishMetadata(actor, restore.id, 999998);
+        expect((await pool.query('select data from private.recovery_snapshot_records where snapshot_id=$1 and seq=999998', [restore.id])).rows[0].data).toEqual(row);
+        await expect(backup.stageChunk(actor, restore.id, 1000000, 0, 'eA==')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await expect(backup.stageMetadataChunk(actor, restore.id, 1000000, 0, 'eA==')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await backup.close(actor, restore.id);
+    }
+    finally {
+        await pool.end();
+    }
+});
 it('materializes an actual consistent 5000-record managed metadata snapshot in bounded resource records', async () => {
     const pool = await database();
     await seedUsers(pool);
@@ -97,11 +120,24 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
     const originalStorage = new BackupStorage(), store = new R2Store(repo, originalStorage, queue), actor = { userId: identities.admin, role: 'admin' as const }, worker = randomUUID();
     await pool.query("insert into private.workers(id,name,token_hash) values($1,'backup worker',$2)", [worker, 'b'.repeat(64)]);
     const site = await repo.create({ domain: 'managed-recovery.example' }, actor), claim = (await queue.claim(worker))!, manifest = await store.put(site.id, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('independent managed original') }], '1'), revision = { id: randomUUID(), siteId: site.id, parentId: null, manifestId: manifest.id, kind: 'published', createdAt: 10 };
-    const state = { schema: 1, jobId: site.id, siteId: site.id, baseRevision: 0, revisionId: revision.id, manifestId: manifest.id, revisionCreatedAt: 10, parentRevisionId: null, selection: { seed: 1, styleId: 'editorial', templateVersion: '1.0.0' }, validation: { ok: true, issues: [], screenshotIds: [] }, transcript: [{ inputTokens: 5, outputTokens: 3 }], modelIdentity: 'demo' }, cp = await store.save({ ...claim.job, stage: 'completed' }, claim.lease, state, []);
-    await queue.checkpoint(claim.lease, cp, null, projectCheckpoint(cp, state, [], null));
+    const checkpointFiles = [{ path: 'snapshot.html', mediaType: 'text/html', bytes: Buffer.from('Private checkpoint source file') }];
+    const state = { schema: 1, jobId: site.id, siteId: site.id, baseRevision: 0, revisionId: revision.id, manifestId: manifest.id, revisionCreatedAt: 10, parentRevisionId: null, selection: { seed: 1, styleId: 'editorial', templateVersion: '1.0.0' }, validation: { ok: true, issues: [], screenshotIds: [] }, transcript: [{ inputTokens: 5, outputTokens: 3 }], modelIdentity: 'demo' }, cp = await store.save({ ...claim.job, stage: 'completed' }, claim.lease, state, checkpointFiles), sourceCheckpoint = (await pool.query('select metadata from private.checkpoints where id=$1', [cp.id])).rows[0].metadata;
+    const sourceFileKey = sourceCheckpoint.manifest.files[0].objectKey, sourceStateKey = sourceCheckpoint.state.objectKey;
+    await queue.checkpoint(claim.lease, cp, null, projectCheckpoint(cp, state, checkpointFiles, null));
     await queue.finish(claim.lease, 'completed');
     const publication = randomUUID();
     await repo.transaction(async (tx) => { await tx.query('insert into public.revisions values($1,$2,null,$3,$4,$5)', [revision.id, site.id, manifest.id, 'published', 10]); await tx.query('update public.sites set published_id=$2,revision=1 where id=$1', [site.id, revision.id]); await tx.query("insert into private.publication_reservations(id,site_id,request_key,binding,origin_controller_id,resolution) values($1,$2,$5,$3,$4,'settled')", [publication, site.id, { revisionId: revision.id, manifestId: manifest.id, expectedRevision: 0 }, randomUUID(), publication]); await tx.query("insert into private.provider_accounts(id) values('team_fixture')"); await tx.query("insert into private.provider_publications(id,site_id,revision_id,manifest_id,manifest_hash,account_id,phase,settlement,verified_at,evidence,data) values($1,$2,$3,$4,$5,'team_fixture','published','settled',100,$6,$7)", [publication, site.id, revision.id, manifest.id, manifestHash(manifest), { verifiedAt: 100, providerTarget: 'historical' }, { revision, policyVersion: publisherPolicyVersion, policyHash: digest(publisherConfiguration.bytes) }]); });
+    const legacyIds: string[] = [], legacyManifests: string[] = [];
+    let lastLegacyRevision = revision.id;
+    for (let i = 0; i < 8; i++) {
+        const m = await store.put(site.id, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('Legacy tied output ' + i) }], '1.0.0'), rev = randomUUID(), id = randomUUID();
+        legacyIds.push(id);
+        legacyManifests.push(m.id);
+        await repo.transaction(async (tx) => { await tx.query("select set_config('site_factory.restore_import','1',true)"); await tx.query("insert into public.revisions values($1,$2,$3,$4,'published',100)", [rev, site.id, lastLegacyRevision, m.id]); await tx.query("insert into private.publication_reservations(id,site_id,request_key,binding,origin_controller_id,resolution) values($1::uuid,$2,$1::text,$3,$4,'settled')", [id, site.id, { revisionId: rev, manifestId: m.id, expectedRevision: i + 1 }, randomUUID()]); await tx.query("insert into private.provider_publications(id,site_id,revision_id,manifest_id,manifest_hash,account_id,phase,settlement,verified_at,data) values($1,$2,$3,$4,$5,'team_fixture','published','settled',100,'{}')", [id, site.id, rev, m.id, manifestHash(m)]); });
+        lastLegacyRevision = rev;
+    }
+    await repo.transaction(tx => tx.query('update public.sites set published_id=$2,revision=9 where id=$1', [site.id, lastLegacyRevision]));
+    expect((await pool.query('select count(*) n from private.provider_publications where id=any($1::uuid[]) and settled_seq is null and settled_at is null', [legacyIds])).rows[0].n).toBe('8');
     const source = new PostgresBackup(repo, store), snapshot = await source.beginSnapshot(actor), records: {
         seq: number;
         data: any;
@@ -141,9 +177,56 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
             await target.stageChunk(admin, begun.id, seq, 0, Buffer.from(bytes).toString('base64'));
             await target.finishObject(admin, begun.id, seq);
         }
-        const report = await target.install(admin, begun.id);
-        expect(report).toMatchObject({ restoredSites: 1, restoredRevisions: 1, quarantined: true });
+        const originalQuery = pool.query.bind(pool);
+        let lookups = 0;
+        pool.query = (async (sql: any, params: any[]) => { if (String(sql).includes("data->>'source'=$2") && params?.[1] === sourceFileKey && ++lookups === 2)
+            throw new Error('deliberate checkpoint remap failure'); return originalQuery(sql, params); }) as typeof pool.query;
+        try {
+            await expect(target.install(admin, begun.id)).rejects.toThrow('deliberate checkpoint remap failure');
+            expect((await originalQuery('select count(*) n from public.sites')).rows[0].n).toBe('0');
+        }
+        finally {
+            pool.query = originalQuery as typeof pool.query;
+        }
+        let entered!: () => void, release!: () => void, released = false, earlyState = false;
+        const enteredRemap = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
+        lookups = 0;
+        pool.query = (async (sql: any, params: any[]) => { if (String(sql).includes("data->>'source'=$2")) {
+            if (params?.[1] === sourceFileKey && ++lookups === 2) {
+                entered();
+                await hold;
+            }
+            if (params?.[1] === sourceStateKey && lookups === 2 && !released)
+                earlyState = true;
+        } return originalQuery(sql, params); }) as typeof pool.query;
+        const installing = target.install(admin, begun.id);
+        let report: Awaited<typeof installing>;
+        try {
+            await enteredRemap;
+            expect(earlyState).toBe(false);
+        }
+        finally {
+            released = true;
+            release();
+            try {
+                report = await installing;
+            }
+            finally {
+                pool.query = originalQuery as typeof pool.query;
+            }
+        }
+        expect(Buffer.from((await targetStore.load(cp.id)).files[0]!.bytes)).toEqual(Buffer.from(checkpointFiles[0]!.bytes));
+        expect((await pool.query('select metadata from private.checkpoints where id=$1', [cp.id])).rows[0].metadata.manifest.files[0].objectKey).not.toBe(sourceFileKey);
+        expect(report).toMatchObject({ restoredSites: 1, restoredRevisions: 9, quarantined: true });
         expect((await repo.get(site.id))!.ownerId).toBe(destination);
+        expect((await pool.query('select count(*) n from private.provider_publications where id=any($1::uuid[]) and settled_seq is null and settled_at is null and verified_at=100', [legacyIds])).rows[0].n).toBe('8');
+        await repo.transaction(async (tx) => { await tx.query("select set_config('site_factory.restore','1',true)"); await tx.query('update private.provider_publications set cancel_requested=false where id=any($1::uuid[])', [legacyIds]); });
+        expect((await pool.query('select count(*) n from private.provider_publications where id=any($1::uuid[]) and settled_seq is null and settled_at is null', [legacyIds])).rows[0].n).toBe('8');
+        const legacyRetention = new PostgresRetention(repo, targetStorage as any), later = Date.now() + 33 * 86400000;
+        expect((await legacyRetention.planCleanup(later)).deletableManifestIds).toEqual([]);
+        expect((await legacyRetention.planCleanup(later + 86400001)).deletableManifestIds).toEqual([]);
+        for (const id of legacyManifests)
+            expect((await targetStore.read(id)).length).toBe(1);
         expect((await pool.query('select data,worker_id,expires_at from private.jobs where id=$1', [site.id])).rows[0]).toMatchObject({ data: { state: 'completed' }, worker_id: null, expires_at: null });
         expect((await pool.query('select token_hash,revoked_at from private.workers where id=$1', [worker])).rows[0].token_hash).not.toBe('b'.repeat(64));
         expect((await targetStore.read(manifest.id))[0]!.bytes).toEqual(new Uint8Array(Buffer.from('independent managed original')));

@@ -154,7 +154,18 @@ it('uploads real headless validation PNGs with exact lease provenance, authorize
         }
         const manifest = await store.put(site.id, files, '1.0.0'), state = { jobId: site.id, siteId: site.id, manifestId: manifest.id, baseRevision: 0, validation: report }, checkpoint = await store.save({ ...claim.job, stage: 'completed' }, claim.lease, state, []);
         await queue.checkpoint(claim.lease, checkpoint, null, projectCheckpoint(checkpoint, state, [], null));
-        await queue.finish(claim.lease, 'completed');
+        const staleId = 'validation/' + randomUUID() + '.png', staleFile = { ...pngs[0]!, path: staleId }, staged = await store.prepare(worker, { lease: claim.lease, purpose: 'validation', templateVersion: '1.0.0', files: [metadata(staleFile)], expectedCheckpointId: checkpoint.id });
+        await objects.put(staged.files[0]!.objectKey, staleFile.bytes, 'image/png');
+        await store.complete(worker, staged.uploadId, claim.lease);
+        await pool.query("update private.jobs set expires_at=clock_timestamp()-interval '1 second' where id=$1", [site.id]);
+        const successor = randomUUID();
+        await pool.query("insert into private.workers(id,name,token_hash) values($1,'successor',$2)", [successor, 'd'.repeat(64)]);
+        const next = (await queue.claim(successor))!, badState = { ...state, validation: { ...report, screenshotIds: [staleId] } }, bad = await store.save(next.job, next.lease, badState, []);
+        await expect(queue.checkpoint(next.lease, bad, checkpoint.id, projectCheckpoint(bad, badState, [], checkpoint.id))).rejects.toMatchObject({ code: 'STALE_LEASE' });
+        expect((await repo.current(site.id))!.checkpointId).toBe(checkpoint.id);
+        const reused = await store.save(next.job, next.lease, state, []);
+        await queue.checkpoint(next.lease, reused, checkpoint.id, projectCheckpoint(reused, state, [], checkpoint.id));
+        await queue.finish(next.lease, 'completed');
         expect(Buffer.from((await store.readValidation(site.id, checkpoint.id, report.screenshotIds[0]!)).bytes)).toEqual(Buffer.from(pngs[0]!.bytes));
         await expect(store.readValidation(randomUUID(), checkpoint.id, report.screenshotIds[0]!)).rejects.toMatchObject({ code: 'NOT_FOUND' });
         const app = createApp({ repository: repo, queue, store, backup: new PostgresBackup(repo, store), auth: { verifyUser: async (token) => ({ userId: token === 'admin' ? identities.admin : token === 'user' ? identities.user : identities.spec, role: token === 'admin' ? 'admin' : token === 'user' ? 'user' : 'spec-user' }), verifyWorker: async () => { throw new AppError('UNAUTHENTICATED', 'unused'); } } }), request = (path: string, token = 'spec') => app(new Request('https://control.test' + path, { headers: { authorization: 'Bearer ' + token } })), path = `/sites/${site.id}/validation?checkpointId=${checkpoint.id}&imageId=${report.screenshotIds[0]}`;
@@ -162,7 +173,7 @@ it('uploads real headless validation PNGs with exact lease provenance, authorize
         expect((await request(path, 'user')).status).toBe(404);
         expect((await request(`/sites/${site.id}/source?revisionId=${randomUUID()}`)).status).toBe(403);
         const backup = new PostgresBackup(repo, store), snapshot = await backup.beginSnapshot(admin), pngRecords = (await pool.query("select seq,data from private.recovery_snapshot_records where snapshot_id=$1 and data->>'type'='file' and data->>'mediaType'='image/png'", [snapshot.id])).rows;
-        expect(pngRecords).toHaveLength(2);
+        expect(pngRecords).toHaveLength(3);
         for (const record of pngRecords) {
             let bytes = Buffer.alloc(0);
             for (let offset = 0;;) {

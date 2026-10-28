@@ -70,9 +70,43 @@ export class NativeArchives {
     private restored = false;
     constructor(readonly deps: NativeArchiveDeps) { }
     private directory() { return privateDirectory(join(this.deps.baseRoot, '.exports')); }
-    private async call(remote: Remote, path: string, body?: unknown) { const response = await (this.deps.fetch ?? fetch)(remote.origin + path, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', cache: 'no-store', headers: { authorization: 'Bearer ' + remote.accessToken, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30000) }); if (!response.ok)
-        throw new AppError(response.status === 403 ? 'FORBIDDEN' : response.status === 409 ? 'CONFLICT' : 'UNAVAILABLE', 'Операция копии отклонена сервером (' + response.status + ').'); const bytes = await response.arrayBuffer(); if (bytes.byteLength > 64000)
-        throw new AppError('INVALID_INPUT', 'Ответ копии превышает лимит.'); return JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(bytes)) as any; }
+    private async call(remote: Remote, path: string, body?: unknown) {
+        const method = body === undefined ? 'GET' : 'POST', deadline = method === 'POST' && path === '/admin/recovery/snapshots' ? 180000 : 30000;
+        const response = await (this.deps.fetch ?? fetch)(remote.origin + path, { method, redirect: 'error', cache: 'no-store', headers: { authorization: 'Bearer ' + remote.accessToken, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(deadline) });
+        const reader = response.body?.getReader(), parts: Uint8Array[] = [];
+        let size = 0;
+        if (reader)
+            try {
+                for (;;) {
+                    const part = await reader.read();
+                    if (part.done)
+                        break;
+                    size += part.value.length;
+                    if (size > 64000)
+                        throw new AppError('INVALID_INPUT', 'Ответ копии превышает лимит.');
+                    parts.push(part.value);
+                }
+            }
+            finally {
+                await reader.cancel().catch(() => { });
+                reader.releaseLock();
+            }
+        let value: any;
+        try {
+            value = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(Buffer.concat(parts)));
+        }
+        catch {
+            if (response.ok)
+                throw new AppError('INVALID_INPUT', 'Ответ копии повреждён.');
+        }
+        if (!response.ok) {
+            const error = value?.error, codes = ['UNAUTHENTICATED', 'FORBIDDEN', 'NOT_FOUND', 'INVALID_INPUT', 'DUPLICATE_DOMAIN', 'CONFLICT', 'STALE_LEASE', 'UNAVAILABLE', 'PROVIDER_WAIT', 'NEEDS_ATTENTION'];
+            if (value && typeof value === 'object' && Object.keys(value).every(k => k === 'error' || k === 'requestId') && typeof value.requestId === 'string' && /^[a-f0-9-]{36}$/i.test(value.requestId) && error && typeof error === 'object' && Object.keys(error).length === 2 && codes.includes(error.code) && typeof error.message === 'string' && error.message.length > 0 && error.message.length <= 1000 && !/[\x00-\x1f]/.test(error.message))
+                throw new AppError(error.code, error.message);
+            throw new AppError(response.status === 403 ? 'FORBIDDEN' : response.status === 409 ? 'CONFLICT' : 'UNAVAILABLE', 'Операция копии отклонена сервером (' + response.status + ').');
+        }
+        return value;
+    }
     private async context(value: unknown): Promise<Context> { if (value === undefined || value === null)
         return { actor: { userId: 'local-demo-admin', role: 'admin' }, remote: null, sessionId: this.localSession }; const p = object(value, ['origin', 'accessToken']), url = new URL(string(p.origin, 2048)), accessToken = string(p.accessToken, 8192); if (url.protocol !== 'https:' || url.pathname !== '/' || url.username || url.password || url.search || url.hash || /[\x00-\x1f]/.test(accessToken))
         throw new AppError('INVALID_INPUT', 'Неверное настроенное подключение.'); const remote = { origin: url.origin, accessToken }, session = await this.call(remote, '/session'); if (session?.principal?.role !== 'admin' || session?.capabilities?.admin !== true)
@@ -136,7 +170,7 @@ export class NativeArchives {
         result.push({ path, size: bytes.length, sha256: digest(bytes), read: () => readRegular(join(root, path), 2000000) });
     } return { files: result, versions: styles.map(s => s.id + '@' + s.version) }; }
     private async managedBackup(op: Operation, context: Context, passphrase: string) {
-        const remote = context.remote!, snapshot = await this.call(remote, '/admin/recovery/snapshots', {}), id = uuid(snapshot.id), count = integer(snapshot.records, 1, 500000), directory = await this.directory(), self = this;
+        const remote = context.remote!, snapshot = await this.call(remote, '/admin/recovery/snapshots', {}), id = uuid(snapshot.id), count = integer(snapshot.records, 1, 1000000), directory = await this.directory(), self = this;
         try {
             async function* entries(): AsyncGenerator<BackupEntry> {
                 for (let seq = 0; seq < count; seq++) {
@@ -156,8 +190,9 @@ export class NativeArchives {
                             yield { name: 'records/' + extra++ + '.json', size: value.length, sha256: digest(value), read: async () => value };
                         }
                         for (const file of catalog.files) {
-                            const name = 'payloads/catalog-' + extra + '.bin'; // Fixed numeric namespace shared with the archive validator.
-                            const payload = 'payloads/' + (100000 + extra) + '.bin', metadata: RecoveryRecord = { type: 'file', root: 'catalog', path: file.path, payload, size: file.size, sha256: file.sha256, mediaType: 'application/octet-stream' }, encoded = Buffer.from(JSON.stringify(metadata));
+                            if (extra >= 1000000)
+                                throw new AppError('INVALID_INPUT', 'Опись каталога превышает ёмкость копии.');
+                            const payload = 'payloads/' + extra + '.bin', metadata: RecoveryRecord = { type: 'file', root: 'catalog', path: file.path, payload, size: file.size, sha256: file.sha256, mediaType: 'application/octet-stream' }, encoded = Buffer.from(JSON.stringify(metadata));
                             yield { name: 'records/' + extra++ + '.json', size: encoded.length, sha256: digest(encoded), read: async () => encoded };
                             yield { name: payload, size: file.size, sha256: file.sha256, read: file.read };
                         }
@@ -170,23 +205,26 @@ export class NativeArchives {
             await this.call(remote, `/admin/recovery/snapshots/${id}/close`, {}).catch(() => { });
         }
     }
-    private async remoteSource(remote: Remote, siteId: string, revisionId: string) { const snapshot = await this.call(remote, `/sites/${siteId}/export`, { revisionId }), id = uuid(snapshot.id), count = integer(snapshot.records, 0, 100); try {
-        const result = [];
-        for (let seq = 0; seq < count; seq++) {
-            const encoded = await this.chunked(remote, `/admin/recovery/snapshots/${id}/record?seq=${seq}`, 64000), record = JSON.parse(encoded.toString('utf8'));
-            if (record.type !== 'file' || typeof record.sourcePath !== 'string')
-                throw new AppError('INVALID_INPUT', 'Неверная опись исходников.');
-            const bytes = await this.chunked(remote, `/admin/recovery/snapshots/${id}/resource?seq=${seq}`, 2000000);
-            if (bytes.length !== record.size || digest(bytes) !== record.sha256)
-                throw new AppError('INVALID_INPUT', 'Исходный файл повреждён.');
-            result.push({ path: record.sourcePath, mediaType: record.mediaType, bytes });
+    private async remoteSource(remote: Remote, siteId: string, revisionId: string) {
+        const snapshot = await this.call(remote, `/sites/${siteId}/export`, { revisionId }), id = uuid(snapshot.id), count = integer(snapshot.records, 0, 100);
+        try {
+            const result = [];
+            for (let seq = 0; seq < count; seq++) {
+                const encoded = await this.chunked(remote, `/admin/recovery/snapshots/${id}/record?seq=${seq}`, 64000), record = JSON.parse(encoded.toString('utf8'));
+                if (record.type !== 'file' || typeof record.sourcePath !== 'string')
+                    throw new AppError('INVALID_INPUT', 'Неверная опись исходников.');
+                const bytes = await this.chunked(remote, `/admin/recovery/snapshots/${id}/resource?seq=${seq}`, 2000000);
+                if (bytes.length !== record.size || digest(bytes) !== record.sha256)
+                    throw new AppError('INVALID_INPUT', 'Исходный файл повреждён.');
+                result.push({ path: record.sourcePath, mediaType: record.mediaType, bytes });
+            }
+            checkArtifacts(result);
+            return result;
         }
-        checkArtifacts(result);
-        return result;
+        finally {
+            await this.call(remote, `/admin/recovery/snapshots/${id}/close`, {}).catch(() => { });
+        }
     }
-    finally {
-        await this.call(remote, `/admin/recovery/snapshots/${id}/close`, {}).catch(() => { });
-    } }
     private async source(context: Context, siteId: string, revisionId: string) { if (context.remote)
         return this.remoteSource(context.remote, siteId, revisionId); return createSourceFiles({ admin: async (actor) => { if (actor.role !== 'admin')
             throw new AppError('FORBIDDEN', 'Нет доступа.'); }, revision: async (s, r) => { const revision = await this.deps.revisions.get(r); return revision?.siteId === s ? revision : null; }, read: id => this.deps.artifacts.read(id) }).files(context.actor, siteId, revisionId); }

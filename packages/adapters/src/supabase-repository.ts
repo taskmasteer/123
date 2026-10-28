@@ -42,8 +42,69 @@ type DbSite = {
 };
 const siteSelect = `select s.*,coalesce((select array_agg(distinct a.user_id) from (select user_id from public.assignments where site_id=s.id union select a.user_id from private.batch_assignments a join private.batch_rows r on r.batch_id=a.batch_id where r.site_id=s.id) a),'{}') assigned from public.sites s`;
 function site(row: DbSite): Site { return { id: row.id, domain: row.domain, ownerId: row.owner_id, assignedUserIds: row.assigned, input: row.input, revision: row.revision, draftId: row.draft_id, publishedId: row.published_id, generationStatus: row.generation_status, domainStatus: row.domain_status }; }
+const snapshotModes = new WeakMap<Pool, 'direct' | 'session' | 'transaction' | 'unknown'>();
+/** Trusted deployment declaration, never inferred from URL/port or a lock probe. */
+export function configureSnapshotConnection(pool: Pool, mode: unknown) { snapshotModes.set(pool, mode === 'direct' || mode === 'session' || mode === 'transaction' ? mode : 'unknown'); return pool; }
 export class SupabaseRepository {
     constructor(readonly pool: Pool) { }
+    requireSnapshotConnection() { const mode = snapshotModes.get(this.pool); if (mode !== 'direct' && mode !== 'session')
+        throw new AppError('UNAVAILABLE', 'Для согласованной копии DATABASE_CONNECTION_MODE должен явно указывать direct или session. Transaction pooler и неизвестный режим не поддерживают сессионную блокировку.'); }
+    /** Session fence precedes BEGIN RR: the MVCC snapshot must be AFTER a queued collector. */
+    async captureSnapshot<T>(action: (tx: SqlTransaction) => Promise<T>, freshAfterCommit: (tx: SqlTransaction) => Promise<void>): Promise<T> { this.requireSnapshotConnection(); const tx = await this.pool.connect(), started = performance.now(), guard = () => { if (performance.now() - started > 105000)
+        throw new AppError('NEEDS_ATTENTION', 'Снимок превысил двухминутный бюджет SQL; источник сохранён.'); }, bounded = new Proxy(tx, { get(target, key) { if (key === 'query')
+            return (...args: any[]) => { guard(); return (target.query as any)(...args); }; const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; } }); let locked = false, open = false, result: T | undefined, failure: unknown, destroy: Error | undefined; try {
+        await tx.query("set statement_timeout='15s'");
+        await tx.query('select pg_advisory_lock_shared(73212,1)');
+        locked = true;
+        await tx.query('begin isolation level repeatable read');
+        open = true;
+        await tx.query("set local work_mem='4MB'");
+        result = await action(bounded);
+        guard();
+        await tx.query('commit');
+        open = false;
+        await freshAfterCommit(bounded);
+    }
+    catch (error) {
+        failure = error;
+        if (!locked)
+            destroy = error instanceof Error ? error : new Error('Uncertain snapshot fence');
+        if (open)
+            try {
+                await tx.query('rollback');
+                open = false;
+            }
+            catch (rollback) {
+                destroy = rollback instanceof Error ? rollback : new Error('Snapshot rollback failed');
+            }
+    }
+    finally {
+        if (locked)
+            try {
+                const unlocked = (await tx.query('select pg_advisory_unlock_shared(73212,1) unlocked')).rows[0]?.unlocked;
+                if (unlocked !== true)
+                    throw new Error('Snapshot session fence not released');
+            }
+            catch (error) {
+                destroy = error instanceof Error ? error : new Error('Snapshot unlock failed');
+                failure ??= new AppError('UNAVAILABLE', 'Не удалось подтвердить освобождение снимка; соединение закрыто.');
+            }
+        if (!destroy)
+            try {
+                await tx.query('reset statement_timeout');
+            }
+            catch (error) {
+                destroy = error instanceof Error ? error : new Error('Snapshot session reset failed');
+                failure ??= new AppError('UNAVAILABLE', 'Не удалось завершить сеанс снимка; соединение закрыто.');
+            }
+        tx.release(destroy);
+    } if (failure) {
+        if ((failure as {
+            code?: string;
+        }).code === '57014')
+            throw new AppError('NEEDS_ATTENTION', 'SQL-обработка снимка превысила 15 секунд на один запрос. Источник сохранён.');
+        throw failure;
+    } return result!; }
     async transaction<T>(action: (tx: SqlTransaction) => Promise<T>, fence: 'shared' | 'exclusive' = 'shared'): Promise<T> {
         const tx = await this.pool.connect();
         try {

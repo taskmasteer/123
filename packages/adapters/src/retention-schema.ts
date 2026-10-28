@@ -3,6 +3,7 @@ import type { PayloadRef, PayloadInventory, CheckpointProjection } from '../../c
 import { AppError } from '../../contracts/src/model.js';
 /** All functions here are synchronous and run on the controller's already owned DB. */
 export function initializeRecovery(sql: DatabaseSync) {
+    sql.exec('pragma temp_store=FILE;pragma cache_size=-4096;');
     sql.exec(`create table if not exists payload_inventory(kind text not null,id text not null,site_id text,data text not null,state text not null,first_orphan_at integer,claim_token text,primary key(kind,id)) strict;
  create table if not exists payload_edges(owner_kind text not null,owner_id text not null,purpose text not null,target_kind text not null,target_id text not null,primary key(owner_kind,owner_id,purpose,target_kind,target_id)) strict;
  create table if not exists checkpoint_evidence(id text primary key,job_id text not null,data text not null) strict;
@@ -16,10 +17,16 @@ export function initializeRecovery(sql: DatabaseSync) {
         for (const action of ['update', 'delete'])
             sql.exec(`create trigger if not exists immutable_${table}_${action} before ${action} on ${table} begin select raise(abort,'Immutable recovery evidence'); end;`);
     sql.exec(`create trigger if not exists immutable_payload_objects before update on payload_inventory when (old.state in ('claimed','deleted') and new.state not in ('claimed','deleted')) or new.kind!=old.kind or new.id!=old.id or json_extract(new.data,'$.objects') is not json_extract(old.data,'$.objects') begin select raise(abort,'Immutable payload composition'); end;`);
-    sql.function('assert_payload', (kind, id) => { if (typeof id === 'string')
-        assertLocalPayload(sql, { kind: String(kind) as PayloadRef['kind'], id }); return 1; });
-    sql.function('assert_recovery_mutable', () => { if (sql.prepare("select 1 from recovery_state where key='quarantine'").get())
-        throw new AppError('CONFLICT', 'Восстановленная установка ожидает сверки.'); return 1; });
+    sql.function('assert_payload', (kind, id) => {
+        if (typeof id === 'string')
+            assertLocalPayload(sql, { kind: String(kind) as PayloadRef['kind'], id });
+        return 1;
+    });
+    sql.function('assert_recovery_mutable', () => {
+        if (sql.prepare("select 1 from recovery_state where key='quarantine'").get())
+            throw new AppError('CONFLICT', 'Восстановленная установка ожидает сверки.');
+        return 1;
+    });
     for (const table of ['sites', 'jobs', 'records', 'batches', 'batch_rows', 'resources', 'chunks', 'operations'])
         for (const action of ['insert', 'update', 'delete'])
             sql.exec(`create trigger if not exists recovery_gate_${table}_${action} before ${action} on ${table} begin select assert_recovery_mutable(); end;`);

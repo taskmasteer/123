@@ -1,4 +1,7 @@
-import {it,expect,afterEach} from 'vitest';
+import * as editingModule from '../../../packages/core/src/editing.js';
+import { existingLocalDatabase } from '../../../packages/adapters/src/local-database.js';
+import { vi } from 'vitest';
+import { randomUUID } from 'node:crypto';import {it,expect,afterEach} from 'vitest';
 import {resolve} from 'node:path';
 import {createDesktopRuntime} from '../src/desktop-runtime.js';
 import {directory,cleanDirectories} from './fixtures.js';
@@ -104,3 +107,75 @@ it('resumes an interrupted generation after closing and reopening the controller
   expect((await request('site.list')).items[0].publishedId).toBeTruthy();
  }finally{await runtime.close();}
 },30000);
+it.each(['edit.accept', 'site.publish'])('drains the actual delayed%s promise before snapshot or close', async (method) => {
+    const original = editingModule.createEditing;
+    let entered!: () => void, release!: () => void;
+    const called = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
+    let database: Awaited<ReturnType<typeof existingLocalDatabase>>;
+    const spy = vi.spyOn(editingModule, 'createEditing').mockImplementation(deps => ({ ...original(deps), [method === 'edit.accept' ? 'acceptCandidate' : 'publish']: async () => { entered(); await hold; database!.transaction(() => database!.sql.prepare('insert into metadata values(?,?)').run('delayed-' + method, 'settled')); return {}; } }));
+    const root = await directory(), runtime = await createDesktopRuntime(root, resolve('.'), { native: true }), request = (name: string, params: unknown = {}) => runtime.request({ id: 'delayed', version: 1, method: name, params });
+    database = await existingLocalDatabase(root);
+    let captureEntered = false, captureRelease!: () => void;
+    const captureHold = new Promise<void>(r => captureRelease = r), snapshot = database!.snapshot.bind(database);
+    database!.snapshot = async (target) => { captureEntered = true; await captureHold; return snapshot(target); };
+    let requestWork: Promise<unknown> | undefined;
+    try {
+        requestWork = request(method, { siteId: randomUUID(), ...(method === 'edit.accept' ? { candidateId: randomUUID() } : {}), expectedRevision: 0 });
+        await called;
+        const operation = await runtime.archive({ action: 'backup', passphrase: 'delayed operation test' }) as {
+            id: string;
+        };
+        await expect.poll(async () => { try {
+            await request('device.status');
+            return false;
+        }
+        catch (e: any) {
+            return e.code === 'CONFLICT';
+        } }).toBe(true);
+        expect(captureEntered).toBe(false);
+        release();
+        await requestWork;
+        await expect.poll(() => captureEntered).toBe(true);
+        captureRelease();
+        await expect.poll(async () => (await runtime.archive({ action: 'status', id: operation.id }) as any).state, { timeout: 15000 }).toBe('ready');
+        expect(database!.sql.prepare('select value from metadata where key=?').get('delayed-' + method)?.value).toBe('settled');
+    }
+    finally {
+        release();
+        captureRelease();
+        await requestWork?.catch(() => { });
+        await runtime.close();
+        spy.mockRestore();
+    }
+}, 30000);
+it.each(['edit.accept', 'site.publish'])('does not close persistence before delayed%s settles', async (method) => {
+    const original = editingModule.createEditing;
+    let entered!: () => void, release!: () => void;
+    const called = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
+    let database: Awaited<ReturnType<typeof existingLocalDatabase>>;
+    const spy = vi.spyOn(editingModule, 'createEditing').mockImplementation(deps => ({ ...original(deps), [method === 'edit.accept' ? 'acceptCandidate' : 'publish']: async () => { entered(); await hold; database!.sql.prepare('insert into metadata values(?,?)').run('close-' + method, 'settled'); return {}; } }));
+    const root = await directory(), runtime = await createDesktopRuntime(root, resolve('.'), { native: true });
+    database = await existingLocalDatabase(root);
+    let closeEntered = false;
+    const closeDatabase = database!.close.bind(database);
+    database!.close = async () => { closeEntered = true; await closeDatabase(); };
+    let closing: Promise<void> | undefined, work: Promise<unknown> | undefined;
+    try {
+        work = runtime.request({ id: 'close', version: 1, method, params: { siteId: randomUUID(), ...(method === 'edit.accept' ? { candidateId: randomUUID() } : {}), expectedRevision: 0 } });
+        await called;
+        closing = runtime.close();
+        await new Promise(setImmediate);
+        expect(closeEntered).toBe(false);
+        release();
+        await work;
+        await closing;
+        expect(closeEntered).toBe(true);
+    }
+    finally {
+        release();
+        await work?.catch(() => { });
+        await closing;
+        await runtime.close();
+        spy.mockRestore();
+    }
+});

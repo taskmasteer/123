@@ -11,6 +11,22 @@ import { orphanGraceMs } from '../../core/src/retention.js';
 import { createCheckpointStore } from '../src/local-checkpoints.js';
 import { createLocalQueue } from '../src/local-queue.js';
 import { createLocalState } from '../src/local-state.js';
+it('keeps subject closure conservative for an unknown checkpoint protected only by a read pin', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'retention-pin-')), db = await openLocalDatabase(root), siteId = randomUUID(), checkpointId = randomUUID(), now = Date.now() + 32 * orphanGraceMs;
+    try {
+        const store = await createLocalArtifacts(join(root, 'artifacts'), { now: () => 1 }), artifact = await store.put(siteId, [{ path: 'index.html', mediaType: 'text/html', bytes: Buffer.from('unknown dependency') }], '1'), collector = new LocalRetention(db);
+        db.transaction(() => { registerLocalPayload(db.sql, { kind: 'checkpoint', id: checkpointId, siteId, objects: [], accepted: false, createdAt: 1, protectUntil: 0, state: 'available', firstOrphanAt: null, claimToken: null }); db.sql.prepare('insert into payload_pins values(?,?,?,?)').run('unknown-read', 'checkpoint', checkpointId, now + 10 * orphanGraceMs); });
+        expect((await collector.planCleanup(now)).deletableManifestIds).toEqual([]);
+        expect((await collector.planCleanup(now + orphanGraceMs)).deletableManifestIds).toEqual([]);
+        db.sql.prepare('delete from payload_pins where id=?').run('unknown-read');
+        expect((await collector.planCleanup(now + 2 * orphanGraceMs)).deletableManifestIds).toEqual([]);
+        expect((await collector.planCleanup(now + 3 * orphanGraceMs)).deletableManifestIds).toEqual([artifact.id]);
+    }
+    finally {
+        await db.close();
+        await rm(root, { recursive: true, force: true });
+    }
+});
 it('collects only two of eight settled output states after grace and fences a stale new reference', async () => {
     const root = await mkdtemp(join(tmpdir(), 'retention-')), db = await openLocalDatabase(root);
     let now = 0;

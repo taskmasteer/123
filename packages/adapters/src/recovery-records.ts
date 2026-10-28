@@ -109,7 +109,7 @@ export async function validateRecovery(entries: RestoreEntries, adapter: 'local'
             if (record) {
                 count++;
                 bytes += e.size;
-                if (e.size > 1000000 || count > 500000 || bytes > 256 * 1024 ** 2)
+                if (e.size > 1000000 || count > 1000000 || bytes > 768 * 1024 ** 2)
                     throw new AppError('INVALID_INPUT', 'Метаданные превышают проверенную ёмкость копии.');
             }
             else
@@ -157,12 +157,15 @@ export async function validateRecovery(entries: RestoreEntries, adapter: 'local'
         }
         if (Number(db.prepare("select count(*) n from entries where kind='payload' and used=0").get()!.n))
             throw new AppError('INVALID_INPUT', 'Лишнее содержимое копии.');
-        return { header, rows, payloads: { size: payloadCount, get(name: string) { const read = new DatabaseSync(path, { readOnly: true }); try {
-                    return read.prepare("select name,size,sha256,file from entries where kind='payload' and name=?").get(name) as RestoreEntry | undefined;
-                }
-                finally {
-                    read.close();
-                } } } };
+        return { header, rows, payloads: { size: payloadCount, get(name: string) {
+                    const read = new DatabaseSync(path, { readOnly: true });
+                    try {
+                        return read.prepare("select name,size,sha256,file from entries where kind='payload' and name=?").get(name) as RestoreEntry | undefined;
+                    }
+                    finally {
+                        read.close();
+                    }
+                } } };
     }
     finally {
         db.close();

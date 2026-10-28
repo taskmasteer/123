@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { preflightLocal } from './retention-sql.js';import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { opendir, lstat, mkdtemp, rm, rename, copyFile, open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
@@ -44,12 +44,14 @@ export class LocalBackup {
     async createBackup(actor: Principal, passphrase: string) {
         authorize(actor, 'site:export');
         await new LocalRetention(this.db).backfill(await createCheckpointStore(join(this.db.root, 'checkpoints'), { now: Date.now }));
+        preflightLocal(this.db.sql, true);
         await this.verifyPayloads(this.db);
         await this.verifyCatalog(this.db, this.sourceRoot);
         const output = await privateDirectory(this.directory), stage = await mkdtemp(join(output, '.snapshot-')), pin = randomUUID();
         let snapshot: DatabaseSync | undefined;
         try {
             await this.quiesce(async () => {
+                preflightLocal(this.db.sql, true);
                 this.db.transaction(() => {
                     for (const row of this.db.sql.prepare("select kind,id from payload_inventory where state='available'").iterate())
                         this.db.sql.prepare('insert into payload_pins values(?,?,?,?)').run(pin, String(row.kind), String(row.id), Date.now() + 3600000);

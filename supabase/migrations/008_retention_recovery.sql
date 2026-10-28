@@ -4,7 +4,8 @@ alter table private.upload_preparations add check(purpose in ('artifact','checkp
 create sequence private.publication_settled_sequence;
 alter table private.provider_publications add column settled_seq bigint,add column settled_at bigint;
 create function private.stamp_publication_settlement() returns trigger language plpgsql set search_path='' as $$ begin
- if new.settlement='settled' and new.settled_seq is null then new.settled_seq=nextval('private.publication_settled_sequence');new.settled_at=floor(extract(epoch from clock_timestamp())*1000);end if;return new;end $$;
+ if current_setting('site_factory.restore_import',true)='1' then return new;end if;
+ if new.settlement='settled' and new.verified_at is not null and new.settled_seq is null and (tg_op='INSERT' or old.settlement is distinct from 'settled' or old.verified_at is null) then new.settled_seq=nextval('private.publication_settled_sequence');new.settled_at=floor(extract(epoch from clock_timestamp())*1000);end if;return new;end $$;
 create trigger stamp_publication_settlement before insert or update on private.provider_publications for each row execute function private.stamp_publication_settlement();
 revoke all on sequence private.publication_settled_sequence from public,anon,authenticated;
 revoke all on function private.stamp_publication_settlement() from public,anon,authenticated;
