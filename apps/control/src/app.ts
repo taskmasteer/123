@@ -1,4 +1,7 @@
 import { batchesRoute } from './routes/batches.js';
+import { historyRoute } from './routes/history.js';
+import { recoveryRoute } from './routes/recovery.js';
+import type { PostgresBackup } from '../../../packages/adapters/src/postgres-backup.js';
 import { SignJWT, jwtVerify } from 'jose';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import type { SessionView } from '../../../packages/contracts/src/http.js';
@@ -22,6 +25,7 @@ import { jobControlsRoute } from './routes/job-controls.js';
 import type { PostgresPublication } from '../../../packages/adapters/src/postgres-publication.js';
 import { publicationRoute } from './routes/publication.js';
 export interface AppDependencies {
+    backup?: PostgresBackup;
     auth: Auth;
     repository: SupabaseRepository;
     queue?: PostgresQueue;
@@ -130,7 +134,8 @@ export function createApp(deps: Partial<AppDependencies>) {
             }
             const actor = await deps.auth.verifyUser(token), repo = deps.repository;
             if (url.pathname === '/session' && request.method === 'GET') {
-                const result: SessionView = { principal: actor, mode: 'managed', capabilities: { admin: actor.role === 'admin', edit: actor.role !== 'user', generation: !!deps.queue && !!deps.store, publish: !!deps.publication, export: false, preview: !!deps.store && !!deps.previewKey, nativeModelSettings: false } };
+                const current = await repo.transaction(tx => repo.fresh(tx, actor));
+                const result: SessionView = { principal: current, mode: 'managed', capabilities: { admin: current.role === 'admin', edit: current.role !== 'user', generation: !!deps.queue && !!deps.store, publish: !!deps.publication, export: false, preview: !!deps.store && !!deps.previewKey, nativeModelSettings: false } };
                 return finish(json(result));
             }
             if (url.pathname === '/admin/integrations' && request.method === 'GET') {
@@ -154,13 +159,18 @@ export function createApp(deps: Partial<AppDependencies>) {
                 return finish(json({ url: `${deps.publicOrigin}/preview/${siteId}/${revisionId}/index.html?cap=${cap}` }));
             }
             const data = await body(request);
+            const recovery = await recoveryRoute(deps.backup, actor, request, url, data, deps.publication);
+            if (recovery !== undefined)
+                return finish(json(recovery));
+            if (/\/(visual|candidates|chat|publication|publish|edits)(?:\/|$)/.test(url.pathname) && (await repo.pool.query("select 1 from private.recovery_state where key='quarantine'")).rowCount)
+                throw new AppError('CONFLICT', 'Восстановленная установка ожидает проверки; автоматическая обработка приостановлена.');
             const publication = await publicationRoute(deps.publication, actor, request, url.pathname, data);
             if (publication !== undefined)
                 return finish(json(publication));
             const control = await jobControlsRoute(deps.queue, deps.store, actor, request, url.pathname, data);
             if (control !== undefined)
                 return finish(json(control));
-            for (const route of [() => visualRoute(repo,deps.store,actor,request,url,data),() => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
+            for (const route of [() => historyRoute(repo, deps.store, deps.publication, actor, request, url, data, deps.backup), () => visualRoute(repo, deps.store, actor, request, url, data), () => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
                 const result = await route();
                 if (result !== undefined)
                     return finish(json(result));

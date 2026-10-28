@@ -1,3 +1,4 @@
+import { assertLocalPayload, registerLocalPayload } from './retention-schema.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { PNG } from 'pngjs';
 import { crc32, inflateSync } from 'node:zlib';
@@ -21,8 +22,8 @@ interface Resource {
 }
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 /** Validate the one header pngjs will consume, then bound inflation before its allocations. */
-function logoPreflight(bytes: Buffer) {
-    if (bytes.length < 45 || bytes.length > 2000000 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a')
+function logoPreflight(bytes: Buffer, limits = { bytes: 2000000, width: 2048, height: 2048 }) {
+    if (bytes.length < 45 || bytes.length > limits.bytes || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a')
         throw new Error('PNG source size/signature');
     let width = 0, height = 0, depth = 0, channels = 0, interlace = 0, ended = false, dataEnded = false;
     const idat: Buffer[] = [];
@@ -45,7 +46,7 @@ function logoPreflight(bytes: Buffer) {
             const depths: Record<number, number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
             channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[color] ?? 0;
             interlace = bytes[offset + 20]!;
-            if (width < 1 || width > 2048 || height < 1 || height > 2048 || !depths[color]?.includes(depth) || bytes[offset + 18] !== 0 || bytes[offset + 19] !== 0 || interlace > 1)
+            if (width < 1 || width > limits.width || height < 1 || height > limits.height || !depths[color]?.includes(depth) || bytes[offset + 18] !== 0 || bytes[offset + 19] !== 0 || interlace > 1)
                 throw new Error('Unsupported PNG header');
         }
         else if (!width) {
@@ -103,6 +104,18 @@ export function decodeLogo(bytes: Buffer): ArtifactFile {
     }
     return { path: 'assets/logo.png', bytes: new Uint8Array(bytes), mediaType: 'image/png' };
 }
+export function verifyValidationPng(bytes: Uint8Array) { try {
+    const header = logoPreflight(Buffer.from(bytes), { bytes: 8000000, width: 1440, height: 900 });
+    if (![375, 1440].includes(header.width) || header.height !== 900)
+        throw new Error('Validation viewport mismatch');
+    const decoded = PNG.sync.read(Buffer.from(bytes), { checkCRC: true });
+    if (decoded.width !== header.width || decoded.height !== 900)
+        throw new Error('PNG mismatch');
+    return header;
+}
+catch (error) {
+    throw new AppError('INVALID_INPUT', 'Снимок проверки: PNG375/1440×900 до8МБ.', { cause: error });
+} }
 export class LocalImportResources {
     constructor(readonly batches: LocalBatches) { }
     private resource(actor: Principal, id: string): Resource {
@@ -111,9 +124,11 @@ export class LocalImportResources {
             throw new AppError('NOT_FOUND', 'Ресурс не найден.');
         if (row.owner_id !== actor.userId)
             throw new AppError('FORBIDDEN', 'Чужой ресурс.');
+        assertLocalPayload(this.batches.db.sql, { kind: 'resource', id });
         return JSON.parse(String(row.data)) as Resource;
     }
     private bytes(resource: Resource) {
+        assertLocalPayload(this.batches.db.sql, { kind: 'resource', id: resource.id });
         const rows = this.batches.db.sql.prepare('select part,bytes from chunks where resource_id=? order by part').all(resource.id);
         if (rows.some((r, i) => r.part !== i))
             throw new AppError('INVALID_INPUT', 'Не хватает фрагментов.');
@@ -152,6 +167,7 @@ export class LocalImportResources {
                         throw new AppError('NOT_FOUND', 'Строка не найдена.');
                     Object.assign(r, { draftId, rowNumber, revision: d.summary.revision });
                 }
+                registerLocalPayload(db.sql, { kind: 'resource', id, siteId: null, createdAt: Date.now(), protectUntil: Date.now() + 600000, state: 'staging', firstOrphanAt: null, claimToken: null, objects: [{ key: 'database:chunks:' + id, size: r.size, sha256: r.sha256, mediaType: logo ? 'image/png' : 'application/octet-stream' }] });
                 db.sql.prepare('insert into resources values(?,?,?)').run(id, actor.userId, JSON.stringify(r));
             });
             return { id };
@@ -201,7 +217,7 @@ export class LocalImportResources {
                 });
                 await new Promise<void>(resolve => setImmediate(resolve));
             }
-            db.transaction(() => { const draft = this.batches.read(actor, id, true); draft.summary.state = 'preview'; this.batches.save(draft); r.complete = true; db.sql.prepare('update resources set data=? where id=?').run(JSON.stringify(r), id); });
+            db.transaction(() => { const draft = this.batches.read(actor, id, true); draft.summary.state = 'preview'; this.batches.save(draft); r.complete = true; assertLocalPayload(db.sql, { kind: 'resource', id: r.id }); db.sql.prepare("update payload_inventory set state='available' where kind='resource' and id=?").run(r.id); db.sql.prepare('update resources set data=? where id=?').run(JSON.stringify(r), id); });
             return this.batches.get(actor, id);
         }
         if (method === 'import.update') {
@@ -238,6 +254,8 @@ export class LocalImportResources {
                 const views = this.batches.rows(r.draftId!), originals = new Map(views.map(r => [r.rowNumber, rowFingerprint(r)])), row = views.find(v => v.rowNumber === r.rowNumber)!;
                 row.input.logoAssetId = r.id;
                 r.complete = true;
+                assertLocalPayload(db.sql, { kind: 'resource', id: r.id });
+                db.sql.prepare("update payload_inventory set state='available' where kind='resource' and id=?").run(r.id);
                 db.sql.prepare('update resources set data=? where id=?').run(JSON.stringify(r), r.id);
                 this.revalidate(r.draftId!, views, d, originals);
             });

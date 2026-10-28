@@ -4,6 +4,7 @@ import { object, integer, leaseDto, siteView, string, uuid } from '../../../pack
 import { validJob } from '../../../packages/adapters/src/local-queue.js';
 import { checkArtifacts } from '../../../packages/core/src/artifacts.js';
 import { uploadResources } from './remote-uploads.js';
+import { validateSite } from './validation/browser.js';
 import type { WorkerDeps } from './pipeline.js';
 export function controlOrigin(value: string) {
     const url = new URL(value);
@@ -32,7 +33,7 @@ export function createRemoteWorker(options: {
     controlOrigin: string;
     workerId: string;
     workerToken: string;
-    claimMode?:'all'|'visual';
+    claimMode?: 'all' | 'visual';
     fetch?: typeof fetch;
 }, local: WorkerDeps): WorkerDeps {
     const origin = controlOrigin(options.controlOrigin), transport = options.fetch ?? fetch;
@@ -60,20 +61,22 @@ export function createRemoteWorker(options: {
     }
     const endpoint = (lease: Lease, action: string) => `/worker/jobs/${lease.jobId}/${action}`;
     const queue: Queue = {
-        async continuePublications() { if(options.claimMode!=='visual')await call('/worker/publications/tick', {}); },
+        async continuePublications() { if (options.claimMode !== 'visual')
+            await call('/worker/publications/tick', {}); },
         async enqueue() {
             throw new AppError('FORBIDDEN', 'Исполнитель не создаёт задания.');
         },
         async claim(workerId) {
             if (workerId !== options.workerId)
                 throw new AppError('FORBIDDEN', 'Чужое устройство.');
-            const value = await call('/worker/jobs/claim', options.claimMode?{mode:options.claimMode}:{});
+            const value = await call('/worker/jobs/claim', options.claimMode ? { mode: options.claimMode } : {});
             if (value === null)
                 return null;
             const c = object(value, ['job', 'lease']), lease = leaseDto(c.lease);
             if (!validJob(c.job) || c.job.state !== 'running' || lease.workerId !== workerId || lease.jobId !== c.job.id)
                 throw new AppError('INVALID_INPUT', 'Некорректная выдача задания.');
-            if(options.claimMode==='visual'&&!c.job.edit?.producer)throw new AppError('INVALID_INPUT','Выдано задание другого типа.');
+            if (options.claimMode === 'visual' && !c.job.edit?.producer)
+                throw new AppError('INVALID_INPUT', 'Выдано задание другого типа.');
             uuid(c.job.id);
             uuid(c.job.siteId);
             return { job: c.job, lease };
@@ -165,6 +168,20 @@ export function createRemoteWorker(options: {
                         checkArtifacts(files);
                         return files;
                     } },
+                templates: { ...local.templates, load: async (styleId, version) => { const result = object(await scoped('template', { styleId, version }), ['available', 'files']); if (result.available === false)
+                        return local.templates.load(styleId, version); if (result.available !== true || !Array.isArray(result.files) || result.files.length > 100)
+                        throw new AppError('INVALID_INPUT', 'Неверная опись версии шаблона.'); const files: ArtifactFile[] = []; for (const value of result.files) {
+                        const f = object(value, ['path', 'size', 'sha256', 'sha1', 'mediaType']), path = string(f.path, 240), bytes = await scoped('template', { styleId, version, path }, true);
+                        if (bytes.length !== integer(f.size, 0, 2000000) || createHash('sha256').update(bytes).digest('hex') !== f.sha256)
+                            throw new AppError('INVALID_INPUT', 'Закреплённый шаблон повреждён.');
+                        files.push({ path, bytes, mediaType: string(f.mediaType, 100) });
+                    } checkArtifacts(files); return files; } },
+                validate: async (files) => { const report = await (local.validate ?? validateSite)(files); for (const id of report.screenshotIds) {
+                    if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id) || !local.readValidationScreenshot)
+                        throw new AppError('UNAVAILABLE', 'Чтение снимков проверки не подключено.');
+                    const bytes = await local.readValidationScreenshot(id);
+                    await uploadResources({ ...options, lease, purpose: 'validation', expectedCheckpointId: job.checkpointId, files: [{ path: id, mediaType: 'image/png', bytes }], templateVersion: 'validation-v1' });
+                } return report; },
                 checkpoints: { load: loadCheckpoint, async save(current, currentLease, state, files) {
                         const uploaded = await uploadResources({ ...options, lease: currentLease, purpose: 'checkpoint', expectedCheckpointId: current.checkpointId, files, templateVersion: String((state.selection as any)?.templateVersion ?? 'unknown'), stage: current.stage, state: { path: 'state.json', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(state)) } });
                         publicationState = state;

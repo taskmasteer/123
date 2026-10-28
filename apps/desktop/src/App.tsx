@@ -10,6 +10,7 @@ import { ReferenceLibrary } from './features/references/ReferenceLibrary.js';
 import type { Catalog } from './features/references/ReferenceLibrary.js';
 import { SiteEditor } from './features/editor/SiteEditor.js';
 import { ModelSettings } from './features/settings/ModelSettings.js';
+import { BackupSettings } from './features/settings/BackupSettings.js';
 import type { DeviceStatus } from './features/settings/ModelSettings.js';
 import { Login } from './features/auth/Login.js';
 import { UsersSettings } from './features/settings/UsersSettings.js';
@@ -97,7 +98,7 @@ export default function App() {
                     setDevice(status);
                     if (currentSession && JSON.stringify(currentSession) !== JSON.stringify(session)) {
                         setSession(currentSession);
-                        if (!currentSession.capabilities.admin && ['Пользователи', 'Подключения', 'Исполнители'].includes(section))
+                        if (!currentSession.capabilities.admin && ['Пользователи', 'Подключения', 'Исполнители', 'Резервные копии'].includes(section))
                             setSection('Сайты');
                         if (!currentSession.capabilities.edit)
                             setEditorId(null);
@@ -147,7 +148,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark" aria-hidden="true">▦</span>Site Factory</div>
         <nav aria-label="Разделы">
-          {['Сайты', 'Пачки', 'Референсы', ...(managed ? session?.capabilities.admin ? ['Пользователи', 'Подключения', 'Исполнители'] : [] : ['Устройство']), 'Режим работы'].map(name => (<button key={name} aria-current={section === name ? 'page' : undefined} onClick={() => { setSection(name); setEditorId(null); }}>{name}</button>))}
+          {['Сайты', 'Пачки', 'Референсы', ...(managed ? session?.capabilities.admin ? ['Пользователи', 'Подключения', 'Исполнители', 'Резервные копии'] : [] : ['Устройство', 'Резервные копии']), 'Режим работы'].map(name => (<button key={name} aria-current={section === name ? 'page' : undefined} onClick={() => { setSection(name); setEditorId(null); }}>{name}</button>))}
         </nav>
         <div className="sidebar-bottom">
           <span className={device?.available ? 'device-dot online' : 'device-dot'} aria-hidden="true"/>
@@ -167,7 +168,7 @@ export default function App() {
           {pollError ? <div role="alert" className="error-banner"><strong>Не удалось обновить состояние</strong><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить состояние</button></div> : null}
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => { })}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
-          {section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={device?.mode ?? 'blocked'} onChanged={next => {
+          {section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Резервные копии' && (!managed || session?.capabilities.admin) ? <BackupSettings key={managed ? session?.principal.userId : 'local'} managed={managed} {...(session ? { principalId: session.principal.userId } : {})}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={device?.mode ?? 'blocked'} onChanged={next => {
                 if (next)
                     setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
                 setRefresh(value => value + 1);
@@ -186,7 +187,7 @@ export default function App() {
                 }}>Следующая страница</button>
               </nav> : null}
               {managed && session && publicationSite ? <><button onClick={() => setPublicationId(null)}>Закрыть публикацию</button><PublicationPanel key={publicationSite.id} site={publicationSite} principal={session.principal} onChanged={() => setRefresh(v => v + 1)}/></> : null}
-              <p className="workspace-note">{managed ? (session?.capabilities.publish ? 'Управляемый режим. Генерация требует запущенного устройства. Первая публикация продолжается автоматически при запущенном устройстве; DNS настраивается вручную. Экспорт пока не подключён.' : 'Управляемый режим. Генерация требует запущенного устройства. Внешняя публикация не настроена. Экспорт пока не подключён.') : 'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
+              <p className="workspace-note">{managed ? (session?.capabilities.publish ? 'Управляемый режим. Генерация требует запущенного устройства. Первая публикация продолжается автоматически при запущенном устройстве; DNS настраивается вручную. Исходники и копии доступны администратору в настольном приложении.' : 'Управляемый режим. Генерация требует запущенного устройства. Внешняя публикация не настроена. Исходники и копии доступны администратору в настольном приложении.') : 'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
             </>) : section === 'Референсы' ? <ReferenceLibrary catalog={catalog} onChange={loadCatalog} canManage={!managed || !!session?.capabilities.admin} managed={managed}/> : !managed ? (<><section className="device-panel">
               <h2>{device?.available ? 'Исполнитель доступен' : 'Исполнитель недоступен'}</h2>
               <p>Это устройство создаёт и проверяет локальные сайты.</p>

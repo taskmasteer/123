@@ -24,7 +24,7 @@ export interface PublicationView extends PublicationIntent {
     cancelRequested: boolean;
     settlement: 'pending' | 'settled' | 'cancelled' | 'conflict';
     verifiedAt: number | null;
-    origin: 'generation' | 'draft';
+    origin: 'generation' | 'draft' | 'rollback';
 }
 export interface PublicationReceipt {
     jobId: string;

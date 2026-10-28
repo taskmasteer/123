@@ -8,6 +8,7 @@ import { parseState } from './local-state.js';
 import { parseQueueState } from './local-queue.js';
 import { parseRevision } from './local-revisions.js';
 import { privateDirectory, safeFile, readRegular, missing } from './safe-files.js';
+import { initializeRecovery } from './retention-schema.js';
 const controllers = new Set<string>();
 const handles = new Map<string, LocalDatabase>();
 export async function existingLocalDatabase(directory: string) { const root = await privateDirectory(directory); return handles.get(process.platform === 'win32' ? root.toLowerCase() : root); }
@@ -59,6 +60,7 @@ export async function openLocalDatabase(directory: string): Promise<LocalDatabas
    create index if not exists batch_pending on batch_rows(batch_id,row_number) where site_id is null;
    create table if not exists chunks(resource_id text not null,part integer not null,bytes blob not null,primary key(resource_id,part)) strict;
    create table if not exists resources(id text primary key,owner_id text not null,data text not null) strict;`);
+        initializeRecovery(sql);
         let closed = false, inTransaction = false;
         const db: LocalDatabase = { sql, root, transaction(action) {
                 if (closed)
@@ -154,6 +156,7 @@ export async function openLocalDatabase(directory: string): Promise<LocalDatabas
         sql.close();
         sql = new DatabaseSync(path, options);
         db.sql = sql;
+        initializeRecovery(sql);
         sql.exec('pragma locking_mode=EXCLUSIVE;begin exclusive;commit;');
         if (sql.prepare('pragma quick_check').get()?.quick_check !== 'ok')
             throw new Error('Integrity check failed');

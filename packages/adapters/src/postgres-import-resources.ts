@@ -1,3 +1,4 @@
+import { assertPostgresPayload, registerPostgresPayload } from './postgres-retention.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { AppError } from '../../contracts/src/model.js';
 import type { Principal, ArtifactFile } from '../../contracts/src/model.js';
@@ -27,9 +28,11 @@ export class PostgresImportResources {
             throw new AppError('NOT_FOUND', 'Ресурс не найден.');
         if (r.owner_id !== actor.userId)
             throw new AppError('FORBIDDEN', 'Чужой ресурс.');
+        await assertPostgresPayload(tx, { kind: 'resource', id });
         return r.data;
     }
     private async bytes(r: Resource) {
+        await this.batches.repository.transaction(tx => assertPostgresPayload(tx, { kind: 'resource', id: r.id }));
         const parts = (await this.batches.repository.pool.query('select part,bytes from private.import_chunks where resource_id=$1 order by part', [r.id])).rows;
         if (parts.some((p, i) => p.part !== i))
             throw new AppError('INVALID_INPUT', 'Не хватает фрагментов.');
@@ -55,6 +58,7 @@ export class PostgresImportResources {
                     if (!(await tx.query('select 1 from private.batch_rows where batch_id=$1 and row_number=$2', [r.draftId, r.rowNumber])).rowCount)
                         throw new AppError('NOT_FOUND', 'Строка не найдена.');
                 }
+                await registerPostgresPayload(tx, { kind: 'resource', id, siteId: null, createdAt: Date.now(), protectUntil: Date.now() + 600000, state: 'staging', firstOrphanAt: null, claimToken: null, objects: [{ key: 'database:private.import_chunks:' + id, size: r.size, sha256: r.sha256, mediaType: logo ? 'image/png' : 'application/octet-stream' }] });
                 await tx.query('insert into private.import_resources values($1,$2,$3)', [id, actor.userId, r]);
             });
             return { id };
@@ -104,6 +108,8 @@ export class PostgresImportResources {
                     d.summary.state = 'preview';
                     await this.batches.save(tx, d);
                     r.complete = true;
+                    await assertPostgresPayload(tx, { kind: 'resource', id: r.id });
+                    await tx.query("update private.payload_inventory set state='available' where kind='resource' and id=$1", [r.id]);
                     await tx.query('update private.import_resources set data=$2 where id=$1', [id, r]);
                 }
             });
@@ -132,6 +138,8 @@ export class PostgresImportResources {
                 if (resource) {
                     row.input.logoAssetId = resource.id;
                     resource.complete = true;
+                    await assertPostgresPayload(tx, { kind: 'resource', id: resource.id });
+                    await tx.query("update private.payload_inventory set state='available' where kind='resource' and id=$1", [resource.id]);
                     await tx.query('update private.import_resources set data=$2 where id=$1', [resource.id, resource]);
                 }
                 else

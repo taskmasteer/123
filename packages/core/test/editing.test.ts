@@ -338,7 +338,7 @@ test('pending explicit publication blocks edits, survives restart, and a conflic
     await expect(waiting.publish(admin, h.before.id, 2)).rejects.toMatchObject({ code: 'PROVIDER_WAIT' });
     await expect(waiting.requestEdit(admin, h.before.id, 'Overlapping edit', 2)).rejects.toMatchObject({ code: 'CONFLICT' });
     expect((await h.deps.sites.get(h.before.id))?.publishedId).toBe(h.before.publishedId);
-    const conflicting = createEditing({ ...h.deps, sites: { ...h.deps.sites, async compareAndSet() { throw new AppError('CONFLICT', 'remote writer won'); } } });
+    const conflicting = createEditing({ ...h.deps, sites: { ...h.deps.sites, async compareAndSet() { throw new AppError('CONFLICT', 'remote writer won'); }, async settlePublication() { throw new AppError('CONFLICT', 'remote writer won'); } } });
     await conflicting.recover(h.before.id);
     const state = await conflicting.list(admin, h.before.id);
     expect(state.publication?.state).toBe('conflict');

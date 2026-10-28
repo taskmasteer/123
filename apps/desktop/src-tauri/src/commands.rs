@@ -50,9 +50,15 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
     {
         return Err(invalid());
     }
-    if request.method.starts_with("visual."){return visual::validate(&request.method,&request.params);}
+    if request.method.starts_with("visual.") {
+        return visual::validate(&request.method, &request.params);
+    }
     let allowed: &[&str] = match request.method.as_str() {
-        "device.status" | "catalog.list" => &[],
+        "device.status" | "catalog.list" | "recovery.status" | "recovery.release" => &[],
+        "site.history" => &["siteId", "offset"],
+        "site.rollback" => &["siteId", "revisionId", "expectedRevision", "requestKey"],
+        "source.list" => &["siteId", "revisionId"],
+        "source.read" => &["siteId", "revisionId", "path", "offset"],
         "site.list" => &["cursor", "limit", "domain", "status", "batchId"],
         "resource.begin" => &["name", "size", "sha256", "draftId", "rowNumber", "revision"],
         "resource.chunk" => &["id", "index", "base64"],
@@ -106,6 +112,38 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
         })
     };
     match request.method.as_str() {
+        "site.history" | "site.rollback" | "source.list" | "source.read" => {
+            if !uuid("siteId")
+                || (request.method != "site.history" && !uuid("revisionId"))
+                || params
+                    .get("offset")
+                    .is_some_and(|v| v.as_u64().is_none_or(|n| n > 2_000_000))
+            {
+                return Err(invalid());
+            }
+            if request.method == "site.rollback"
+                && (!uuid("requestKey")
+                    || params
+                        .get("expectedRevision")
+                        .and_then(Value::as_u64)
+                        .is_none())
+            {
+                return Err(invalid());
+            }
+            if request.method == "source.read"
+                && (!text("path", 240)
+                    || params["path"].as_str().unwrap().split('/').any(|p| {
+                        p.is_empty()
+                            || p == "."
+                            || p == ".."
+                            || !p
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                    }))
+            {
+                return Err(invalid());
+            }
+        }
         "site.create" => {
             if !text("domain", 253)
                 || params

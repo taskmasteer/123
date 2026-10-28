@@ -84,6 +84,8 @@ export const test = base.extend<{
                                 __desktopSettingsTest: (request: unknown) => Promise<unknown>;
                                 __managedWorkerTest: () => Promise<unknown>;
                             };
+                            if (command === 'archive_operation')
+                                return Promise.reject({ code: 'UNAVAILABLE', message: 'Архивный нативный канал не моделируется этим браузерным стендом.' });
                             return command === 'managed_worker' ? target.__managedWorkerTest() : command === 'model_settings' ? target.__desktopSettingsTest(args.request) : target.__desktopTestDispatch(args.request);
                         } } });
             });

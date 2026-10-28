@@ -1,4 +1,5 @@
 import { AppError } from '../../contracts/src/model.js';
+import { commitPostgresProjection, retainedPublicationRevision } from './postgres-retention.js';
 import type { Checkpoint, Job, Lease, Queue, Site, SitePatch, Principal } from '../../contracts/src/model.js';
 import { authorize } from '../../core/src/permissions.js';
 import { parseSitePatch } from '../../contracts/src/inputs.js';
@@ -20,6 +21,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
         revisionId: string;
         manifestId: string;
         expectedRevision: number;
+        selection?: 'rollback';
     }): Promise<{
         id: string;
     }> {
@@ -34,7 +36,8 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
         }
         await this.repository.guard(tx, admission);
         const revision = await this.repository.revision(binding.revisionId, tx);
-        if (site.revision !== binding.expectedRevision || site.draftId !== binding.revisionId || revision?.siteId !== site.id || revision.manifestId !== binding.manifestId)
+        const historical = binding.selection === 'rollback' && await retainedPublicationRevision(tx, site.id, binding.revisionId);
+        if (site.revision !== binding.expectedRevision || (binding.selection === 'rollback' ? !historical : site.draftId !== binding.revisionId) || revision?.siteId !== site.id || revision.manifestId !== binding.manifestId)
             throw new AppError('CONFLICT', 'Принятый черновик изменился.');
         const id = randomUUID();
         await tx.query('insert into private.publication_reservations(id,site_id,request_key,binding,origin_controller_id) values($1,$2,$3,$4,$5)', [id, site.id, requestKey, binding, admission.token]);
@@ -150,20 +153,23 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
         return job;
     }
     async cancel(jobId: string, actor?: Principal): Promise<void> {
-        await this.repository.transaction(async (tx) => {
-            const job = await this.lockJob(tx, jobId);
-            if (actor)
-                await this.authorizeControl(tx, actor, job.data as Job);
-            if (job.data.state === 'completed')
-                throw new AppError('CONFLICT', 'Задание уже завершено.');
-            await tx.query("update private.jobs set generation=generation+1,worker_id=null,expires_at=null,data=jsonb_set(data,'{state}','\"cancelled\"') where id=$1", [jobId]);
-            await tx.query("delete from private.site_operations where site_id=$1 and operation_id=$2 and kind='job'", [job.site_id, jobId]);
-        });
+        await this.repository.transaction(tx => this.cancelInTransaction(tx, jobId, actor));
+    }
+    async cancelInTransaction(tx: SqlTransaction, jobId: string, actor?: Principal): Promise<void> {
+        const job = await this.lockJob(tx, jobId);
+        if (actor)
+            await this.authorizeControl(tx, actor, job.data as Job);
+        if (job.data.state === 'completed')
+            throw new AppError('CONFLICT', 'Задание уже завершено.');
+        if (job.data.state === 'cancelled')
+            return;
+        await tx.query("update private.jobs set generation=generation+1,worker_id=null,expires_at=null,data=jsonb_set(data,'{state}','\"cancelled\"') where id=$1", [jobId]);
+        await tx.query("delete from private.site_operations where site_id=$1 and operation_id=$2 and kind='job'", [job.site_id, jobId]);
     }
     async revokeWorker(workerId: string): Promise<void> {
         // No job/site writes follow this device lock. Every guarded writer and claim
         // rechecks revocation after taking the same lock, including calls already authenticated.
-        await this.repository.pool.query('update private.workers set revoked_at=clock_timestamp(),paused=true where id=$1', [workerId]);
+        await this.repository.transaction(tx => tx.query('update private.workers set revoked_at=clock_timestamp(),paused=true where id=$1', [workerId]));
     }
     async reservePublication(lease: Lease, binding: {
         requestKey: string;
@@ -192,13 +198,14 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             return { id };
         });
     }
-    async claim(workerId: string,mode:'all'|'visual'='all'): Promise<{
+    async claim(workerId: string, mode: 'all' | 'visual' = 'all'): Promise<{
         job: Job;
         lease: Lease;
     } | null> {
         try {
-            if(!['all','visual'].includes(mode))throw new AppError('INVALID_INPUT','Invalid claim mode.');
-            return (await this.repository.pool.query('select private.claim_job($1,$2) result', [workerId,mode==='visual'])).rows[0].result;
+            if (!['all', 'visual'].includes(mode))
+                throw new AppError('INVALID_INPUT', 'Invalid claim mode.');
+            return await this.repository.transaction(async (tx) => (await tx.query('select private.claim_job($1,$2) result', [workerId, mode === 'visual'])).rows[0].result);
         }
         catch (error) {
             if (error instanceof Error && error.message === 'STALE_LEASE')
@@ -237,7 +244,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             return { ...lease, expiresAt: Number(row.expires) };
         });
     }
-    async checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null): Promise<void> {
+    async checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null, projection?: import('../../contracts/src/recovery.js').CheckpointProjection): Promise<void> {
         await this.repository.transaction(async (tx) => {
             await this.assertCurrent(tx, lease.workerId, lease);
             const job = (await tx.query('select checkpoint_id from private.jobs where id=$1', [lease.jobId])).rows[0];
@@ -247,10 +254,19 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             const predecessor = expectedCheckpointId === undefined ? saved.expected_checkpoint_id : expectedCheckpointId;
             if (saved.expected_checkpoint_id !== predecessor)
                 throw new AppError('CONFLICT', 'Предыдущая контрольная точка не совпадает.');
-            if (job.checkpoint_id === checkpoint.id)
+            if (job.checkpoint_id === checkpoint.id) {
+                if (projection)
+                    await commitPostgresProjection(tx, projection, true, lease);
                 return;
+            }
             if (job.checkpoint_id !== predecessor || saved.worker_id !== lease.workerId || Number(saved.generation) !== lease.generation)
                 throw new AppError('CONFLICT', 'Контрольная точка устарела.');
+            if (projection) {
+                if (projection.evidence.checkpoint.id !== checkpoint.id || projection.usage.predecessor !== predecessor)
+                    throw new AppError('CONFLICT', 'Проекция контрольной точки устарела.');
+                await commitPostgresProjection(tx, projection);
+            }
+            await tx.query("update private.payload_inventory set data=data||jsonb_build_object('accepted',true) where kind='checkpoint' and id=$1", [checkpoint.id]);
             await tx.query("update private.jobs set checkpoint_id=$2,data=data||jsonb_build_object('checkpointId',($2::uuid)::text,'stage',$3::text) where id=$1", [lease.jobId, checkpoint.id, checkpoint.stage]);
         });
     }

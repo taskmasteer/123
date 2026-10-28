@@ -3,15 +3,15 @@ import type { CheckpointStore, Clock, IdSource, Job, Principal, PublicationPort,
 import type { Candidate, EditingState, EditingStore, PublishIntent } from '../../contracts/src/editing.js';
 import { record } from '../../contracts/src/inputs.js';
 import { authorize } from './permissions.js';
-import type { ArtifactStore,Revision } from '../../contracts/src/model.js';
+import type { ArtifactStore, Revision } from '../../contracts/src/model.js';
 import { elementPatch } from '../../contracts/src/visual.js';
-import type { ElementPatch,VisualProducer,VisualSave,SaveView } from '../../contracts/src/visual.js';
-import { createEditableMap,digest } from './visual/editable-map.js';
-import {completeVisualAcceptance,failVisualAcceptance,type VisualAcceptanceReceipt} from './visual/acceptance.js';
+import type { ElementPatch, VisualProducer, VisualSave, SaveView } from '../../contracts/src/visual.js';
+import { createEditableMap, digest } from './visual/editable-map.js';
+import { completeVisualAcceptance, failVisualAcceptance, type VisualAcceptanceReceipt } from './visual/acceptance.js';
 export interface EditingDeps {
-    artifacts?:ArtifactStore;
-    visualCompareAndSet?:(actorId:string,siteId:string,expectedRevision:number,draftId:string)=>Promise<Site>;
-    visualAcceptance?:(candidate:Candidate)=>Promise<VisualAcceptanceReceipt>;
+    artifacts?: ArtifactStore;
+    visualCompareAndSet?: (actorId: string, siteId: string, expectedRevision: number, draftId: string) => Promise<Site>;
+    visualAcceptance?: (candidate: Candidate) => Promise<VisualAcceptanceReceipt>;
     sites: SiteRepository;
     store: EditingStore;
     revisions: RevisionRepository;
@@ -23,12 +23,13 @@ export interface EditingDeps {
     };
     publication: PublicationPort;
     handoffPublication?: (intent: PublishIntent) => Promise<Site>;
+    canRollback?: (siteId: string, revisionId: string) => Promise<boolean>;
     clock: Clock;
     ids: IdSource;
 }
 const terminal = new Set(['ready', 'accepted', 'rejected', 'conflict', 'failed']);
 const busyMessage = 'Дождитесь завершения или отмените текущую правку.';
-export function visualSaveHash(expectedRevision:number,mapId:string,patch:ElementPatch){return digest(JSON.stringify([expectedRevision,mapId,patch.elementId,patch.text??null,patch.href??null,patch.imageAssetId??null,Object.entries(patch.styles??{}).sort()]));}
+export function visualSaveHash(expectedRevision: number, mapId: string, patch: ElementPatch) { return digest(JSON.stringify([expectedRevision, mapId, patch.elementId, patch.text ?? null, patch.href ?? null, patch.imageAssetId ?? null, Object.entries(patch.styles ?? {}).sort()])); }
 /** Checkpoint errors are private provider data: expose only a short, redacted first-line diagnostic. */
 function safeDiagnostic(value: unknown): string | null {
     if (typeof value !== 'string')
@@ -79,11 +80,11 @@ export function createEditing(deps: EditingDeps) {
         const job = await deps.queue.get(candidate.jobId);
         if (!job?.checkpointId)
             throw new AppError('NOT_FOUND', 'Проверка варианта ещё не готова.');
-        const saved = await deps.checkpoints.load(job.checkpointId), state = saved.state;
+        const saved = await (deps.checkpoints.evidence?.(job.checkpointId) ?? deps.checkpoints.load(job.checkpointId)), state = saved.state;
         if (saved.checkpoint.jobId !== candidate.jobId || state.jobId !== candidate.jobId || state.siteId !== candidate.siteId ||
             state.baseRevision !== candidate.baseRevision || state.revisionId !== candidate.id || !state.manifestId ||
             saved.checkpoint.manifestId !== state.manifestId || (candidate.manifestId !== null && candidate.manifestId !== state.manifestId) ||
-            JSON.stringify(state.visualProducer)!==JSON.stringify(candidate.job.edit?.producer) ||
+            JSON.stringify(state.visualProducer) !== JSON.stringify(candidate.job.edit?.producer) ||
             !['publication', 'completed'].includes(saved.checkpoint.stage) || !record(state.validation) || state.validation.ok !== true ||
             !Array.isArray(state.validation.issues) || state.validation.issues.length !== 0 || !Array.isArray(state.validation.screenshotIds) ||
             !state.validation.screenshotIds.every(id => typeof id === 'string'))
@@ -129,7 +130,7 @@ export function createEditing(deps: EditingDeps) {
             candidate.manifestId = checked.manifestId;
             candidate.validation = checked.report;
             const transcript = checked.state.transcript;
-            candidate.summary = candidate.visualSave?'Визуальная правка проверена.':Array.isArray(transcript) && record(transcript.at(-1)) && typeof transcript.at(-1).summary === 'string' ? transcript.at(-1).summary : 'Правка проверена.';
+            candidate.summary = candidate.visualSave ? 'Визуальная правка проверена.' : Array.isArray(transcript) && record(transcript.at(-1)) && typeof transcript.at(-1).summary === 'string' ? transcript.at(-1).summary : 'Правка проверена.';
             const site = await deps.sites.get(candidate.siteId);
             candidate.status = site?.revision === candidate.baseRevision ? 'ready' : 'conflict';
             await deps.revisions.put({ id: candidate.id, siteId: candidate.siteId, parentId: candidate.parentRevisionId, manifestId: candidate.manifestId, kind: 'candidate', createdAt: candidate.createdAt });
@@ -149,12 +150,23 @@ export function createEditing(deps: EditingDeps) {
             }
         });
     }
-    async function settleAcceptance(candidate: Candidate): Promise<{site:Site;journalCommitted?:true}|{error:AppError;journalCommitted:true}> {
+    async function settleAcceptance(candidate: Candidate): Promise<{
+        site: Site;
+        journalCommitted?: true;
+    } | {
+        error: AppError;
+        journalCommitted: true;
+    }> {
         const intent = candidate.acceptance!;
-        if(candidate.visualSave&&deps.visualAcceptance){
-            await evidence(candidate);const receipt=await deps.visualAcceptance(candidate);
-            if(receipt.state==='failed'){Object.assign(candidate,failVisualAcceptance(candidate,receipt.message));return {error:new AppError(receipt.code,receipt.message),journalCommitted:true};}
-            Object.assign(candidate,completeVisualAcceptance(candidate));return {site:receipt.site,journalCommitted:true};
+        if (candidate.visualSave && deps.visualAcceptance) {
+            await evidence(candidate);
+            const receipt = await deps.visualAcceptance(candidate);
+            if (receipt.state === 'failed') {
+                Object.assign(candidate, failVisualAcceptance(candidate, receipt.message));
+                return { error: new AppError(receipt.code, receipt.message), journalCommitted: true };
+            }
+            Object.assign(candidate, completeVisualAcceptance(candidate));
+            return { site: receipt.site, journalCommitted: true };
         }
         const site = await deps.sites.get(candidate.siteId);
         if (!site)
@@ -162,9 +174,10 @@ export function createEditing(deps: EditingDeps) {
         if (site.draftId === candidate.id && site.revision === intent.expectedRevision + 1) {
             candidate.status = 'accepted';
             intent.state = 'completed';
-            if(candidate.visualSave)candidate.visualSave.state='completed';
+            if (candidate.visualSave)
+                candidate.visualSave.state = 'completed';
             await updateCandidate(candidate);
-            return {site};
+            return { site };
         }
         if (site.revision !== intent.expectedRevision || (site.draftId ?? site.publishedId) !== candidate.baseDraftId) {
             candidate.status = 'conflict';
@@ -175,8 +188,9 @@ export function createEditing(deps: EditingDeps) {
         await evidence(candidate);
         let accepted: Site;
         try {
-            if(candidate.visualSave&&!deps.visualCompareAndSet)throw new AppError('UNAVAILABLE','Проверка доступа к сохранению недоступна.');
-            accepted = candidate.visualSave ? await deps.visualCompareAndSet!(candidate.visualSave.actorId,site.id,intent.expectedRevision,candidate.id) : await deps.sites.compareAndSet(site.id, intent.expectedRevision, { draftId: candidate.id });
+            if (candidate.visualSave && !deps.visualCompareAndSet)
+                throw new AppError('UNAVAILABLE', 'Проверка доступа к сохранению недоступна.');
+            accepted = candidate.visualSave ? await deps.visualCompareAndSet!(candidate.visualSave.actorId, site.id, intent.expectedRevision, candidate.id) : await deps.sites.compareAndSet(site.id, intent.expectedRevision, { draftId: candidate.id });
         }
         catch (error) {
             if (error instanceof AppError && error.code === 'CONFLICT') {
@@ -188,9 +202,10 @@ export function createEditing(deps: EditingDeps) {
         }
         candidate.status = 'accepted';
         intent.state = 'completed';
-        if(candidate.visualSave)candidate.visualSave.state='completed';
+        if (candidate.visualSave)
+            candidate.visualSave.state = 'completed';
         await updateCandidate(candidate);
-        return {site:accepted};
+        return { site: accepted };
     }
     async function settlePublication(intent: PublishIntent): Promise<Site> {
         const site = await deps.sites.get(intent.siteId);
@@ -202,7 +217,7 @@ export function createEditing(deps: EditingDeps) {
             await save();
             return site;
         }
-        if (site.revision !== intent.expectedRevision || site.draftId !== intent.revisionId) {
+        if (site.revision !== intent.expectedRevision || (intent.selection !== 'rollback' && site.draftId !== intent.revisionId)) {
             intent.state = 'conflict';
             await save();
             throw new AppError('CONFLICT', 'Черновик изменился после запроса публикации. Вариант сохранён.');
@@ -210,8 +225,17 @@ export function createEditing(deps: EditingDeps) {
         const revision = await deps.revisions.get(intent.revisionId);
         if (!revision || revision.siteId !== site.id || revision.manifestId !== intent.manifestId)
             throw new AppError('INVALID_INPUT', 'Версия публикации не соответствует намерению.');
-        const candidate = candidateFor(await read(), site.id, revision.id);
-        await evidence(candidate);
+        if (intent.selection === 'rollback') {
+            if (!await deps.canRollback?.(site.id, revision.id))
+                throw new AppError('CONFLICT', 'Историческая версия недоступна для отката.');
+            if (!deps.artifacts)
+                throw new AppError('UNAVAILABLE', 'Хранилище не подключено.');
+            await deps.artifacts.read(revision.manifestId);
+        }
+        else {
+            const candidate = candidateFor(await read(), site.id, revision.id);
+            await evidence(candidate);
+        }
         if (deps.handoffPublication)
             return deps.handoffPublication(intent);
         const state = await deps.publication.advance(intent.id);
@@ -219,7 +243,7 @@ export function createEditing(deps: EditingDeps) {
             throw new AppError(state === 'needs_attention' ? 'NEEDS_ATTENTION' : 'PROVIDER_WAIT', 'Публикация ожидает завершения. Повторите публикацию для проверки результата.');
         let published: Site;
         try {
-            published = await deps.sites.compareAndSet(site.id, intent.expectedRevision, { publishedId: revision.id });
+            published = deps.sites.settlePublication ? await deps.sites.settlePublication(site.id, intent.expectedRevision, { publishedId: revision.id }, { id: intent.id, siteId: site.id, revisionId: revision.id, manifestId: revision.manifestId, settledAt: deps.clock.now(), verifiedAt: null, settlement: 'settled', origin: intent.selection === 'rollback' ? 'rollback' : 'draft', mode: 'demo' }) : await deps.sites.compareAndSet(site.id, intent.expectedRevision, { publishedId: revision.id });
         }
         catch (error) {
             if (error instanceof AppError && error.code === 'CONFLICT') {
@@ -237,19 +261,42 @@ export function createEditing(deps: EditingDeps) {
         for (const candidate of state.candidates.filter(c => c.siteId === siteId))
             await syncCandidate(candidate);
         state = await read();
-        for(const candidate of state.candidates.filter(c=>c.siteId===siteId&&c.visualSave?.state==='pending')) {
-            if(candidate.status==='accepted'){candidate.visualSave!.state='completed';await updateCandidate(candidate);continue;}
-            if(candidate.status==='ready'||candidate.acceptance?.state==='pending') {
-                candidate.acceptance??={expectedRevision:candidate.baseRevision,state:'pending'};
+        for (const candidate of state.candidates.filter(c => c.siteId === siteId && c.visualSave?.state === 'pending')) {
+            if (candidate.status === 'accepted') {
+                candidate.visualSave!.state = 'completed';
                 await updateCandidate(candidate);
-                try{const outcome=await settleAcceptance(candidate);if(outcome.journalCommitted)return candidate;}
-                catch(error){if(!(error instanceof AppError&&['CONFLICT','FORBIDDEN','NOT_FOUND'].includes(error.code)))throw error;candidate.visualSave!.state='failed';candidate.visualSave!.error=error.code==='CONFLICT'?'Черновик изменился; сохранённый вариант доступен отдельно.':'Доступ к сохранению отозван.';candidate.acceptance.state='conflict';candidate.status='conflict';await updateCandidate(candidate);}
-            } else if(['failed','rejected','conflict'].includes(candidate.status)){candidate.visualSave!.state='failed';candidate.visualSave!.error=candidate.summary||'Визуальная правка не прошла проверку.';await updateCandidate(candidate);}
+                continue;
+            }
+            if (candidate.status === 'ready' || candidate.acceptance?.state === 'pending') {
+                candidate.acceptance ??= { expectedRevision: candidate.baseRevision, state: 'pending' };
+                await updateCandidate(candidate);
+                try {
+                    const outcome = await settleAcceptance(candidate);
+                    if (outcome.journalCommitted)
+                        return candidate;
+                }
+                catch (error) {
+                    if (!(error instanceof AppError && ['CONFLICT', 'FORBIDDEN', 'NOT_FOUND'].includes(error.code)))
+                        throw error;
+                    candidate.visualSave!.state = 'failed';
+                    candidate.visualSave!.error = error.code === 'CONFLICT' ? 'Черновик изменился; сохранённый вариант доступен отдельно.' : 'Доступ к сохранению отозван.';
+                    candidate.acceptance.state = 'conflict';
+                    candidate.status = 'conflict';
+                    await updateCandidate(candidate);
+                }
+            }
+            else if (['failed', 'rejected', 'conflict'].includes(candidate.status)) {
+                candidate.visualSave!.state = 'failed';
+                candidate.visualSave!.error = candidate.summary || 'Визуальная правка не прошла проверку.';
+                await updateCandidate(candidate);
+            }
         }
         state = await read();
         for (const candidate of state.candidates.filter(c => c.siteId === siteId && c.acceptance?.state === 'pending')) {
             try {
-                const outcome=await settleAcceptance(candidate);if('error'in outcome)throw outcome.error;
+                const outcome = await settleAcceptance(candidate);
+                if ('error' in outcome)
+                    throw outcome.error;
             }
             catch (error) {
                 if (!(error instanceof AppError && error.code === 'CONFLICT'))
@@ -275,37 +322,67 @@ export function createEditing(deps: EditingDeps) {
             throw new AppError('CONFLICT', busyMessage);
     }
     const api = {
-        async visualMap(actor:Principal,siteId:string,expectedRevision:number) {
-            const site=await siteFor(actor,siteId,'site:edit');
-            if(site.revision!==expectedRevision)throw new AppError('CONFLICT','Черновик изменился.');
-            const revision=await deps.revisions.get(site.draftId??site.publishedId??'');
-            if(!revision||revision.siteId!==site.id||!deps.artifacts)throw new AppError('NOT_FOUND','Исходная версия недоступна.');
-            const state=await (deps.store.forSite?.(siteId)??deps.store).transaction(s=>({result:s}));
-            const previous=state.candidates.find(c=>c.id===revision.id&&c.status==='accepted')?.job.edit?.producer;
-            const files=await deps.artifacts.read(revision.manifestId);
-            return {files,map:createEditableMap(files,{siteId,revisionId:revision.id,manifestId:revision.manifestId,...(previous?{lineage:previous.binding.lineage}:{})})};
+        async rollback(actor: Principal, siteId: string, revisionId: string, expectedRevision: number): Promise<PublishIntent> {
+            return serial(siteId, async () => { await siteFor(actor, siteId, 'site:publish'); await recoverSite(siteId); await idle(siteId); const site = await siteFor(actor, siteId, 'site:publish'); if (site.revision !== expectedRevision)
+                throw new AppError('CONFLICT', 'Версия изменилась.'); const revision = await deps.revisions.get(revisionId); if (!revision || revision.siteId !== siteId || !await deps.canRollback?.(siteId, revisionId))
+                throw new AppError('CONFLICT', 'Историческая версия недоступна для отката.'); const intent: PublishIntent = { id: deps.ids.next(), siteId, revisionId, manifestId: revision.manifestId, expectedRevision, state: 'pending', selection: 'rollback' }; await write(state => { state.publications.push(intent); }); await settlePublication(intent); return intent; });
         },
-        async requestVisual(actor:Principal,siteId:string,expectedRevision:number,input:ElementPatch,mapId:string,requestKey:string):Promise<Job> {
-            await siteFor(actor,siteId,'site:edit');const patch=elementPatch(input);
-            if(typeof requestKey!=='string'||!requestKey||requestKey.length>100||!Number.isSafeInteger(expectedRevision)||expectedRevision<0)throw new AppError('INVALID_INPUT','Недопустимый запрос сохранения.');
-            const payloadHash=visualSaveHash(expectedRevision,mapId,patch);
-            const old=await (deps.store.forSite?.(siteId)??deps.store).transaction(s=>({result:s.candidates.find(c=>c.siteId===siteId&&c.visualSave?.actorId===actor.userId&&c.visualSave.requestKey===requestKey)}));
-            if(old){if(old.visualSave!.payloadHash!==payloadHash)throw new AppError('CONFLICT','Ключ сохранения уже использован.');return old.job;}
-            const {map}=await api.visualMap(actor,siteId,expectedRevision);
-            if(map.binding.mapId!==mapId||!map.nodes.has(patch.elementId))throw new AppError('CONFLICT','Карта исходника устарела.');
-            return api.requestEdit(actor,siteId,'Визуальная правка',expectedRevision,undefined,{producer:{kind:'visual',version:1,binding:map.binding,patch},save:{actorId:actor.userId,requestKey,payloadHash,state:'pending'}});
+        async visualMap(actor: Principal, siteId: string, expectedRevision: number) {
+            const site = await siteFor(actor, siteId, 'site:edit');
+            if (site.revision !== expectedRevision)
+                throw new AppError('CONFLICT', 'Черновик изменился.');
+            const revision = await deps.revisions.get(site.draftId ?? site.publishedId ?? '');
+            if (!revision || revision.siteId !== site.id || !deps.artifacts)
+                throw new AppError('NOT_FOUND', 'Исходная версия недоступна.');
+            const state = await (deps.store.forSite?.(siteId) ?? deps.store).transaction(s => ({ result: s }));
+            const previous = state.candidates.find(c => c.id === revision.id && c.status === 'accepted')?.job.edit?.producer;
+            const files = await deps.artifacts.read(revision.manifestId);
+            return { files, map: createEditableMap(files, { siteId, revisionId: revision.id, manifestId: revision.manifestId, ...(previous ? { lineage: previous.binding.lineage } : {}) }) };
         },
-        visualStatus(actor:Principal,siteId:string,saveId:string):Promise<SaveView> {return serial(siteId,async()=>{
-            await siteFor(actor,siteId,'site:read');const committed=await recoverSite(siteId);await siteFor(actor,siteId,'site:read');const c=committed?.id===saveId?committed:candidateFor(await read(),siteId,saveId);
-            if(!c.visualSave)throw new AppError('NOT_FOUND','Сохранение не найдено.');
-            const revision=c.visualSave.state==='completed'?await deps.revisions.get(c.id):null;
-            return {saveId:c.id,status:c.visualSave.state==='pending'?c.status:c.visualSave.state,...(revision?{revision}:{}),...(c.visualSave.error?{error:c.visualSave.error}:{})};
-        });},
+        async requestVisual(actor: Principal, siteId: string, expectedRevision: number, input: ElementPatch, mapId: string, requestKey: string): Promise<Job> {
+            await siteFor(actor, siteId, 'site:edit');
+            const patch = elementPatch(input);
+            if (typeof requestKey !== 'string' || !requestKey || requestKey.length > 100 || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0)
+                throw new AppError('INVALID_INPUT', 'Недопустимый запрос сохранения.');
+            const payloadHash = visualSaveHash(expectedRevision, mapId, patch);
+            const old = await (deps.store.forSite?.(siteId) ?? deps.store).transaction(s => ({ result: s.candidates.find(c => c.siteId === siteId && c.visualSave?.actorId === actor.userId && c.visualSave.requestKey === requestKey) }));
+            if (old) {
+                if (old.visualSave!.payloadHash !== payloadHash)
+                    throw new AppError('CONFLICT', 'Ключ сохранения уже использован.');
+                return old.job;
+            }
+            const { map } = await api.visualMap(actor, siteId, expectedRevision);
+            if (map.binding.mapId !== mapId || !map.nodes.has(patch.elementId))
+                throw new AppError('CONFLICT', 'Карта исходника устарела.');
+            return api.requestEdit(actor, siteId, 'Визуальная правка', expectedRevision, undefined, { producer: { kind: 'visual', version: 1, binding: map.binding, patch }, save: { actorId: actor.userId, requestKey, payloadHash, state: 'pending' } });
+        },
+        visualStatus(actor: Principal, siteId: string, saveId: string): Promise<SaveView> {
+            return serial(siteId, async () => {
+                await siteFor(actor, siteId, 'site:read');
+                const committed = await recoverSite(siteId);
+                await siteFor(actor, siteId, 'site:read');
+                const c = committed?.id === saveId ? committed : candidateFor(await read(), siteId, saveId);
+                if (!c.visualSave)
+                    throw new AppError('NOT_FOUND', 'Сохранение не найдено.');
+                const revision = c.visualSave.state === 'completed' ? await deps.revisions.get(c.id) : null;
+                return { saveId: c.id, status: c.visualSave.state === 'pending' ? c.status : c.visualSave.state, ...(revision ? { revision } : {}), ...(c.visualSave.error ? { error: c.visualSave.error } : {}) };
+            });
+        },
         recover(siteId: string) { return serial(siteId, () => recoverSite(siteId)); },
-        requestEdit(actor: Principal, siteId: string, instruction: string, expectedRevision: number, candidateId?: string, visual?:{producer:VisualProducer;save:VisualSave}): Promise<Job> {
+        requestEdit(actor: Principal, siteId: string, instruction: string, expectedRevision: number, candidateId?: string, visual?: {
+            producer: VisualProducer;
+            save: VisualSave;
+        }): Promise<Job> {
             return serial(siteId, async () => {
                 await siteFor(actor, siteId, 'site:edit');
-                if(visual){const old=(await read()).candidates.find(c=>c.siteId===siteId&&c.visualSave?.actorId===actor.userId&&c.visualSave.requestKey===visual.save.requestKey);if(old){if(old.visualSave!.payloadHash!==visual.save.payloadHash)throw new AppError('CONFLICT','Ключ сохранения уже использован.');return old.job;}}
+                if (visual) {
+                    const old = (await read()).candidates.find(c => c.siteId === siteId && c.visualSave?.actorId === actor.userId && c.visualSave.requestKey === visual.save.requestKey);
+                    if (old) {
+                        if (old.visualSave!.payloadHash !== visual.save.payloadHash)
+                            throw new AppError('CONFLICT', 'Ключ сохранения уже использован.');
+                        return old.job;
+                    }
+                }
                 if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 8000 || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0)
                     throw new AppError('INVALID_INPUT', 'Укажите инструкцию до 8000 символов и актуальную версию.');
                 await recoverSite(siteId);
@@ -325,20 +402,20 @@ export function createEditing(deps: EditingDeps) {
                 const id = deps.ids.next(), jobId = deps.ids.next(), createdAt = deps.clock.now();
                 const message = { id: deps.ids.next(), siteId, candidateId: id, role: 'user' as const, text: instruction.trim(), createdAt };
                 const job: Job = { id: jobId, siteId, kind: 'edit', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: selected?.baseRevision ?? site.revision,
-                    edit: { ...(visual?{producer:visual.producer}:{}),candidateId: id, baseDraftId, baseManifestId: parent.manifestId, parentRevisionId, instruction: message.text,
+                    edit: { ...(visual ? { producer: visual.producer } : {}), candidateId: id, baseDraftId, baseManifestId: parent.manifestId, parentRevisionId, instruction: message.text,
                         conversation: [...state.messages.filter(m => m.siteId === siteId), message].map(({ id, role, text, createdAt }) => ({ id, role, text, createdAt })) } };
                 // Existing files remain authoritative; catalog changes affect new sites only.
                 const sourceCandidate = selected ?? state.candidates.find(c => c.id === baseDraftId && c.siteId === siteId);
                 const sourceJob = await deps.queue.get(sourceCandidate?.jobId ?? siteId);
                 if (sourceJob?.checkpointId) {
-                    const saved = await deps.checkpoints.load(sourceJob.checkpointId), selection = saved.state.selection;
+                    const saved = await (deps.checkpoints.evidence?.(sourceJob.checkpointId) ?? deps.checkpoints.load(sourceJob.checkpointId)), selection = saved.state.selection;
                     if (saved.checkpoint.jobId !== sourceJob.id || saved.state.siteId !== siteId || !record(selection) ||
                         !Number.isSafeInteger(selection.seed) || typeof selection.styleId !== 'string' || typeof selection.templateVersion !== 'string')
                         throw new AppError('INVALID_INPUT', 'Исходная версия не соответствует заданию.');
                     job.generation = { seed: selection.seed as number, styleId: selection.styleId, templateVersion: selection.templateVersion };
                 }
                 const candidate: Candidate = { id, siteId, jobId, baseRevision: job.baseRevision, baseDraftId, baseManifestId: parent.manifestId,
-                    parentRevisionId, manifestId: null, status: 'queued', validation: null, summary: '', createdAt, job, acceptance: null,...(visual?{visualSave:visual.save}:{}) };
+                    parentRevisionId, manifestId: null, status: 'queued', validation: null, summary: '', createdAt, job, acceptance: null, ...(visual ? { visualSave: visual.save } : {}) };
                 await write(state => { state.candidates.push(candidate); state.messages.push(message); });
                 await deps.queue.enqueue(job);
                 return job;
@@ -363,7 +440,10 @@ export function createEditing(deps: EditingDeps) {
                 await evidence(candidate);
                 candidate.acceptance = { expectedRevision, state: 'pending' };
                 await updateCandidate(candidate);
-                const outcome=await settleAcceptance(candidate);if('error'in outcome)throw outcome.error;return outcome.site;
+                const outcome = await settleAcceptance(candidate);
+                if ('error' in outcome)
+                    throw outcome.error;
+                return outcome.site;
             });
         },
         rejectCandidate(actor: Principal, siteId: string, candidateId: string): Promise<void> {

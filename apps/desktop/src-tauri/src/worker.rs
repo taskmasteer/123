@@ -305,6 +305,23 @@ impl Worker {
             request,
         )
     }
+    pub fn archive(&mut self, params: Value) -> Result<Value, AppError> {
+        if self
+            .process
+            .as_mut()
+            .map(|p| p.child.try_wait().ok().flatten().is_some())
+            .unwrap_or(true)
+        {
+            self.shutdown();
+            self.start()?;
+        }
+        self.exchange(DesktopRequest {
+            id: "native-archive".into(),
+            version: 1,
+            method: "archive.private".into(),
+            params,
+        })
+    }
     fn exchange(&mut self, request: DesktopRequest) -> Result<Value, AppError> {
         let bytes = serde_json::to_vec(&request).map_err(|_| AppError::new("Invalid request"))?;
         if bytes.len() > 64000 {

@@ -112,6 +112,7 @@ export interface SiteFilters {
     batchId?: string;
 }
 export interface SiteRepository {
+    settlePublication?(siteId: string, expectedRevision: number, patch: SitePatch, outcome: import('./recovery.js').PublicationOutcome, lease?: Lease): Promise<Site>;
     create(input: SiteInput, principal: Principal): Promise<Site>;
     get(id: string): Promise<Site | null>;
     list(principal: Principal, cursor?: string, limit?: number, filters?: SiteFilters): Promise<{
@@ -139,6 +140,7 @@ export interface Checkpoint {
     createdAt: number;
 }
 export interface CheckpointStore {
+    evidence?(id: string): Promise<import('./recovery.js').CheckpointEvidence>;
     save(job: Job, lease: Lease, state: Record<string, unknown>, files: ArtifactFile[]): Promise<Checkpoint>;
     load(id: string): Promise<{
         checkpoint: Checkpoint;
@@ -149,12 +151,12 @@ export interface CheckpointStore {
 export interface Queue {
     continuePublications?(): Promise<void>;
     enqueue(job: Job): Promise<void>;
-    claim(workerId: string, mode?:'all'|'visual'): Promise<{
+    claim(workerId: string, mode?: 'all' | 'visual'): Promise<{
         job: Job;
         lease: Lease;
     } | null>;
     heartbeat(lease: Lease): Promise<Lease>;
-    checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null): Promise<void>;
+    checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null, projection?: import('./recovery.js').CheckpointProjection): Promise<void>;
     shouldPause?(lease: Lease): Promise<boolean>;
     pauseAtBoundary?(lease: Lease): Promise<boolean>;
     finish(lease: Lease, state: Job['state']): Promise<void>;

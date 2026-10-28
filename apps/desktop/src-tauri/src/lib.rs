@@ -1,3 +1,4 @@
+mod archive;
 mod commands;
 mod managed;
 mod remote_preview;
@@ -16,6 +17,7 @@ pub fn run() {
             commands::dispatch,
             commands::model_settings,
             commands::managed_worker,
+            archive::archive_operation,
             remote_preview::open_remote_preview
         ])
         .build(tauri::generate_context!())

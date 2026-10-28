@@ -147,6 +147,8 @@ async function fixture(about = 'user supplied description: event streaming for r
     const root = await directory();
     const clock = new ManualClock(1000);
     const sites = await createLocalState(join(root, 'registry'), clock);
+    // This fixture intentionally supplies a fake queue, without the local DB lease authority.
+    delete sites.settlePublication;
     openedSites.push(sites);
     const site = await sites.create({ domain: 'signals.example', about }, { userId: 'owner', role: 'admin' });
     const job: Job = { id: randomUUID(), siteId: site.id, kind: 'generate', stage: 'brief', state: 'running', checkpointId: null, baseRevision: 0,

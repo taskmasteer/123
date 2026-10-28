@@ -146,6 +146,13 @@ export async function createLocalState(directory: string, clock: Clock, database
                 return { items: page.map(r => r.site), nextCursor: rows.length > page.length ? encodeCursor(String(page.at(-1)!.seq), binding) : null };
             });
         },
+        settlePublication(id: string, expected: number, patch: import('../../contracts/src/model.js').SitePatch, outcome: import('../../contracts/src/recovery.js').PublicationOutcome, lease?: import('../../contracts/src/model.js').Lease) { return run(() => db.transaction(() => { const old = db.sql.prepare('select data from publication_outcomes where id=?').get(outcome.id); if (old) {
+            const s = get(id);
+            if (!s || s.publishedId !== outcome.revisionId)
+                throw new AppError('CONFLICT', 'Публикация изменилась.');
+            return s;
+        } const next = cas(id, expected, patch, lease); outcome = { ...outcome, sequence: Number(db.sql.prepare("select coalesce(max(json_extract(data,'$.sequence')),0)+1 n from publication_outcomes").get()?.n) }; db.sql.prepare('insert into publication_outcomes values(?,?,?)').run(outcome.id, id, JSON.stringify(outcome)); if (outcome.origin === 'rollback')
+            db.sql.prepare('insert into records values(?,?,?,?)').run('audit', outcome.id, id, JSON.stringify({ action: 'rollback', revisionId: outcome.revisionId, intentId: outcome.id, createdAt: outcome.settledAt })); return next; })); },
         compareAndSet(id, expected, patch) { return run(() => db.transaction(() => cas(id, expected, patch))); },
         workerCompareAndSet(id, expected, patch, lease) { return run(() => db.transaction(() => cas(id, expected, patch, lease))); },
         async close() {

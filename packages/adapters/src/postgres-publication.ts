@@ -1,3 +1,4 @@
+import { retainedPublicationRevision } from './postgres-retention.js';
 import type { PostgresQueue } from './postgres-queue.js';
 import type { R2Store } from './r2-store.js';
 import type { VercelClient } from './vercel/client.js';
@@ -17,6 +18,8 @@ import type { SqlTransaction } from './supabase-repository.js';
 import { authorize } from '../../core/src/permissions.js';
 import { createEditing } from '../../core/src/editing.js';
 import type { Lease } from '../../contracts/src/model.js';
+import { recoveryDigest } from '../../core/src/usage.js';
+import { observeRecoveryPublication, type RecoveryObservation } from './publication-recovery.js';
 type Action = 'project' | 'project_create' | 'domain' | 'domain_attach' | 'verify_domain' | 'dns' | 'upload' | 'create' | 'find' | 'check' | 'promote' | 'alias' | 'https' | 'settle';
 interface Progress {
     action: Action;
@@ -39,32 +42,35 @@ const phaseFor: Record<Action, PublicationState> = { project: 'pending', project
 export class PostgresPublication {
     constructor(readonly queue: PostgresQueue, readonly store: R2Store, readonly client: VercelClient, readonly verify: typeof verifyPublicHttps) { }
     get repo() { return this.queue.repository; }
-    async requestPublication(actor: Principal, siteId: string, revisionId: string, expectedRevision: number, requestKey: string): Promise<PublicationView> {
+    async requestPublication(actor: Principal, siteId: string, revisionId: string, expectedRevision: number, requestKey: string, selection: 'draft' | 'rollback' = 'draft'): Promise<PublicationView> {
         await this.repo.transaction(async (tx) => { authorize(await this.repo.fresh(tx, actor), 'site:publish', (await this.repo.get(siteId, tx))!); });
         const existing = (await this.repo.pool.query('select id,binding,site_id from private.publication_reservations where request_key=$1', [requestKey])).rows[0];
         if (existing) {
-            if (existing.site_id !== siteId || existing.binding.revisionId !== revisionId || existing.binding.expectedRevision !== expectedRevision)
+            if (existing.site_id !== siteId || existing.binding.revisionId !== revisionId || existing.binding.expectedRevision !== expectedRevision || (existing.binding.selection ?? 'draft') !== selection)
                 throw new AppError('CONFLICT', 'Ключ запроса уже использован.');
             return this.attach(existing.id, requestKey);
         }
         const admission = await this.repo.acquire(actor, siteId);
         try {
             const site = (await this.repo.get(siteId))!;
-            if (site.draftId !== revisionId || site.revision !== expectedRevision)
+            if ((selection !== 'rollback' && site.draftId !== revisionId) || site.revision !== expectedRevision)
                 throw new AppError('CONFLICT', 'Принятый черновик изменился.');
             let publicationId: string | undefined;
-            const editing = createEditing({ sites: { create: (input, a) => this.repo.create(input, a), get: id => this.repo.get(id), list: (a, c, l) => this.repo.list(a, c, l), compareAndSet: (id, rev, patch) => this.repo.compareAndSet(id, rev, patch, admission) },
+            const editing = createEditing({ artifacts: this.store, canRollback: (s, r) => this.repo.transaction(tx => retainedPublicationRevision(tx, s, r)), sites: { create: (input, a) => this.repo.create(input, a), get: id => this.repo.get(id), list: (a, c, l) => this.repo.list(a, c, l), compareAndSet: (id, rev, patch) => this.repo.compareAndSet(id, rev, patch, admission) },
                 store: this.repo.editingStore(admission), revisions: { get: id => this.repo.revision(id), put: r => this.repo.putRevision(r, admission) }, queue: this.repo.queue(admission), checkpoints: this.store,
                 publication: { advance: async () => { throw new AppError('UNAVAILABLE', 'Требуется серверная передача.'); } }, clock: { now: Date.now }, ids: { next: () => requestKey },
                 handoffPublication: async (intent) => {
                     if (intent.id !== requestKey || intent.revisionId !== revisionId)
                         throw new AppError('CONFLICT', 'Продолжите существующую публикацию.');
-                    const reservation = await this.repo.transaction(tx => this.queue.reserveControllerPublication(tx, admission, requestKey, { revisionId: intent.revisionId, manifestId: intent.manifestId, expectedRevision: intent.expectedRevision }));
+                    const reservation = await this.repo.transaction(tx => this.queue.reserveControllerPublication(tx, admission, requestKey, { revisionId: intent.revisionId, manifestId: intent.manifestId, expectedRevision: intent.expectedRevision, ...(intent.selection === 'rollback' ? { selection: 'rollback' as const } : {}) }));
                     publicationId = reservation.id;
                     await this.attach(reservation.id, intent.id);
                     return (await this.repo.get(siteId))!;
                 } });
-            await editing.publish(actor, siteId, expectedRevision);
+            if (selection === 'rollback')
+                await editing.rollback(actor, siteId, revisionId, expectedRevision);
+            else
+                await editing.publish(actor, siteId, expectedRevision);
             if (!publicationId)
                 throw new AppError('CONFLICT', 'Версия уже опубликована.');
             return this.view(publicationId);
@@ -182,17 +188,17 @@ export class PostgresPublication {
         return (await tx.query('select * from private.publication_reservations where id=$1 for update', [id])).rows[0];
     }
     async view(id: string): Promise<PublicationView> {
-        const r = (await this.repo.pool.query('select *,floor(extract(epoch from retry_at)*1000)::text retry from private.provider_publications where id=$1', [id])).rows[0];
+        const r = (await this.repo.pool.query('select p.*,floor(extract(epoch from retry_at)*1000)::text retry,d.data journal from private.provider_publications p left join private.deployments d on d.id=p.editing_intent_id where p.id=$1', [id])).rows[0];
         if (!r)
             throw new AppError('NOT_FOUND', 'Публикация не найдена.');
-        return { id: r.id, siteId: r.site_id, revisionId: r.revision_id, manifestId: r.manifest_id, manifestHash: r.manifest_hash, deploymentId: r.deployment_id, phase: r.phase, retryAt: r.retry === null ? null : Number(r.retry), cancelRequested: r.cancel_requested, settlement: r.settlement, verifiedAt: r.verified_at === null ? null : Number(r.verified_at), origin: r.editing_intent_id ? 'draft' : 'generation' };
+        return { id: r.id, siteId: r.site_id, revisionId: r.revision_id, manifestId: r.manifest_id, manifestHash: r.manifest_hash, deploymentId: r.deployment_id, phase: r.phase, retryAt: r.retry === null ? null : Number(r.retry), cancelRequested: r.cancel_requested, settlement: r.settlement, verifiedAt: r.verified_at === null ? null : Number(r.verified_at), origin: r.editing_intent_id ? r.journal?.selection === 'rollback' ? 'rollback' : 'draft' : 'generation' };
     }
     async getDomainSetup(siteId: string): Promise<DomainSetup> { const latest = await this.latest(siteId); return latest ? (await this.repo.pool.query('select data from private.provider_publications where id=$1', [latest.id])).rows[0].data.domainSetup : { records: [], verified: false }; }
     async latest(siteId: string) {
         const r = (await this.repo.pool.query('select r.id,p.id is not null attached from private.publication_reservations r left join private.provider_publications p on p.id=r.id where r.site_id=$1 and (r.resolution is null or p.id is not null) order by (r.resolution is null) desc,r.created_at desc,r.id limit 1', [siteId])).rows[0];
         return r ? r.attached ? this.view(r.id) : this.attach(r.id) : null;
     }
-    async history(siteId: string) { return Promise.all((await this.repo.pool.query('select id from private.provider_publications where site_id=$1 and verified_at is not null order by verified_at desc,id', [siteId])).rows.map(r => this.view(r.id))); }
+    async history(siteId: string) { return Promise.all((await this.repo.pool.query("select id from private.provider_publications where site_id=$1 and verified_at is not null order by (settlement<>'settled') desc,settled_seq desc nulls last,verified_at desc,id desc", [siteId])).rows.map(r => this.view(r.id))); }
     private async claim(id: string) {
         return this.repo.transaction(async (tx) => {
             const reservation = await this.lockReservation(tx, id);
@@ -225,9 +231,7 @@ export class PostgresPublication {
             // A known accepted deployment can still be building. Keep its account slot
             // until checking observes a terminal state; cancellation must not overbook it.
             if (r.cancel_requested && !p.promotionSent && !p.dispatched && p.action !== 'find' && !(p.action === 'check' && r.deployment_id)) {
-                await this.queue.settlePublicationInTransaction(tx, id, 'cancelled');
-                await tx.query("update private.provider_publications set cancel_requested=true,settlement='cancelled',phase='needs_attention' where id=$1", [id]);
-                await tx.query('update private.provider_accounts set active_intent=null where active_intent=$1', [id]);
+                await this.cancelObserved(tx, id, reservation, r);
                 return null;
             }
             const account = (await tx.query('select *,step_expires>clock_timestamp() busy,blocked_until>clock_timestamp() blocked from private.provider_accounts where id=$1 for update', [r.account_id])).rows[0];
@@ -467,6 +471,87 @@ export class PostgresPublication {
             await tx.query("update private.deployments set data=jsonb_set(data,'{state}','\"completed\"') where id=$1", [row.editing_intent_id]);
         await this.queue.settlePublicationInTransaction(tx, id, 'settled');
         await tx.query("update private.provider_publications set settlement='settled',phase='published' where id=$1", [id]);
+    }
+    private async cancelObserved(tx: SqlTransaction, id: string, reservation: any, row: any, actor?: Principal) { if (actor && reservation.origin_job_id) {
+        const job = (await tx.query('select data from private.jobs where id=$1', [reservation.origin_job_id])).rows[0]?.data;
+        if (job && !['completed', 'cancelled'].includes(job.state))
+            await this.queue.cancelInTransaction(tx, reservation.origin_job_id, actor);
+    } await this.queue.settlePublicationInTransaction(tx, id, 'cancelled'); await tx.query("update private.provider_publications set cancel_requested=true,settlement='cancelled',phase='needs_attention',step_token=null,step_expires=null where id=$1", [id]); await tx.query('update private.provider_accounts set active_intent=null where active_intent=$1', [id]); if (row.editing_intent_id)
+        await tx.query("update private.deployments set data=jsonb_set(data,'{state}','\"conflict\"') where id=$1 and data->>'state'='pending'", [row.editing_intent_id]); }
+    private recoveryState(tx: SqlTransaction, id: string) { return tx.query("select jsonb_build_object('reservation',to_jsonb(r),'publication',to_jsonb(p),'site',to_jsonb(s),'operation',to_jsonb(o)) data from private.publication_reservations r join public.sites s on s.id=r.site_id left join private.provider_publications p on p.id=r.id left join private.site_operations o on o.site_id=r.site_id where r.id=$1", [id]); }
+    private async recoveryAdmin(tx: SqlTransaction, actor: Principal, restoreId?: string) { authorize(await this.repo.fresh(tx, actor), 'site:export'); const installation = (await tx.query("select data from private.recovery_state where key='installation'")).rows[0]?.data, quarantine = (await tx.query("select data from private.recovery_state where key='quarantine'")).rows[0]?.data; if (restoreId && installation?.restoreId !== restoreId)
+        throw new AppError('CONFLICT', 'Другая восстановленная установка.'); return { installation, quarantine }; }
+    async recoveryPublications(actor: Principal, offset = 0) { const saved = await this.repo.transaction(async (tx) => { const context = await this.recoveryAdmin(tx, actor); if (!context.quarantine)
+        return { restoreId: null, rows: [], remaining: 0 }; const rows = (await tx.query("select jsonb_build_object('reservation',to_jsonb(r),'publication',to_jsonb(p),'site',to_jsonb(s),'operation',to_jsonb(o)) data from private.publication_reservations r join public.sites s on s.id=r.site_id left join private.provider_publications p on p.id=r.id left join private.site_operations o on o.site_id=r.site_id where r.resolution is null order by r.id limit 21 offset $1", [offset])).rows; const remaining = Number((await tx.query('select count(*) n from private.publication_reservations where resolution is null')).rows[0].n); return { restoreId: context.installation?.restoreId ?? context.quarantine.restoreId, rows, remaining }; }); return { restoreId: saved.restoreId ?? null, remaining: saved.remaining, items: saved.rows.slice(0, 20).map(r => ({ id: r.data.reservation.id, siteId: r.data.site.id, domain: r.data.site.domain, accountId: r.data.publication?.account_id ?? null, attached: !!r.data.publication, digest: recoveryDigest([saved.restoreId, r.data]) })), nextOffset: saved.rows.length > 20 ? offset + 20 : null }; }
+    async reconcileRecovery(actor: Principal, restoreId: string, id: string, expectedDigest: string) {
+        const accountId = this.client.options.accountId, key = 'recovery-publication:' + restoreId + ':' + id, initial = await this.repo.transaction(async (tx) => { const context = await this.recoveryAdmin(tx, actor, restoreId), receipt = (await tx.query('select data from private.recovery_state where key=$1', [key])).rows[0]?.data, state = (await this.recoveryState(tx, id)).rows[0]?.data; if (!state)
+            throw new AppError('NOT_FOUND', 'Публикация не найдена.'); if (receipt?.digest === expectedDigest && receipt.accountId === accountId && state.reservation.resolution === receipt.result.status && state.reservation.site_id === receipt.original.reservation.site_id && JSON.stringify(state.reservation.binding) === JSON.stringify(receipt.original.reservation.binding))
+            return { receipt: receipt.result }; if (!context.quarantine || context.quarantine.restoreId !== restoreId || state.reservation.resolution)
+            throw new AppError('CONFLICT', 'Сверка уже изменилась.'); return { state }; });
+        if (initial.receipt)
+            return initial.receipt;
+        const snapshot = initial.state;
+        if (recoveryDigest([restoreId, snapshot]) !== expectedDigest)
+            throw new AppError('CONFLICT', 'Сначала обновите список сверки.');
+        const row = snapshot.publication, reservation = snapshot.reservation;
+        let observation: RecoveryObservation = { status: 'manual-required', reason: 'unattached-reservation-needs-manual-proof' };
+        if (row) {
+            if (row.site_id !== reservation.site_id || row.revision_id !== reservation.binding.revisionId || row.manifest_id !== reservation.binding.manifestId || row.data?.domain !== snapshot.site.domain || row.data?.revision?.id !== row.revision_id || row.data?.revision?.siteId !== row.site_id || row.data?.revision?.manifestId !== row.manifest_id)
+                observation = { status: 'manual-required', reason: 'frozen-binding-mismatch' };
+            else
+                try {
+                    observation = await observeRecoveryPublication(this.client, this.verify, row, await this.manifest(row));
+                }
+                catch {
+                    observation = { status: 'manual-required', reason: 'retained-manifest-unavailable' };
+                }
+        }
+        const observed = observation, audit = { restoreId, accountId, digest: expectedDigest, original: snapshot, observation: observed, observedAt: Date.now() };
+        return this.repo.transaction(async (tx) => {
+            const context = await this.recoveryAdmin(tx, actor, restoreId);
+            if (context.quarantine?.restoreId !== restoreId || this.client.options.accountId !== accountId)
+                throw new AppError('CONFLICT', 'Восстановление или аккаунт изменились.');
+            const locked = await this.lockReservation(tx, id);
+            await tx.query('select id from private.provider_publications where id=$1 for update', [id]);
+            if (row)
+                await tx.query('select id from private.provider_accounts where id=$1 for update', [accountId]);
+            const current = (await this.recoveryState(tx, id)).rows[0]?.data, same = (await tx.query('select $1::jsonb=$2::jsonb same', [current, snapshot])).rows[0].same;
+            if (!same)
+                throw new AppError('CONFLICT', 'Доказательство устарело; обновите список.');
+            let result: {
+                status: string;
+                reason?: string;
+            } = { status: observed.status, ...(observed.status === 'manual-required' ? { reason: observed.reason } : {}) };
+            if (observed.status !== 'manual-required') {
+                const site = (await this.repo.get(row.site_id, tx))!, installed = site.publishedId === row.revision_id && site.revision === locked.binding.expectedRevision + 1, operation = current.operation;
+                if (!operation || operation.kind !== 'publication' || operation.operation_id !== id)
+                    result = { status: 'manual-required', reason: 'publication-admission-missing' };
+                else if (site.revision !== locked.binding.expectedRevision && !(observed.status === 'settled' && installed))
+                    result = { status: 'manual-required', reason: 'site-binding-changed' };
+                else {
+                    await tx.query("select set_config('site_factory.restore','1',true)");
+                    if (observed.status === 'cancelled')
+                        await this.cancelObserved(tx, id, locked, row, actor);
+                    else {
+                        await tx.query('update private.provider_publications set deployment_id=$2,evidence=coalesce(evidence,$3::jsonb),verified_at=coalesce(verified_at,$4::bigint),step_token=null,step_expires=null where id=$1', [id, observed.deploymentId, observed.evidence, observed.verifiedAt]);
+                        const ready = (await tx.query('select * from private.provider_publications where id=$1', [id])).rows[0];
+                        if (installed) {
+                            await this.queue.settlePublicationInTransaction(tx, id, 'settled');
+                            await tx.query("update private.provider_publications set settlement='settled',phase='published' where id=$1", [id]);
+                        }
+                        else
+                            await this.settle(tx, id, locked, ready);
+                        if ((await tx.query('select resolution from private.publication_reservations where id=$1', [id])).rows[0].resolution === 'settled')
+                            await tx.query('update private.provider_accounts set active_intent=null where active_intent=$1', [id]);
+                        else
+                            result = { status: 'manual-required', reason: 'settlement-not-confirmed' };
+                    }
+                }
+            }
+            await tx.query('insert into private.recovery_state values($1,$2) on conflict(key) do update set data=excluded.data', [result.status === 'manual-required' ? 'recovery-observation:' + restoreId + ':' + id : key, { ...audit, result }]);
+            await tx.query("insert into private.audit(actor_id,action,target_id) values($1,'recovery_publication_observed',$2)", [actor.userId, id]);
+            return result;
+        }, 'exclusive');
     }
     async tick(): Promise<void> {
         const due = await this.repo.transaction(async (tx) => {

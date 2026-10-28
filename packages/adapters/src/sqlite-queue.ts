@@ -3,6 +3,7 @@ import type { Clock, Job, Lease } from '../../contracts/src/model.js';
 import { nonemptyString } from '../../contracts/src/inputs.js';
 import { openLocalDatabase, insertLocalJob, type LocalDatabase } from './local-database.js';
 import { validJob, type LocalQueue } from './local-queue.js';
+import { commitLocalProjection } from './retention-schema.js';
 export async function createSqliteQueue(directory: string, clock: Clock, database?: LocalDatabase): Promise<LocalQueue> {
     const db = database ?? await openLocalDatabase(directory);
     let closed = false;
@@ -54,16 +55,17 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
                 insertLocalJob(db, j);
             });
         },
-        claim(workerId,mode='all') {
+        claim(workerId, mode = 'all') {
             return run(() => {
                 if (!nonemptyString(workerId))
                     throw new AppError('INVALID_INPUT', 'Worker ID is required.');
-                if(!['all','visual'].includes(mode))throw new AppError('INVALID_INPUT','Invalid claim mode.');
+                if (!['all', 'visual'].includes(mode))
+                    throw new AppError('INVALID_INPUT', 'Invalid claim mode.');
                 const t = now();
                 const running = db.sql.prepare("select * from jobs where state='running'").all() as unknown as Stored[];
                 if (running.filter(r => { const l = JSON.parse(r.lease!) as Lease; return l.workerId === workerId && l.expiresAt > t; }).length >= 2)
                     return null;
-                const r = db.sql.prepare(`select j.* from jobs j left join batches b on b.id=j.batch_id where (?='all' or (json_extract(j.data,'$.kind')='edit' and json_extract(j.data,'$.edit.producer.kind')='visual')) and j.pause=0 and (j.batch_id is null or b.state='active') and (j.state='queued' or (j.state='running' and json_extract(j.lease,'$.expiresAt')<=?)) and not exists(select 1 from jobs x where x.site_id=j.site_id and x.seq<>j.seq and x.state not in ('completed','cancelled') and (x.seq<j.seq or x.state='running')) order by j.seq limit 1`).get(mode,t) as unknown as Stored | undefined;
+                const r = db.sql.prepare(`select j.* from jobs j left join batches b on b.id=j.batch_id where (?='all' or (json_extract(j.data,'$.kind')='edit' and json_extract(j.data,'$.edit.producer.kind')='visual')) and j.pause=0 and (j.batch_id is null or b.state='active') and (j.state='queued' or (j.state='running' and json_extract(j.lease,'$.expiresAt')<=?)) and not exists(select 1 from jobs x where x.site_id=j.site_id and x.seq<>j.seq and x.state not in ('completed','cancelled') and (x.seq<j.seq or x.state='running')) order by j.seq limit 1`).get(mode, t) as unknown as Stored | undefined;
                 if (!r)
                     return null;
                 const admission = db.sql.prepare('select operation_id from operations where site_id=?').get(job(r).siteId);
@@ -77,13 +79,19 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
             });
         },
         heartbeat(lease) { return run(() => { const r = owned(lease), next = { ...lease, expiresAt: now() + 120000 }; save(r, job(r), JSON.stringify(next)); return next; }); },
-        checkpoint(lease, cp, expected) {
+        checkpoint(lease, cp, expected, projection) {
             return run(() => {
                 const r = owned(lease), j = job(r);
                 if (cp.jobId !== j.id || !nonemptyString(cp.id) || !nonemptyString(cp.stage))
                     throw new AppError('INVALID_INPUT', 'Checkpoint belongs to another job.');
                 if (expected !== undefined && j.checkpointId !== expected)
                     throw new AppError('CONFLICT', 'Checkpoint changed.');
+                if (projection) {
+                    if (projection.evidence.checkpoint.id !== cp.id || projection.usage.predecessor !== (expected ?? j.checkpointId))
+                        throw new AppError('CONFLICT', 'Проекция не соответствует контрольной точке.');
+                    commitLocalProjection(db.sql, projection, true, lease);
+                }
+                db.sql.prepare("update payload_inventory set data=json_set(data,'$.accepted',json('true')) where kind='checkpoint' and id=?").run(cp.id);
                 save(r, { ...j, checkpointId: cp.id, stage: cp.stage });
             });
         },

@@ -1,19 +1,23 @@
 import { PostgresBatches } from '../../../../packages/adapters/src/postgres-batches.js';
+import { PostgresRetention } from '../../../../packages/adapters/src/postgres-retention.js';
 import { PostgresImportResources } from '../../../../packages/adapters/src/postgres-import-resources.js';
+import { projectCheckpoint } from '../../../../packages/core/src/usage.js';
 import { AppError } from '../../../../packages/contracts/src/model.js';
 import { integer, leaseDto, object, string, uuid } from '../../../../packages/contracts/src/http.js';
 import type { PostgresQueue } from '../../../../packages/adapters/src/postgres-queue.js';
-import type { R2Store } from '../../../../packages/adapters/src/r2-store.js';
+import { metadata, type R2Store } from '../../../../packages/adapters/src/r2-store.js';
 import type { PostgresPublication } from '../../../../packages/adapters/src/postgres-publication.js';
 export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store | undefined, workerId: string, path: string, body: unknown, publication?: PostgresPublication): Promise<unknown> {
     if (!queue)
         throw new AppError('UNAVAILABLE', 'Очередь не подключена.');
+    if ((await queue.repository.pool.query("select 1 from private.recovery_state where key='quarantine'")).rowCount)
+        throw new AppError('CONFLICT', 'Восстановленная установка ожидает проверки.');
     if (path === '/worker/publications/tick') {
         object(body, []);
         const worker = (await queue.repository.pool.query('select id from private.workers where id=$1 and revoked_at is null', [workerId])).rows[0];
         if (!worker)
             throw new AppError('STALE_LEASE', 'Устройство отозвано.');
-        const outcomes = await Promise.allSettled([new PostgresBatches(queue.repository).advance(), publication?.tick()]);
+        const outcomes = await Promise.allSettled([new PostgresBatches(queue.repository).advance(), publication?.tick(), store?.transport.delete ? new PostgresRetention(queue.repository, store.transport).maintain(store) : undefined]);
         const failed = outcomes.find(outcome => outcome.status === 'rejected');
         if (failed?.status === 'rejected')
             throw failed.reason;
@@ -27,17 +31,35 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
         return publication ? publication.receipt(workerId, lease) : null;
     }
     if (path === '/worker/jobs/claim') {
-        const p=object(body, ['mode']);if(p.mode!==undefined&&!['all','visual'].includes(String(p.mode)))throw new AppError('INVALID_INPUT','Invalid claim mode.');
-        return queue.claim(workerId,p.mode as 'all'|'visual'|undefined);
+        const p = object(body, ['mode']);
+        if (p.mode !== undefined && !['all', 'visual'].includes(String(p.mode)))
+            throw new AppError('INVALID_INPUT', 'Invalid claim mode.');
+        return queue.claim(workerId, p.mode as 'all' | 'visual' | undefined);
     }
-    const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo)$/.exec(path);
+    const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo|template)$/.exec(path);
     if (!route)
         throw new AppError('NOT_FOUND', 'Маршрут исполнителя не найден.');
-    const fields: Record<string, string[]> = { logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
+    const fields: Record<string, string[]> = { template: ['styleId', 'version', 'path'], logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
     const p = object(body, ['lease', ...(fields[route[2]!] ?? [])]), lease = leaseDto(p.lease);
     if (lease.jobId !== uuid(route[1]) || lease.workerId !== workerId)
         throw new AppError('STALE_LEASE', 'Чужая аренда.');
     switch (route[2]) {
+        case 'template': {
+            if (!store)
+                throw new AppError('UNAVAILABLE', 'Хранилище не подключено.');
+            await queue.repository.transaction(async (tx) => { await queue.assertCurrent(tx, workerId, lease); const selection = (await tx.query("select coalesce(j.data->'generation',e.data#>'{state,selection}') selection from private.jobs j left join private.checkpoint_evidence e on e.id=j.checkpoint_id where j.id=$1", [lease.jobId])).rows[0]?.selection; if (selection?.styleId !== p.styleId || selection?.templateVersion !== p.version)
+                throw new AppError('CONFLICT', 'Версия шаблона не закреплена за заданием.'); });
+            const files = await store.readPinnedTemplate(string(p.styleId, 100), string(p.version, 100));
+            await queue.repository.transaction(tx => queue.assertCurrent(tx, workerId, lease));
+            if (!files)
+                return { available: false };
+            if (p.path === undefined)
+                return { available: true, files: files.map(metadata) };
+            const file = files.find(f => f.path === string(p.path, 240));
+            if (!file)
+                throw new AppError('NOT_FOUND', 'Файл шаблона не найден.');
+            return new Response(Buffer.from(file.bytes), { headers: { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' } });
+        }
         case 'logo': {
             const bound = await queue.repository.transaction(tx => queue.assertCurrent(tx, workerId, lease));
             const site = await queue.repository.get(bound.siteId);
@@ -104,7 +126,8 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             if (!store)
                 throw new AppError('UNAVAILABLE', 'Хранилище не подключено.');
             const checkpoint = await store.load(uuid(p.checkpointId));
-            await queue.checkpoint(lease, checkpoint.checkpoint, p.expectedCheckpointId === null ? null : uuid(p.expectedCheckpointId));
+            const predecessor = p.expectedCheckpointId === null ? null : uuid(p.expectedCheckpointId);
+            await queue.checkpoint(lease, checkpoint.checkpoint, predecessor, projectCheckpoint(checkpoint.checkpoint, checkpoint.state, checkpoint.files, predecessor));
             return { ok: true };
         }
         case 'finish':
