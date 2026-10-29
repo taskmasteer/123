@@ -19,7 +19,7 @@ export async function handler(request: Request) {
             const env = process.env;
             if (!env.DATABASE_URL || !env.SUPABASE_URL)
                 return unavailable();
-            const repository = new SupabaseRepository(configureSnapshotConnection(new Pool({ connectionString: env.DATABASE_URL, max: 4 }), env.DATABASE_CONNECTION_MODE));
+            const repository = new SupabaseRepository(configureSnapshotConnection(new Pool({ connectionString: env.DATABASE_URL, max: 4,connectionTimeoutMillis:5000 }), env.DATABASE_CONNECTION_MODE));
             const queue = new PostgresQueue(repository), issuer = new URL('/auth/v1', env.SUPABASE_URL).href;
             const auth = createAuth({ issuer, audience: 'authenticated', membership: id => repository.membership(id), worker: hash => repository.worker(hash) });
             const store = env.R2_ENDPOINT && env.R2_BUCKET && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY

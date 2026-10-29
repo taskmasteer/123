@@ -11,28 +11,29 @@ import { registerPostgresPayload, assertPostgresPayload } from './postgres-reten
 import { projectCheckpoint, parseCheckpointEvidence } from '../../core/src/usage.js';
 import { verifyValidationPng } from './import-resources.js';
 export interface ObjectTransport {
-    range?(key: string, offset: number, length: number): Promise<Uint8Array>;
-    delete?(key: string): Promise<void>;
+    range?(key: string, offset: number, length: number, signal?:AbortSignal): Promise<Uint8Array>;
+    delete?(key: string, signal?:AbortSignal): Promise<void>;
     signPut(key: string, mediaType: string): Promise<string>;
-    put(key: string, bytes: Uint8Array, mediaType: string): Promise<void>;
-    head(key: string): Promise<{
+    put(key: string, bytes: Uint8Array, mediaType: string, signal?:AbortSignal): Promise<void>;
+    head(key: string, signal?:AbortSignal): Promise<{
         size: number;
         mediaType: string;
     }>;
-    get(key: string, maxBytes: number): Promise<Uint8Array>;
+    get(key: string, maxBytes: number, signal?:AbortSignal): Promise<Uint8Array>;
 }
 export class R2Transport implements ObjectTransport {
     constructor(private client: S3Client, private bucket: string) { }
-    async delete(key: string) { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })); }
-    async range(key: string, offset: number, length: number) {
-        if (length < 1 || length > 24000)
+    async delete(key: string, signal?:AbortSignal) { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),signal?{abortSignal:signal}:{}); }
+    async range(key: string, offset: number, length: number, signal?:AbortSignal) {
+        if (length < 1 || length > 1024 ** 2)
             throw new AppError('INVALID_INPUT', 'Неверный диапазон.');
-        const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: `bytes=${offset}-${offset + length - 1}` }));
+        const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: `bytes=${offset}-${offset + length - 1}` }),signal?{abortSignal:signal}:{});
         if (!response.Body || response.ContentLength !== length)
             throw new AppError('INVALID_INPUT', 'Диапазон объекта повреждён.');
         const parts: Uint8Array[] = [];
         let size = 0;
         for await (const part of response.Body as AsyncIterable<Uint8Array>) {
+            signal?.throwIfAborted();
             size += part.length;
             if (size > length)
                 throw new AppError('INVALID_INPUT', 'Диапазон превышен.');
@@ -43,15 +44,16 @@ export class R2Transport implements ObjectTransport {
         return Buffer.concat(parts);
     }
     signPut(key: string, mediaType: string) { return getSignedUrl(this.client, new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: mediaType, IfNoneMatch: '*' }), { expiresIn: 600, signableHeaders: new Set(['content-type', 'if-none-match']) }); }
-    async put(key: string, bytes: Uint8Array, mediaType: string) { await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: mediaType, IfNoneMatch: '*' })); }
-    async head(key: string) { const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })); return { size: r.ContentLength ?? -1, mediaType: r.ContentType ?? '' }; }
-    async get(key: string, maxBytes: number) {
-        const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    async put(key: string, bytes: Uint8Array, mediaType: string, signal?:AbortSignal) { await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: mediaType, IfNoneMatch: '*' }),signal?{abortSignal:signal}:{}); }
+    async head(key: string, signal?:AbortSignal) { const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }), signal?{abortSignal:signal}:{}); return { size: r.ContentLength ?? -1, mediaType: r.ContentType ?? '' }; }
+    async get(key: string, maxBytes: number, signal?:AbortSignal) {
+        const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }),signal?{abortSignal:signal}:{});
         if (!r.Body || (r.ContentLength ?? Infinity) > maxBytes)
             throw new AppError('INVALID_INPUT', 'Размер объекта не соответствует снимку.');
         const chunks: Uint8Array[] = [];
         let size = 0;
         for await (const part of r.Body as AsyncIterable<Uint8Array>) {
+            signal?.throwIfAborted();
             size += part.length;
             if (size > maxBytes)
                 throw new AppError('INVALID_INPUT', 'Размер объекта превышен.');

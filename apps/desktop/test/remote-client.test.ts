@@ -2,6 +2,17 @@ import { test, expect, vi } from 'vitest';
 import { RemoteClient, sessionView } from '../src/lib/remote-client.js';
 import { selectClient, desktopClient } from '../src/lib/desktop-client.js';
 const id = '11111111-1111-4111-8111-111111111111';
+
+test('disposal closes native archive IDs with the captured original client before clearing Auth',async()=>{
+    let token='one',disposed=false,release!:()=>void;const close=new Promise<void>(r=>release=r),requests:any[]=[];
+    vi.stubGlobal('isTauri',true);vi.stubGlobal('window',{__TAURI_INTERNALS__:{invoke:async(command:string,args:any)=>{expect(command).toBe('archive_operation');requests.push(args.request);if(args.request.action==='close')await close;return args.request.action==='close'?{ok:true}:{id,state:'working'};}}});
+    try{
+        const client=new RemoteClient('https://original.test',async()=>token,fetch,()=>{disposed=true;});
+        await client.archive({action:'backup',passphrase:'private password'});token='two';await client.archive({action:'status',id});client.dispose();await new Promise(setImmediate);
+        expect(disposed).toBe(false);expect(requests.at(-1)).toEqual({action:'close',id,remote:{origin:'https://original.test',accessToken:'two'}});
+        await expect(client.archive({action:'status',id})).rejects.toMatchObject({code:'UNAUTHENTICATED'});release();await new Promise(setImmediate);expect(disposed).toBe(true);
+    }finally{release();vi.unstubAllGlobals();}
+});
 test('remote evidence accepts the worker validation PNG identity but rejects traversal and encoded screenshot paths',async()=>{
  const candidate={id,siteId:id,jobId:id,baseRevision:0,baseDraftId:id,baseManifestId:id,parentRevisionId:id,manifestId:id,status:'ready',validation:{ok:true,issues:[],screenshotIds:[`validation/${id}.png`]},summary:'Checked',createdAt:1,acceptance:null,instruction:'Visual edit',job:{id,siteId:id,kind:'edit',stage:'completed',state:'completed',checkpointId:id,baseRevision:0}};
  let value:unknown={candidates:[candidate],publication:null};const client=new RemoteClient('https://control.test',async()=> 'fixture',async()=>Response.json(value));
@@ -113,4 +124,9 @@ test('staged import commands stay on the configured API and reject private respo
     result = { id, privateKey: 'never expose' };
     await expect(client.request('resource.begin', { name: 'sites.csv', size: 1, sha256: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(client.request('resource.chunk', { id, index: 0, base64: 'A'.repeat(33000) })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+});
+
+test('disposal denies an archive start whose credential read was already pending',async()=>{
+ let release!:(token:string)=>void;const token=new Promise<string>(r=>release=r),calls:any[]=[];vi.stubGlobal('isTauri',true);vi.stubGlobal('window',{__TAURI_INTERNALS__:{invoke:async(_command:string,args:any)=>{calls.push(args);return {id,state:'working'};}}});
+ try{const client=new RemoteClient('https://control.test',()=>token);const pending=client.archive({action:'backup',passphrase:'private password'});client.dispose();release('fixture');await expect(pending).rejects.toMatchObject({code:'UNAUTHENTICATED'});expect(calls).toEqual([]);}finally{vi.unstubAllGlobals();}
 });

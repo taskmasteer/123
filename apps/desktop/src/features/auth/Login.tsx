@@ -21,7 +21,9 @@ export function Login({managed,onStart,onConnected,onLocal}:{managed:boolean;onS
      if(url.origin!==authUrl.origin)throw new Error('Недопустимый адрес Auth.');
      return fetch(input,{...init,redirect:'error'});
     }},auth:{storageKey:`site-factory-managed-${crypto.randomUUID()}`,persistSession:false,autoRefreshToken:true,detectSessionInUrl:false}});
-    const next=new RemoteClient(String(fields.get('apiUrl')),async()=>(await client.auth.getSession()).data.session?.access_token??null,fetch,()=>{client.auth.stopAutoRefresh();void client.auth.signOut();});
+    let subscription:{unsubscribe():void}|undefined;
+    const next=new RemoteClient(String(fields.get('apiUrl')),async()=>(await client.auth.getSession()).data.session?.access_token??null,fetch,()=>{subscription?.unsubscribe();client.auth.stopAutoRefresh();void client.auth.signOut();});
+    subscription=client.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT')next.dispose();}).data.subscription;
     auth.current?.auth.stopAutoRefresh();auth.current=client;remote.current=next;selectClient(next);onStart();
     const email=String(fields.get('email')).trim();
     if(stage==='invite'){
@@ -53,5 +55,5 @@ export function Login({managed,onStart,onConnected,onLocal}:{managed:boolean;onS
   <button className="primary" disabled={busy}>{busy?'Подключение…':stage==='invite'?'Подтвердить код':stage==='password'?'Сохранить пароль и войти':'Войти в общий реестр'}</button>
  </form>
  {stage!=='password'?<button disabled={busy} onClick={()=>{setStage(stage==='signin'?'invite':'signin');setCode('');setPassword('');setError('');}}>{stage==='signin'?'Принять приглашение по коду':'У меня уже есть пароль'}</button>:null}
- {managed?<button disabled={busy} onClick={()=>{auth.current?.auth.stopAutoRefresh();void auth.current?.auth.signOut();selectClient('local');onLocal();}}>Перейти в локальный режим</button>:<p className="hint">Сейчас выбран локальный режим. Данные на этом устройстве отделены от общего реестра.</p>}</section>;
+ {managed?<button disabled={busy} onClick={()=>{selectClient('local');onLocal();}}>Перейти в локальный режим</button>:<p className="hint">Сейчас выбран локальный режим. Данные на этом устройстве отделены от общего реестра.</p>}</section>;
 }

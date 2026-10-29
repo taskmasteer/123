@@ -1,6 +1,8 @@
 import { batchesRoute } from './routes/batches.js';
 import { historyRoute } from './routes/history.js';
 import { recoveryRoute } from './routes/recovery.js';
+import { recoveryTransferSelection, recoveryTransferRoute, verifiedRecoverySession } from './routes/recovery-transfer.js';
+import { PostgresRecoveryTransfer } from '../../../packages/adapters/src/postgres-recovery-transfer.js';
 import type { PostgresBackup } from '../../../packages/adapters/src/postgres-backup.js';
 import { SignJWT, jwtVerify } from 'jose';
 import { AppError } from '../../../packages/contracts/src/model.js';
@@ -36,12 +38,12 @@ export interface AppDependencies {
     publicOrigin?: string;
     allowedOrigins?: string[];
 }
-async function body(request: Request) {
+async function body(request: Request, maximum=64000) {
     if (request.method === 'GET' || request.method === 'HEAD')
         return {};
     if (!request.headers.get('content-type')?.startsWith('application/json'))
         throw new AppError('INVALID_INPUT', 'Требуется JSON.');
-    if (Number(request.headers.get('content-length') ?? 0) > 64000)
+    if (Number(request.headers.get('content-length') ?? 0) > maximum)
         throw new AppError('INVALID_INPUT', 'Запрос слишком большой.');
     const reader = request.body?.getReader();
     let size = 0;
@@ -52,7 +54,7 @@ async function body(request: Request) {
             if (r.done)
                 break;
             size += r.value.length;
-            if (size > 64000) {
+            if (size > maximum) {
                 await reader.cancel();
                 throw new AppError('INVALID_INPUT', 'Используйте прямую загрузку ресурса.');
             }
@@ -134,9 +136,12 @@ export function createApp(deps: Partial<AppDependencies>) {
             }
             const actor = await deps.auth.verifyUser(token), repo = deps.repository;
             if (url.pathname === '/session' && request.method === 'GET') {
-                const current = await repo.transaction(tx => repo.fresh(tx, actor));
+                // Membership projection has no payload capabilities and must remain available during an atomic install.
+                const role=await repo.membership(actor.userId);
+                if(!role)throw new AppError('FORBIDDEN','Нет доступа.');
+                const current={userId:actor.userId,role};
                 const result: SessionView = { principal: current, mode: 'managed', capabilities: { admin: current.role === 'admin', edit: current.role !== 'user', generation: !!deps.queue && !!deps.store, publish: !!deps.publication, export: false, preview: !!deps.store && !!deps.previewKey, nativeModelSettings: false } };
-                return finish(json(result));
+                const response=json(result);response.headers.set('x-site-factory-session',verifiedRecoverySession(token,actor));return finish(response);
             }
             if (url.pathname === '/admin/integrations' && request.method === 'GET') {
                 if (actor.role !== 'admin')
@@ -158,8 +163,16 @@ export function createApp(deps: Partial<AppDependencies>) {
                 const cap = await new SignJWT({ siteId, revisionId }).setSubject(actor.userId).setAudience('site-preview').setIssuedAt().setExpirationTime('10m').setProtectedHeader({ alg: 'HS256' }).sign(deps.previewKey);
                 return finish(json({ url: `${deps.publicOrigin}/preview/${siteId}/${revisionId}/index.html?cap=${cap}` }));
             }
+            const selectedTransfer=recoveryTransferSelection(request,url),scope=verifiedRecoverySession(token,actor);
+            if(selectedTransfer){
+                if(!deps.backup)return unavailable();
+                await deps.backup.admin(actor);
+                await new PostgresRecoveryTransfer(deps.backup,scope).authorize(actor,selectedTransfer.id,selectedTransfer.kind,selectedTransfer.action==='cancel');
+                const payload=await body(request,selectedTransfer.large?2*1024**2:64000);
+                return finish(json(await recoveryTransferRoute(deps.backup,actor,scope,request,url,payload)));
+            }
             const data = await body(request);
-            const recovery = await recoveryRoute(deps.backup, actor, request, url, data, deps.publication);
+            const recovery = await recoveryRoute(deps.backup, actor, request, url, data, deps.publication,scope);
             if (recovery !== undefined)
                 return finish(json(recovery));
             if (/\/(visual|candidates|chat|publication|publish|edits)(?:\/|$)/.test(url.pathname) && (await repo.pool.query("select 1 from private.recovery_state where key='quarantine'")).rowCount)
@@ -170,7 +183,7 @@ export function createApp(deps: Partial<AppDependencies>) {
             const control = await jobControlsRoute(deps.queue, deps.store, actor, request, url.pathname, data);
             if (control !== undefined)
                 return finish(json(control));
-            for (const route of [() => historyRoute(repo, deps.store, deps.publication, actor, request, url, data, deps.backup), () => visualRoute(repo, deps.store, actor, request, url, data), () => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
+            for (const route of [() => historyRoute(repo, deps.store, deps.publication, actor, request, url, data, deps.backup,scope), () => visualRoute(repo, deps.store, actor, request, url, data), () => batchesRoute(repo, actor, request, url.pathname, data, deps.queue, deps.store), () => sitesRoute(repo, actor, request, url, data), () => editingRoute(repo, deps.store, actor, request, url.pathname, data), () => adminRoute(repo, deps.invitations, actor, request, url.pathname, data), () => workersRoute(repo, actor, request, url.pathname, data)]) {
                 const result = await route();
                 if (result !== undefined)
                     return finish(json(result));

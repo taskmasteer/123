@@ -1,5 +1,7 @@
 import { PostgresBatches } from '../../../../packages/adapters/src/postgres-batches.js';
 import { PostgresRetention } from '../../../../packages/adapters/src/postgres-retention.js';
+import { PostgresBackup } from '../../../../packages/adapters/src/postgres-backup.js';
+import { PostgresRecoveryTransfer } from '../../../../packages/adapters/src/postgres-recovery-transfer.js';
 import { PostgresImportResources } from '../../../../packages/adapters/src/postgres-import-resources.js';
 import { projectCheckpoint } from '../../../../packages/core/src/usage.js';
 import { AppError } from '../../../../packages/contracts/src/model.js';
@@ -17,7 +19,7 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
         const worker = (await queue.repository.pool.query('select id from private.workers where id=$1 and revoked_at is null', [workerId])).rows[0];
         if (!worker)
             throw new AppError('STALE_LEASE', 'Устройство отозвано.');
-        const outcomes = await Promise.allSettled([new PostgresBatches(queue.repository).advance(), publication?.tick(), store?.transport.delete ? new PostgresRetention(queue.repository, store.transport).maintain(store) : undefined]);
+        const outcomes = await Promise.allSettled([new PostgresBatches(queue.repository).advance(), publication?.tick(), store?.transport.delete ? new PostgresRetention(queue.repository, store.transport).maintain(store) : undefined,store?.transport.delete?new PostgresRecoveryTransfer(new PostgresBackup(queue.repository,store)).sweep():undefined]);
         const failed = outcomes.find(outcome => outcome.status === 'rejected');
         if (failed?.status === 'rejected')
             throw failed.reason;

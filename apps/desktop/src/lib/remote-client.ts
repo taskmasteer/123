@@ -217,17 +217,27 @@ function validate(method: string, value: unknown): unknown {
 }
 export class RemoteClient {
     readonly mode = 'managed';
+    private disposed=false;
+    private archiveIds=new Set<string>();
+    private archiveRequests=new Set<Promise<unknown>>();
+    private archiveToken:string|null=null;
     constructor(readonly base: string, private token: () => Promise<string | null>, private transport: typeof fetch = fetch, private onDispose?: () => void) {
         const u = new URL(base);
         if (u.protocol !== 'https:' || u.pathname !== '/' || u.search || u.hash || u.username || u.password)
             throw new AppError('INVALID_INPUT', 'Требуется HTTPS-адрес API без пути.');
         this.base = u.origin;
     }
-    dispose() { this.onDispose?.(); }
+    dispose() {
+        if(this.disposed)return;this.disposed=true;
+        void (async()=>{await Promise.allSettled([...this.archiveRequests]);const token=this.archiveToken;if(token)await Promise.allSettled([...this.archiveIds].map(id=>invoke('archive_operation',{request:{action:'close',id,remote:{origin:this.base,accessToken:token}}})));this.archiveIds.clear();this.archiveToken=null;})().finally(()=>this.onDispose?.());
+    }
     async archive<T>(request: unknown): Promise<T> { if (!isTauri())
-        throw new AppError('UNAVAILABLE', 'Копии доступны в настольном приложении.'); const token = await this.token(); if (!token)
+        throw new AppError('UNAVAILABLE', 'Копии доступны в настольном приложении.'); if(this.disposed)throw new AppError('UNAUTHENTICATED','Подключение закрыто.');const token = await this.token(); if(this.disposed)throw new AppError('UNAUTHENTICATED','Подключение закрыто.'); if (!token)
         throw new AppError('UNAUTHENTICATED', 'Войдите в систему.'); if (!request || typeof request !== 'object' || Array.isArray(request) || 'remote' in request)
-        throw new AppError('INVALID_INPUT', 'Неверная операция копии.'); return invoke<T>('archive_operation', { request: { ...request, remote: { origin: this.base, accessToken: token } } }); }
+        throw new AppError('INVALID_INPUT', 'Неверная операция копии.'); this.archiveToken=token;
+        const work=invoke<T>('archive_operation',{request:{...request,remote:{origin:this.base,accessToken:token}}}).then(value=>{const p=request as {action?:string;id?:string};if(p.action==='close'&&p.id)this.archiveIds.delete(p.id);if(value&&typeof value==='object'&&'id' in value&&typeof value.id==='string'){if(!this.archiveIds.has(value.id)&&this.archiveIds.size>=4)this.archiveIds.delete(this.archiveIds.values().next().value!);this.archiveIds.add(value.id);}return value;});
+        this.archiveRequests.add(work);try{return await work;}finally{this.archiveRequests.delete(work);}
+    }
     async modelSettings<T>(request: unknown): Promise<T> {
         if (!isTauri())
             throw new AppError('UNAVAILABLE', 'Настройки модели доступны в нативном приложении.');

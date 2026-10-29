@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { retainedOutcomes, references } from '../src/retention.js';
-import { projectCheckpoint } from '../src/usage.js';
+import { projectCheckpoint,projectCheckpointFromFileDigests } from '../src/usage.js';
 import type { PublicationOutcome } from '../../contracts/src/recovery.js';
 it('counts six actual settled outcomes while preserving observed conflicts separately', () => {
     const outcomes: PublicationOutcome[] = Array.from({ length: 8 }, (_, i) => ({ id: String(i), siteId: 's', revisionId: 'r' + i, manifestId: 'm' + i, settledAt: i, verifiedAt: i, settlement: 'settled', origin: 'draft', mode: 'managed' }));
@@ -24,4 +25,12 @@ it('preserves cumulative continuation once and a minimal immutable evidence proj
     expect(projection.retained).toContainEqual({ kind: 'screenshot', id: 'png' });
     expect(projection.execution).toContainEqual({ kind: 'checkpoint', id: 'old' });
     expect(references(state, 'retained')).not.toContainEqual({ kind: 'artifact', id: 'base' });
+});
+
+it('keeps byte-backed and immutable-digest checkpoint projections identical',()=>{
+ const checkpoint={id:'cp',jobId:'j',stage:'completed',manifestId:'m',stateKey:'private/state',createdAt:17},state={jobId:'j',siteId:'s',manifestId:'m',modelIdentity:'demo',transcript:[{inputTokens:3,outputTokens:9}],validation:{ok:true,issues:[],screenshotIds:['image']}};
+ const files=[{path:'index.html',mediaType:'text/html',bytes:Buffer.from('<h1>actual bytes</h1>')},{path:'assets/x.bin',mediaType:'application/octet-stream',bytes:Buffer.from([0,255,7])}];
+ const digests=files.map(f=>({path:f.path,mediaType:f.mediaType,size:f.bytes.length,sha256:createHash('sha256').update(f.bytes).digest('hex')}));
+ expect(projectCheckpointFromFileDigests(checkpoint,state,digests,null)).toEqual(projectCheckpoint(checkpoint,state,files,null));
+ expect(projectCheckpointFromFileDigests(checkpoint,state,digests.slice().reverse(),null).evidence.digest).not.toBe(projectCheckpoint(checkpoint,state,files,null).evidence.digest);
 });

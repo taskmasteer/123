@@ -13,13 +13,17 @@ export function parseCheckpointEvidence(value: unknown): CheckpointEvidence { if
     throw new AppError('INVALID_INPUT', 'Привязка свидетельства повреждена.'); const digest = recoveryDigest([{ id: c.id, jobId: c.jobId, stage: c.stage, manifestId: c.manifestId, createdAt: c.createdAt }, s, value.sourceDigest, value.filesDigest]); if (digest !== value.digest)
     throw new AppError('INVALID_INPUT', 'Хэш свидетельства не совпадает.'); return value as unknown as CheckpointEvidence; }
 export function projectCheckpoint(checkpoint: Checkpoint, state: Record<string, unknown>, files: ArtifactFile[], predecessor: string | null): CheckpointProjection {
+    return projectCheckpointFromFileDigests(checkpoint,state,files.map(f=>({path:f.path,mediaType:f.mediaType,size:f.bytes.length,sha256:createHash('sha256').update(f.bytes).digest('hex')})),predecessor);
+}
+/** Pure projection; callers must establish each file digest from trusted immutable bytes. */
+export function projectCheckpointFromFileDigests(checkpoint:Checkpoint,state:Record<string,unknown>,files:ReadonlyArray<{path:string;mediaType:string;size:number;sha256:string}>,predecessor:string|null):CheckpointProjection {
     if (state.jobId !== checkpoint.jobId || typeof state.siteId !== 'string')
         throw new AppError('INVALID_INPUT', 'Контрольная точка принадлежит другому заданию.');
     const safe: Record<string, unknown> = {};
     for (const key of ['schema', 'jobId', 'siteId', 'baseRevision', 'parentRevisionId', 'revisionId', 'manifestId', 'revisionCreatedAt', 'selection', 'validation', 'visualMap', 'visualProducer'])
         if (state[key] !== undefined)
             safe[key] = structuredClone(state[key]);
-    const sourceDigest = createHash('sha256').update(JSON.stringify(state)).digest('hex'), filesDigest = recoveryDigest(files.map(f => [f.path, f.mediaType, f.bytes.length, createHash('sha256').update(f.bytes).digest('hex')]));
+    const sourceDigest = createHash('sha256').update(JSON.stringify(state)).digest('hex'), filesDigest = recoveryDigest(files.map(f => [f.path, f.mediaType, f.size, f.sha256]));
     const semanticCheckpoint = { id: checkpoint.id, jobId: checkpoint.jobId, stage: checkpoint.stage, manifestId: checkpoint.manifestId, createdAt: checkpoint.createdAt };
     const evidence = { version: 1 as const, checkpoint: structuredClone(checkpoint), state: safe, sourceDigest, filesDigest, digest: recoveryDigest([semanticCheckpoint, safe, sourceDigest, filesDigest]) };
     const visual = record(state.visualProducer), records = [...(Array.isArray(state.transcript) ? state.transcript : []), ...(record(state.continuation) ? [state.continuation] : [])];

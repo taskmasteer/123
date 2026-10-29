@@ -38,7 +38,7 @@
 Пять особенно важных ситуаций закреплены тестами в указанных задачах:
 
 1. Похожая запись домена, IDN, повторный импорт или URL с путём не создают второй сайт и не перезаписывают первый — задачи 1 и 10.
-2. Сбой между загрузкой файла, сохранением этапа и внешним HTTP-эффектом не теряет последнюю сохранённую версию и не запускает публикацию вслепую — задачи 2, 8 и 9.
+2. Сбой между загрузкой файла, сохранением этапа и внешним HTTP-эффектом не теряет последнюю сохранённую версию и не запускает публикацию вслепую — задачи 2, 8, 9, 12 и 15. Передача большой копии возобновляется ограниченными пакетами и не требует миллиона последовательных HTTP-вызовов.
 3. Одновременная правка с двух устройств и запоздавший ответ модели не затирают новый черновик; история чата отделена от принятой версии — задачи 5 и 8.
 4. Содержимое сайта с JavaScript, вредным путём или поддельным сообщением предпросмотра не достигает ключей, файлов ОС и Tauri IPC — задачи 2, 4, 6 и 11.
 5. Исчерпание квоты, отозванное устройство, неготовый DNS и выключенные исполнители показываются разными состояниями, а исправные задания продолжаются — задачи 7–10 и 13.
@@ -47,7 +47,7 @@
 
 - **A — локальный рабочий цикл, задачи 1–6.** Настоящее desktop-окно: создать сайт, написать правку в чат, сравнить, принять или отклонить, опубликовать в локальном тестовом адаптере. OpenAI-адаптер можно включить после настройки ключа; демонстрационные ответы подписаны как демонстрационные.
 - **B — работа через сервисы, задачи 7–9.** Три роли, приватные файлы, два доверенных устройства, восстановление и реальные публикации на Vercel Hobby.
-- **C — полный пилот, задачи 10–14.** Импорт, визуальный редактор, версии, резервирование, мониторинг, сборки и 5–10 реальных демосайтов.
+- **C — полный пилот, задачи 10–14 и дополнительная 15.** Импорт, визуальный редактор, версии, резервирование, мониторинг, сборки и 5–10 реальных демосайтов.
 
 Это части одного приложения. Каждая задача заканчивается проверяемым результатом. Не объявлять приложение завершённым после этапа A.
 
@@ -295,6 +295,21 @@ expect(resumedJob.stage).toBe(lastCommittedStage);
 - [ ] **4. Восстановить один сайт с историей в пустой тестовой среде.** Сначала проверить manifest и создать staging restore, затем переключить записи. В recovery.md описать повторное приглашение Auth-пользователей, привязку stable IDs и перевыпуск worker tokens; сервисные ключи не включать в backup. Проверить локальную независимую копию, отличать её от R2 версии.
 - [ ] **5. Commit:** `feat: add revision retention and portable recovery`.
 
+### Task 15: Пакетная передача резервных копий и возобновляемая подготовка восстановления
+
+**Порядок:** дополнительная необходимая задача после независимого gate задачи 12 и перед задачами 13–14. Номер 15 сохраняет прежние номера задач. Она закрывает требование крупной независимой копии из задачи 12; состав продукта и провайдеры не меняются. Основание — аудит маршрутов `NativeArchives`/`PostgresBackup`, сохраняемый в `docs/operations/recovery-transfer-design.md`: старый путь требует по запросу на каждую запись и всю подготовку установки внутри одного запроса. Расчёты с условной задержкой не считаются измерением сети.
+
+**Files:** создать `packages/contracts/src/recovery-transfer.ts`, `apps/worker/src/remote-recovery-transfer.ts`, `apps/control/src/routes/recovery-transfer.ts`, `packages/adapters/src/postgres-recovery-transfer.ts`, `tests/integration/recovery-transfer.test.ts`, `tests/integration/recovery-transfer-fixture.ts`, `apps/worker/test/remote-recovery-transfer.test.ts`, `docs/operations/recovery-transfer-design.md`; изменить `native-archives.ts`, recovery routes и `postgres-backup.ts` для делегирования передачи/подготовки; документацию восстановления. Если нужны durable progress tables, использовать следующую свободную миграцию после финальной задачи 12, исторические 001–008 не менять. Подготовку больших записей можно выделить в `postgres-restore-preparation.ts` по ответственности, сохранив существующие валидаторы и правила установки.
+
+**Interfaces:** сохранить core `createBackup`, `restoreBackup`, `ExportHandle`, `RestoreReport` и приватный native IPC. Контракты определяют `RecoveryTransferPage` (ограниченные части записей/ресурсов, cursor/nextCursor, immutable snapshot/restore binding), `RecoveryPreparationProgress` (phase, prepared/total, cursor, safe error). Приватный серверный порт: `readBatch(actor,id,cursor): Promise<RecoveryTransferPage>`, `stageBatch(actor,id,batch): Promise<RecoveryPreparationProgress>`, `prepareBatch(actor,id): Promise<RecoveryPreparationProgress>`, `commitPrepared(actor,id): Promise<RestoreReport>`; actor разрешается сервером. DTO, retry/cursor semantics и схему progress уточнить в коротком preflight перед кодом против финального task12 API.
+
+- [x] **1. Добавить behavioral regressions.** Builder `tests/integration/recovery-transfer-fixture.ts` переиспользует нормализованный fixture 5000 сайтов × 6 состояний: 900009 expanded metadata records, 270000 physical-file descriptors; размер 13.5 GB остаётся проекцией. Проверить реальную цепочку NativeArchives → control → disposable PostgreSQL: metadata backup reads ≤5000 HTTP calls, metadata restore/stage/preparation ≤20000 calls; отдельная установка выполняет только финальный fenced SQL commit. До commit целевой реестр пуст, после commit сохранены stable IDs/history/evidence/Auth mappings/quarantine, старое хранилище недоступно. Для полного количества файлов допустимы отдельно помеченные маленькие тела; это не benchmark 13.5 GB. Детерминированный latency fixture считает вызовы/ограниченную конкуренцию без реальных sleeps. Прерванный/повторный batch, изменённый replay, пропущенные части, неверный hash, oversized request/response, role loss, expiry и отмена не создают частичный рабочий реестр и не дублируют байты.
+- [x] **2. Запустить** `npm test -- apps/worker/test/remote-recovery-transfer.test.ts` и `npm run test:integration -- recovery-transfer`; получить реальные failing assertions старого поведения, не import-error.
+- [x] **3. Реализовать ограниченные пакеты.** Remote Node↔control batch: raw bytes ≤1 MiB, encoded JSON ≤2 MiB; ≤256 metadata items либо ≤64 resource parts; фиксированная конкуренция ≤4 суммарно на native transfer runner с backpressure. Крупная одиночная запись использует ограниченные части. Приватные renderer↔Rust↔Node JSON 64 KB/raw24 KB остаются прежними; крупные HTTP-пакеты существуют только внутри доверенного remote adapter. Все массивы/буферы ограничены пакетом, остальное — SQL/disk pages. Сервер выбирает запись/ресурс по авторизованному snapshot/restore ID, не по клиентскому SQL/objectKey/path. Каждая операция проверяет fresh admin и scope. Пакеты записи и complete подтверждаются идемпотентно; курсор/порядок/полнота проверяются сервером.
+- [x] **4. Разделить prepare и commit.** Подготовка преобразует и проверяет ограниченную порцию staged records, сохраняет durable progress и повторяется после сетевой неопределённости. Проверка bytes/hashes/closure/Auth mapping завершена до переключения; final commit — короткий existing exclusive transaction в пустой target с fresh authority, без циклов R2/crypto/filesystem. Времена запросов/renewal должны обеспечивать достижимость пути при ограниченной задержке; согласовать bounded operation/pin renewal, expiry/cancel/role-loss cleanup, не выдавать одно увеличение timeout за исправление миллионов вызовов. Не оживлять истёкшие capabilities или tombstoned payloads. Существующие shared/exclusive/session-capture правила сохраняются.
+- [x] **5. Проверить формат и провести focused review.** Старые и новые encrypted archives задачи 12 читаются прежним codec; STORE/ZIP64/GCM, metadata1M/768MiB/index192MiB/ZIP1M/48GiB, semantic hashes, secret exclusion, same-adapter restore и quarantine сохраняются. Публичный source ZIP остаётся обычным ZIP. Закрытие/restore-switch дожидается уже запущенного hourly maintenance и всех принадлежащих операции запросов до закрытия persistence; отдельный controlled-delay regression закрывает существующую гонку close/maintenance. Прогресс и ошибки по-русски, passphrase не проходит control HTTP. Прогнать новые unit/real SQL плюс covering existing backup/native/history tests, typecheck/build, задокументировать calls/bytes/observed duration отдельно от условной сети и full-body/provider acceptance. Полные native GUI/live provider тесты остаются задачей 14.
+- [x] **6. Commit:** `feat: batch recovery transfers and resume restore preparation`. Независимое task-scoped review до задачи 13; финальные интерфейсы и следующую миграцию передать владельцам 13/14.
+
 ### Task 13: Доступность, HTTPS и расход ресурсов
 
 **Files:** создать `apps/worker/src/health/{scheduler.ts,probe.ts}`, `packages/core/src/usage.ts`, `apps/control/src/routes/health.ts`, `apps/desktop/src/features/sites/HealthStatus.tsx`, `apps/desktop/src/features/settings/UsagePanel.tsx`; тесты `tests/integration/health.test.ts`, `packages/core/test/usage.test.ts`.
@@ -341,7 +356,7 @@ expect(resumedJob.stage).toBe(lastCommittedStage);
 | CSV/XLSX, пачки 100, 5000 записей | 1, 8, 10 |
 | Публикация, DNS, лимиты Hobby, unknown result | 9 |
 | Предпросмотр и визуальные правки | 2, 4, 5, 11 |
-| История current+5, export, independent backup | 12 |
+| История current+5, export, independent backup | 12, 15 |
 | HTTPS, availability, usage без денежного cap | 13 |
 | Бесплатный личный пилот до покупки услуг | 6, 9, 14 |
 

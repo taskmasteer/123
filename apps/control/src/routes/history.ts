@@ -6,7 +6,7 @@ import type { SupabaseRepository } from '../../../../packages/adapters/src/supab
 import type { R2Store } from '../../../../packages/adapters/src/r2-store.js';
 import type { PostgresPublication } from '../../../../packages/adapters/src/postgres-publication.js';
 import type { PostgresBackup } from '../../../../packages/adapters/src/postgres-backup.js';
-export async function historyRoute(repo: SupabaseRepository, store: R2Store | undefined, publication: PostgresPublication | undefined, actor: Principal, request: Request, url: URL, body: unknown, backup?: PostgresBackup) {
+export async function historyRoute(repo: SupabaseRepository, store: R2Store | undefined, publication: PostgresPublication | undefined, actor: Principal, request: Request, url: URL, body: unknown, backup?: PostgresBackup,scope?:string) {
     const validation = /^\/sites\/([^/]+)\/validation$/.exec(url.pathname);
     if (validation && request.method === 'GET') {
         const siteId = uuid(validation[1]), fresh = await repo.transaction(tx => repo.fresh(tx, actor));
@@ -27,7 +27,7 @@ export async function historyRoute(repo: SupabaseRepository, store: R2Store | un
         if (!backup)
             throw new AppError('UNAVAILABLE', 'Архивы не настроены.');
         const p = object(body, ['revisionId']);
-        return backup.exportSite(fresh, siteId, uuid(p.revisionId));
+        return backup.exportSite(fresh, siteId, uuid(p.revisionId),scope);
     }
     if (match[2] === 'history' && request.method === 'GET') {
         const offset = integer(Number(url.searchParams.get('offset') ?? 0), 0, 100000), site = (await repo.get(siteId))!;

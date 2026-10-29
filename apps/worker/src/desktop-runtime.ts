@@ -60,6 +60,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     const workerId = randomUUID();
     let maintaining: Promise<void> | null = null;
     let pumping: Promise<void> | null = null, closed = false, snapshotting = false;
+    let closing:Promise<void>|null=null;
     const activeRequests = new Set<Promise<void>>();
     let mode: 'demo' | 'live' | 'blocked' = options.native ? 'blocked' : 'demo', modelName: string | null = null, imageModel: string | null = null;
     let credentialsAbort = new AbortController(), configuring = false;
@@ -512,15 +513,17 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                 done();
             }
         },
-        async close() {
-            if (closed)
-                return;
+        close():Promise<void> {
+            if (closing)return closing;
             closed = true;
+            closing=(async()=>{
             await managedRuntime.stop();
             clearInterval(timer);
             clearInterval(maintenance);
             abort.abort();
             await pumping;
+            await maintaining;
+            await archives.shutdown();
             await Promise.allSettled([...active]);
             await Promise.allSettled([...activeRequests]);
             await Promise.allSettled([...previews].map(async (preview) => {
@@ -531,6 +534,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
             await sites.close();
             await selectionRuntime.close();
             await database.close();
+            })();return closing;
         }
     };
     closeForRestore = () => runtime.close();

@@ -1,3 +1,4 @@
+import { PostgresRestorePreparation } from '../../packages/adapters/src/postgres-restore-preparation.js';
 import { PostgresRetention } from '../../packages/adapters/src/postgres-retention.js';import { createLocalQueue } from '../../packages/adapters/src/local-queue.js';
 import { createCheckpointStore } from '../../packages/adapters/src/local-checkpoints.js';
 import { readRecoveryRecord } from '../../packages/adapters/src/recovery-records.js';
@@ -177,28 +178,28 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
             await target.stageChunk(admin, begun.id, seq, 0, Buffer.from(bytes).toString('base64'));
             await target.finishObject(admin, begun.id, seq);
         }
-        const originalQuery = pool.query.bind(pool);
+        const originalQuery = pool.query.bind(pool),preparationPrototype=PostgresRestorePreparation.prototype as any,originalPreparationQuery=preparationPrototype.query;
         let lookups = 0;
-        pool.query = (async (sql: any, params: any[]) => { if (String(sql).includes("data->>'source'=$2") && params?.[1] === sourceFileKey && ++lookups === 2)
-            throw new Error('deliberate checkpoint remap failure'); return originalQuery(sql, params); }) as typeof pool.query;
+        preparationPrototype.query = (async function(this:PostgresRestorePreparation,sql: any, params: any[]) { if (String(sql).includes("data->>'source'=any") && Array.isArray(params?.[1]) && params[1].includes(sourceFileKey) && ++lookups === 1)
+            throw new Error('deliberate checkpoint remap failure'); return originalPreparationQuery.call(this,sql, params); });
         try {
             await expect(target.install(admin, begun.id)).rejects.toThrow('deliberate checkpoint remap failure');
             expect((await originalQuery('select count(*) n from public.sites')).rows[0].n).toBe('0');
         }
         finally {
-            pool.query = originalQuery as typeof pool.query;
+            preparationPrototype.query = originalPreparationQuery;
         }
         let entered!: () => void, release!: () => void, released = false, earlyState = false;
         const enteredRemap = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
         lookups = 0;
-        pool.query = (async (sql: any, params: any[]) => { if (String(sql).includes("data->>'source'=$2")) {
-            if (params?.[1] === sourceFileKey && ++lookups === 2) {
+        preparationPrototype.query = (async function(this:PostgresRestorePreparation,sql: any, params: any[]) { if (String(sql).includes("data->>'source'=any")) {
+            if (Array.isArray(params?.[1]) && params[1].includes(sourceFileKey) && ++lookups === 1) {
                 entered();
                 await hold;
             }
-            if (params?.[1] === sourceStateKey && lookups === 2 && !released)
+            if (params?.[1] === sourceStateKey && lookups === 1 && !released)
                 earlyState = true;
-        } return originalQuery(sql, params); }) as typeof pool.query;
+        } return originalPreparationQuery.call(this,sql, params); });
         const installing = target.install(admin, begun.id);
         let report: Awaited<typeof installing>;
         try {
@@ -212,7 +213,7 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
                 report = await installing;
             }
             finally {
-                pool.query = originalQuery as typeof pool.query;
+                preparationPrototype.query = originalPreparationQuery;
             }
         }
         expect(Buffer.from((await targetStore.load(cp.id)).files[0]!.bytes)).toEqual(Buffer.from(checkpointFiles[0]!.bytes));

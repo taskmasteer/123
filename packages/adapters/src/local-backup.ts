@@ -41,7 +41,7 @@ async function* files(root: string, prefix = ''): AsyncGenerator<string> {
 }
 export class LocalBackup {
     constructor(readonly db: LocalDatabase, readonly sourceRoot: string, readonly directory: string, readonly quiesce: <T>(capture: () => Promise<T>) => Promise<T> = capture => capture()) { }
-    async createBackup(actor: Principal, passphrase: string) {
+    async createBackup(actor: Principal, passphrase: string, signal?:AbortSignal) {
         authorize(actor, 'site:export');
         await new LocalRetention(this.db).backfill(await createCheckpointStore(join(this.db.root, 'checkpoints'), { now: Date.now }));
         preflightLocal(this.db.sql, true);
@@ -87,6 +87,7 @@ export class LocalBackup {
             async function* entries(): AsyncGenerator<BackupEntry> {
                 let recordIndex = 0, payloadIndex = 0;
                 const record = (value: RecoveryRecord) => {
+                    signal?.throwIfAborted();
                     const bytes = Buffer.from(JSON.stringify(value));
                     if (bytes.length > 1000000)
                         throw new AppError('INVALID_INPUT', 'Запись превышает ёмкость копии.');

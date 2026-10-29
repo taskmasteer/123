@@ -1,9 +1,10 @@
+import { PostgresRecoveryTransfer } from '../../../../packages/adapters/src/postgres-recovery-transfer.js';
 import { AppError, type Principal } from '../../../../packages/contracts/src/model.js';
 import { object, uuid, integer, string } from '../../../../packages/contracts/src/http.js';
 import type { PostgresBackup } from '../../../../packages/adapters/src/postgres-backup.js';
 import type { PostgresPublication } from '../../../../packages/adapters/src/postgres-publication.js';
 import type { RecoveryRecord } from '../../../../packages/adapters/src/recovery-records.js';
-export async function recoveryRoute(backup: PostgresBackup | undefined, actor: Principal, request: Request, url: URL, body: unknown, publication?: PostgresPublication) {
+export async function recoveryRoute(backup: PostgresBackup | undefined, actor: Principal, request: Request, url: URL, body: unknown, publication?: PostgresPublication,scope?:string) {
     if (!url.pathname.startsWith('/admin/recovery/'))
         return undefined;
     if (!backup)
@@ -32,19 +33,20 @@ export async function recoveryRoute(backup: PostgresBackup | undefined, actor: P
     }
     if (url.pathname === '/admin/recovery/snapshots' && request.method === 'POST') {
         object(body, []);
-        return backup.beginSnapshot(actor);
+        return backup.beginSnapshot(actor,scope);
     }
     if (url.pathname === '/admin/recovery/restores' && request.method === 'POST') {
-        const p = object(body, ['header', 'mappings', 'records']);
+        const p = object(body, ['header', 'mappings', 'records', 'inventoryDigest']);
         if (!Array.isArray(p.mappings) || p.mappings.length > 50)
             throw new AppError('INVALID_INPUT', 'Не более 50 привязок в запросе.');
         const mappings = p.mappings.map(v => { const m = object(v, ['sourceId', 'destinationId']); return { sourceId: uuid(m.sourceId), destinationId: uuid(m.destinationId) }; });
-        return backup.beginRestore(actor, p.header as RecoveryRecord, mappings, integer(p.records, 1, 1000000));
+        return backup.beginRestore(actor, p.header as RecoveryRecord, mappings, integer(p.records, 1, 1000000),p.inventoryDigest,scope);
     }
     const match = /^\/admin\/recovery\/(snapshots|restores)\/([^/]+)\/(record|resource|record-part|record-complete|chunk|object-complete|install|close|mappings)$/.exec(url.pathname);
     if (!match)
         throw new AppError('NOT_FOUND', 'Маршрут копии не найден.');
     const id = uuid(match[2]), action = match[3];
+    await new PostgresRecoveryTransfer(backup,scope).authorize(actor,id,match[1],action==='close');
     if (request.method === 'POST' && action === 'mappings') {
         const p = object(body, ['mappings']);
         if (!Array.isArray(p.mappings) || p.mappings.length > 50)
