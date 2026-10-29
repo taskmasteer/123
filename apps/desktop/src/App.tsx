@@ -1,3 +1,4 @@
+import {UsagePanel} from './features/settings/UsagePanel.js';
 import { siteCount } from './lib/labels.js';
 import { Batches } from './features/batches/BatchDetail.js';
 import type { SiteFilters } from '../../../packages/contracts/src/model.js';
@@ -23,6 +24,8 @@ type Device = DeviceStatus;
 export default function App() {
     const [managed, setManaged] = useState(false);
     const [session, setSession] = useState<SessionView | null>(null);
+    const [usageSiteId,setUsageSiteId]=useState<string|null>(null);
+    useEffect(()=>setUsageSiteId(null),[managed,session?.principal.userId,session?.principal.role]);
     const [section, setSection] = useState('Сайты');
     const [filters, setFilters] = useState<SiteFilters>({}), [filterDraft, setFilterDraft] = useState<SiteFilters>({});
     const [sites, setSites] = useState<DesktopSite[]>([]);
@@ -98,7 +101,7 @@ export default function App() {
                     setDevice(status);
                     if (currentSession && JSON.stringify(currentSession) !== JSON.stringify(session)) {
                         setSession(currentSession);
-                        if (!currentSession.capabilities.admin && ['Пользователи', 'Подключения', 'Исполнители', 'Резервные копии'].includes(section))
+                        if (!currentSession.capabilities.admin && ['Пользователи', 'Подключения', 'Исполнители', 'Расход ресурсов', 'Резервные копии'].includes(section))
                             setSection('Сайты');
                         if (!currentSession.capabilities.edit)
                             setEditorId(null);
@@ -148,7 +151,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark" aria-hidden="true">▦</span>Site Factory</div>
         <nav aria-label="Разделы">
-          {['Сайты', 'Пачки', 'Референсы', ...(managed ? session?.capabilities.admin ? ['Пользователи', 'Подключения', 'Исполнители', 'Резервные копии'] : [] : ['Устройство', 'Резервные копии']), 'Режим работы'].map(name => (<button key={name} aria-current={section === name ? 'page' : undefined} onClick={() => { setSection(name); setEditorId(null); }}>{name}</button>))}
+          {['Сайты', 'Пачки', 'Референсы', ...(managed ? session?.capabilities.admin ? ['Пользователи', 'Подключения', 'Исполнители', 'Расход ресурсов', 'Резервные копии'] : [] : ['Устройство', 'Расход ресурсов', 'Резервные копии']), 'Режим работы'].map(name => (<button key={name} aria-current={section === name ? 'page' : undefined} onClick={() => { setSection(name); setEditorId(null); }}>{name}</button>))}
         </nav>
         <div className="sidebar-bottom">
           <span className={device?.available ? 'device-dot online' : 'device-dot'} aria-hidden="true"/>
@@ -168,14 +171,15 @@ export default function App() {
           {pollError ? <div role="alert" className="error-banner"><strong>Не удалось обновить состояние</strong><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить состояние</button></div> : null}
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => { })}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
-          {section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Резервные копии' && (!managed || session?.capabilities.admin) ? <BackupSettings key={managed ? session?.principal.userId : 'local'} managed={managed} {...(session ? { principalId: session.principal.userId } : {})}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={device?.mode ?? 'blocked'} onChanged={next => {
+          {section === 'Расход ресурсов' && (!managed||session?.capabilities.admin)?<UsagePanel key={managed?session?.principal.userId:'local'}/>:section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Резервные копии' && (!managed || session?.capabilities.admin) ? <BackupSettings key={managed ? session?.principal.userId : 'local'} managed={managed} {...(session ? { principalId: session.principal.userId } : {})}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={device?.mode ?? 'blocked'} onChanged={next => {
                 if (next)
                     setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
                 setRefresh(value => value + 1);
             }}/>) : (<>
               <div className="context-line"><span>Реестр доменов</span><span className="muted">{managed ? 'Общие данные · задания выполняют подключённые устройства' : 'Создание → проверка → локальная версия'}</span></div>
               <form className="registry-filters" onSubmit={e => { e.preventDefault(); setFilters(filterDraft); changePage([null]); }}><label>Поиск домена<input value={filterDraft.domain ?? ''} onChange={e => setFilterDraft(p => ({ ...p, domain: e.target.value }))}/></label><label>Состояние сайта<select value={filterDraft.status ?? ''} onChange={e => setFilterDraft(p => ({ ...p, status: e.target.value }))}><option value="">Все состояния</option><option value="queued">В очереди</option><option value="completed">Завершён</option><option value="needs_attention">Нужна проверка</option></select></label><button>Применить фильтры</button></form>
- {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList {...(managed && session?.capabilities.publish ? { onPublication: (site: DesktopSite) => setPublicationId(site.id) } : {})} sites={sites} loading={loading} canEdit={!managed || !!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site => managed ? void action('preview.open', site) : setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)}/>}
+ {usageSiteId?<><button onClick={()=>setUsageSiteId(null)}>Закрыть расход сайта</button><UsagePanel key={`${usageSiteId}:${session?.principal.userId??'local'}:${session?.principal.role??'admin'}`} siteId={usageSiteId}/></>:null}
+ {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList onUsage={site=>setUsageSiteId(site.id)} {...(managed && session?.capabilities.publish ? { onPublication: (site: DesktopSite) => setPublicationId(site.id) } : {})} sites={sites} loading={loading} canEdit={!managed || !!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site => managed ? void action('preview.open', site) : setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)}/>}
               {(!managed || session) ? <nav className="row-actions" aria-label={managed ? "Страницы общего реестра" : "Страницы локального реестра"}>
                 <button disabled={loading || pageCursors.length === 1} onClick={() => { setPollError(''); changePage(pageCursors.slice(0, -1)); }}>Предыдущая страница</button>
                 <span aria-live="polite">Страница {pageCursors.length}</span>

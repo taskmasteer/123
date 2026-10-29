@@ -1,0 +1,21 @@
+import { test, expect } from './fixture.js';
+test('shows honest demo health and separately scoped resource subtotals without a probing renderer', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Создать сайт', exact: true }).click();
+    await page.getByLabel('Домен', { exact: true }).fill('monitoring-ui.test');
+    await page.getByRole('button', { name: 'Создать', exact: true }).click();
+    await expect(page.getByText('Локальная версия готова', { exact: true })).toBeVisible({ timeout: 30000 });
+    await expect(page.getByText('Демо · публичный сайт не проверен')).toBeVisible();
+    await page.getByRole('button', { name: 'Расход monitoring-ui.test', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Расход ресурсов' })).toBeVisible();
+    await expect(page.getByText('Известные токены', { exact: true })).toBeVisible();
+    await expect(page.getByText('Неизвестна', { exact: true })).toBeVisible();
+    await expect(page.getByText(/полный объём неизвестен/)).toBeVisible();
+    await page.screenshot({ path: '.local-state/task13-site-usage-viewport.png' });
+    await page.getByRole('button', { name: 'Расход ресурсов', exact: true }).click();
+    await expect(page.getByText(/Вся установка/)).toBeVisible();
+    await expect(page.getByText(/Расход изображений неизвестен/)).toBeVisible();
+    await page.setViewportSize({ width: 1040, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: '.local-state/task13-usage-viewport.png' });
+});

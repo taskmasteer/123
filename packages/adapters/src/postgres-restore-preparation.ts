@@ -3,7 +3,7 @@ import type { Principal } from '../../contracts/src/model.js';
 import { AppError } from '../../contracts/src/model.js';
 import type { RestoreReport } from '../../contracts/src/recovery.js';
 import type { RecoveryRecord } from './recovery-records.js';
-import { managedRecoveryTables } from './recovery-records.js';
+import { managedRecoveryTables, recoveryTables, monitoringRecoveryRow, validateLogicalRecoveryRecord } from './recovery-records.js';
 import { SupabaseRepository, type SqlTransaction } from './supabase-repository.js';
 import { checkArtifacts, artifactLimits } from '../../core/src/artifacts.js';
 import { projectCheckpointFromFileDigests, parseCheckpointEvidence } from '../../core/src/usage.js';
@@ -259,7 +259,7 @@ export class PostgresRestorePreparation {
             processed++;
             const record = saved.data as RecoveryRecord, fact = byOrdinal.get(seq)!;
             if (record.type === 'header') {
-                if (seq !== 0 || record.adapter !== 'managed' || record.schema !== 8 || record.version !== 1 || record.sourceId !== initial.snapshot.data.header.sourceId)
+                if (seq !== 0 || record.adapter !== 'managed' || record.schema !== initial.snapshot.data.header.schema || record.version !== 1 || record.sourceId !== initial.snapshot.data.header.sourceId)
                     throw new AppError('INVALID_INPUT', 'Неверный источник копии.');
                 continue;
             }
@@ -270,9 +270,10 @@ export class PostgresRestorePreparation {
                 fileCount++;
                 continue;
             }
-            if (record.type !== 'row' || !(managedRecoveryTables as readonly string[]).includes(record.table))
+            if (record.type !== 'row' || !recoveryTables('managed',initial.snapshot.data.header.schema).includes(record.table))
                 throw new AppError('INVALID_INPUT', 'Неизвестная запись копии.');
-            const row = structuredClone(record.row) as Record<string, any>, table = record.table, columns = schema.get(table);
+            validateLogicalRecoveryRecord(record,initial.snapshot.data.header.schema);
+            const row = monitoringRecoveryRow(record.table,record.row,true) as Record<string, any>, table = record.table, columns = schema.get(table);
             if (!columns || Object.keys(row).some(key => !columns.has(key)))
                 throw new AppError('INVALID_INPUT', 'Неизвестное поле метаданных.');
             for (const key of identityColumns[table] ?? [])
@@ -498,9 +499,9 @@ export class PostgresRestorePreparation {
             if (Number(stats.n) !== state.fileCount || stats.n !== stats.unique_n)
                 throw new AppError('INVALID_INPUT', 'Состав объектов не совпадает с копией.');
         }
-        const index = state.validation ?? 0;
-        if (index < managedRecoveryTables.length) {
-            const table = managedRecoveryTables[index]!;
+        const index = state.validation ?? 0,tables=recoveryTables('managed',snapshot.data.header.schema);
+        if (index < tables.length) {
+            const table = tables[index]!;
             // Cast all prepared rows against actual fixed server schema before activation.
             await this.query('select count(jsonb_populate_record(null::' + table + ",data->'row')) from private.recovery_snapshot_records where snapshot_id=$1 and seq>=6000000000 and data->>'table'=$2", [id, table]);
             await this.validateTable(id, table);
@@ -584,7 +585,7 @@ export class PostgresRestorePreparation {
         }>;
         const mappingDigest = sha(Buffer.from(JSON.stringify(mappings)));
         const { sites, revisions } = state, { catalog, catalogVersions } = state.final;
-        const order = ['public.users', 'public.memberships', 'public.sites', 'private.batches', 'private.workers', 'private.jobs', 'private.artifacts', 'private.checkpoints', 'public.revisions', 'public.assignments', 'private.edit_requests', 'public.chat', 'private.deployments', 'public.health', 'private.batch_rows', 'private.batch_assignments', 'private.import_resources', 'private.import_chunks', 'private.publication_reservations', 'private.site_operations', 'private.provider_accounts', 'private.provider_publications', 'private.publication_attempts', 'private.upload_preparations', 'private.catalog', 'private.audit', 'private.payload_inventory', 'private.payload_edges', 'private.checkpoint_evidence', 'private.job_usage', 'private.recovery_state'];
+        const order = ['public.users', 'public.memberships', 'public.sites', 'private.batches', 'private.workers', 'private.jobs', 'private.artifacts', 'private.checkpoints', 'public.revisions', 'public.assignments', 'private.edit_requests', 'public.chat', 'private.deployments', 'public.health', 'private.batch_rows', 'private.batch_assignments', 'private.import_resources', 'private.import_chunks', 'private.publication_reservations', 'private.site_operations', 'private.provider_accounts', 'private.provider_publications', 'private.publication_attempts', 'private.upload_preparations', 'private.catalog', 'private.audit', 'private.payload_inventory', 'private.payload_edges', 'private.checkpoint_evidence', 'private.job_usage','private.job_activity','private.health_observations', 'private.recovery_state'];
         await this.activate(async (tx) => {
             await this.snapshot(actor, id, tx);
             await tx.query("set local lock_timeout='5s';set local statement_timeout='15s';set local work_mem='4MB'");

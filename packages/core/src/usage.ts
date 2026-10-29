@@ -4,6 +4,20 @@ import { createHash } from 'node:crypto';
 import { AppError } from '../../contracts/src/model.js';
 import { record } from '../../contracts/src/inputs.js';
 import { references } from './retention.js';
+import type {JobUsage} from '../../contracts/src/recovery.js';
+import type {JobActivity,UsageSummary} from '../../contracts/src/monitoring.js';
+export function summarizeUsage(jobIds:string[],rows:JobUsage[],activity:JobActivity[],objects:{identity:string;size:number}[],completeInventory:boolean):UsageSummary {
+ const jobs=new Set(jobIds), seen=new Set<string>(), measured=new Set<string>(), physical=new Map<string,number>();
+ const summary:UsageSummary={jobs:jobs.size,measuredJobs:0,missingJobs:jobs.size,inputTokens:0,outputTokens:0,uncertainRequests:0,requestPending:false,tokenCoverage:'unknown',provenance:[],imageTokens:null,imagePending:null,durationMs:null,durationCoverage:'unknown',bytesStored:null,knownBytesStored:0,storageCoverage:completeInventory?'verified-inventory':'partial',estimatedCostUsd:null};
+ const sum=(a:number,b:number)=>{if(!Number.isSafeInteger(b)||b<0||!Number.isSafeInteger(a+b))throw new AppError('INVALID_INPUT','Некорректный счётчик.');return a+b;};
+ for(const row of rows){if(!jobs.has(row.jobId)||seen.has(row.jobId))throw new AppError('INVALID_INPUT','Проекция задания повторяется.');seen.add(row.jobId);summary.inputTokens=sum(summary.inputTokens,row.inputTokens);summary.outputTokens=sum(summary.outputTokens,row.outputTokens);summary.uncertainRequests=sum(summary.uncertainRequests,row.uncertainRequests);summary.requestPending ||=row.requestPending;if(row.imagePending===true)summary.imagePending=true;if(!summary.provenance.includes(row.provenance))summary.provenance.push(row.provenance);}
+ summary.missingJobs=jobs.size-seen.size;summary.tokenCoverage=rows.some(r=>r.coverage==='known-subtotal')?'known-subtotal':'unknown';
+ for(const a of activity){if(!jobs.has(a.jobId)||measured.has(a.jobId))throw new AppError('INVALID_INPUT','Измерение задания повторяется.');measured.add(a.jobId);summary.durationMs=sum(summary.durationMs??0,a.durationMs);}
+ summary.measuredJobs=measured.size;summary.durationCoverage=measured.size?'partial':'unknown';
+ for(const o of objects){if(physical.has(o.identity)&&physical.get(o.identity)!==o.size)throw new AppError('CONFLICT','Опись одного объекта противоречива.');physical.set(o.identity,o.size);}
+ for(const size of physical.values())summary.knownBytesStored=sum(summary.knownBytesStored,size);if(completeInventory)summary.bytesStored=summary.knownBytesStored;
+ return summary;
+}
 function canonical(value: unknown): unknown { if (Array.isArray(value))
     return value.map(canonical); if (record(value))
     return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])); return value; }
@@ -41,5 +55,5 @@ export function projectCheckpointFromFileDigests(checkpoint:Checkpoint,state:Rec
         }
     if (![inputTokens, outputTokens, uncertainRequests].every(Number.isSafeInteger))
         throw new AppError('INVALID_INPUT', 'Переполнение счётчика использования.');
-    return { evidence, usage: { version: 1, jobId: checkpoint.jobId, checkpointId: checkpoint.id, predecessor, inputTokens, outputTokens, uncertainRequests, requestPending, provenance: visual ? 'visual' : state.modelIdentity === 'demo' ? 'demo' : typeof state.modelIdentity === 'string' ? 'provider' : 'unknown', coverage: known ? 'known-subtotal' : 'unknown', durationMs: null, imageTokens: null }, execution: references(state, 'execution'), retained: references(state, 'retained') };
+    return { evidence, usage: { ...(record(state.imageRun)?{imagePending:state.imageRun.status==='pending'}:{}),version: 1, jobId: checkpoint.jobId, checkpointId: checkpoint.id, predecessor, inputTokens, outputTokens, uncertainRequests, requestPending, provenance: visual ? 'visual' : state.modelIdentity === 'demo' ? 'demo' : typeof state.modelIdentity === 'string' ? 'provider' : 'unknown', coverage: known ? 'known-subtotal' : 'unknown', durationMs: null, imageTokens: null }, execution: references(state, 'execution'), retained: references(state, 'retained') };
 }

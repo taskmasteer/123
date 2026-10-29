@@ -3,7 +3,7 @@ import { AppError, type Principal } from '../../contracts/src/model.js';
 import { batchContent, transferBatch, transferBinding, transferCursor, transferLimits, type RecoveryTransferBinding, type RecoveryTransferPage, type RecoveryPreparationProgress } from '../../contracts/src/recovery-transfer.js';
 import type { PostgresBackup } from './postgres-backup.js';
 import type { SqlTransaction } from './supabase-repository.js';
-import { managedRecoveryTables, recoveryPath, validateLogicalRecoveryRecord, type RecoveryRecord } from './recovery-records.js';
+import { managedRecoveryTables, recoveryTables, recoveryPath, validateLogicalRecoveryRecord, type RecoveryRecord } from './recovery-records.js';
 import { PostgresRestorePreparation, type PreparationState } from './postgres-restore-preparation.js';
 import { verifyValidationPng } from './import-resources.js';
 const sha = (v: string | Uint8Array) => createHash('sha256').update(v).digest('hex');
@@ -11,6 +11,7 @@ const sha = (v: string | Uint8Array) => createHash('sha256').update(v).digest('h
 export const verifiedPngProofQuery = "select h.hash from (select distinct unnest($2::text[]) hash) h cross join lateral(select 1 from private.recovery_snapshot_records v where v.snapshot_id=$1 and v.seq>=4000000000 and v.seq<5000000000 and v.data->>'type'='verified' and v.data->'pngVerified'='true'::jsonb and v.data->>'sha256'=h.hash limit 1) proof";
 const bad = (message = 'Порядок или содержимое пакетов восстановления повреждены.'): never => { throw new AppError('INVALID_INPUT', message); };
 type State = {
+    schema:8|9;
     id: string;
     binding: RecoveryTransferBinding;
     phase: RecoveryPreparationProgress['phase'];
@@ -67,7 +68,7 @@ export class PostgresRecoveryTransfer {
             else if (frozen !== digest)
                 throw new AppError('CONFLICT', 'Привязки Auth не совпадают с закреплённой подготовкой.');
         }
-        return state;
+        return {...state,schema:snapshot.data.header?.schema??8};
     }
     async authorize(actor: Principal, id: string, kind?: string, closing = false) {
         await this.repo.transaction(async (tx) => {
@@ -227,11 +228,11 @@ export class PostgresRecoveryTransfer {
         transferBatch(page, true);
         return page;
     }
-    private validateRecord(record: RecoveryRecord) {
+    private validateRecord(record: RecoveryRecord,schema:8|9) {
         if (!record || !['header', 'row', 'file'].includes(record.type))
             return bad();
-        validateLogicalRecoveryRecord(record);
-        if (record.type === 'row' && !(managedRecoveryTables as readonly string[]).includes(record.table))
+        validateLogicalRecoveryRecord(record,schema);
+        if (record.type === 'row' && !recoveryTables('managed',schema).includes(record.table))
             return bad('Неизвестная таблица копии.');
         if (record.type === 'file') {
             recoveryPath(record.path);
@@ -302,8 +303,8 @@ export class PostgresRecoveryTransfer {
                     catch {
                         return bad();
                     }
-                    this.validateRecord(record);
-                    if (seq === 0 && (record.type !== 'header' || record.adapter !== 'managed' || record.sourceId !== state.binding.sourceId || record.schema !== 8 || record.version !== 1) || seq !== 0 && record.type === 'header')
+                    this.validateRecord(record,state.schema);
+                    if (seq === 0 && (record.type !== 'header' || record.adapter !== 'managed' || record.sourceId !== state.binding.sourceId || record.schema !== state.schema || record.version !== 1) || seq !== 0 && record.type === 'header')
                         return bad('Заголовок источника изменился.');
                     records.push({
                         seq, data: record, size: full.length, sha256: part.sha256

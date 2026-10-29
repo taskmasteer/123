@@ -14,7 +14,7 @@ import type { LocalDatabase } from './local-database.js';
 import { openLocalDatabase } from './local-database.js';
 import { privateDirectory, safeFile, readRegular, writeExclusive, missing } from './safe-files.js';
 import { portableArchive } from './backup-archive.js';
-import { localRecoveryTables, recoveryPath, validateRecovery, readRecoveryRecord, type RecoveryRecord } from './recovery-records.js';
+import { localRecoveryTables, monitoringRecoveryRow, recoveryPath, validateRecovery, readRecoveryRecord, type RecoveryRecord } from './recovery-records.js';
 import { createLocalArtifacts } from './local-artifacts.js';
 import { createCheckpointStore } from './local-checkpoints.js';
 import { verifyValidationPng } from './import-resources.js';
@@ -93,10 +93,10 @@ export class LocalBackup {
                         throw new AppError('INVALID_INPUT', 'Запись превышает ёмкость копии.');
                     return { name: 'records/' + recordIndex++ + '.json', size: bytes.length, sha256: sha(bytes), read: async () => bytes };
                 };
-                yield record({ type: 'header', version: 1, adapter: 'local', schema: 8, sourceId: pin, createdAt: Date.now() });
+                yield record({ type: 'header', version: 1, adapter: 'local', schema: 9, sourceId: pin, createdAt: Date.now() });
                 for (const table of localRecoveryTables)
                     for (const saved of frozen.prepare('select * from ' + table + (table === 'operations' ? " where kind<>'controller'" : '')).iterate()) {
-                        const row = { ...saved } as Record<string, unknown>;
+                        const row = monitoringRecoveryRow(table,{ ...saved });
                         if (table === 'chunks')
                             row.bytes = Buffer.from(row.bytes as Uint8Array).toString('base64');
                         yield record({ type: 'row', table, row });
@@ -194,6 +194,7 @@ export class LocalBackup {
                 const record = await readRecoveryRecord(entry);
                 if (record.type !== 'row')
                     continue;
+                record.row=monitoringRecoveryRow(record.table,record.row,true);
                 if (record.table === 'recovery_state')
                     record.row.key = 'provenance:' + header.sourceId + ':' + String(record.row.key);
                 batch.push(record);
@@ -202,6 +203,8 @@ export class LocalBackup {
                     flush();
             }
             flush();
+            const badMonitoring=db.sql.prepare('select 1 from job_activity a left join jobs j on j.id=a.job_id where j.id is null union all select 1 from health_observations h left join sites s on s.id=h.site_id where s.id is null union all select 1 from health h left join sites s on s.id=h.site_id where s.id is null limit 1').get();
+            if(badMonitoring)throw new AppError('INVALID_INPUT','Наблюдение или измерение принадлежит отсутствующему объекту.');
             const badRevision = db.sql.prepare("select 1 from records r left join sites s on s.id=r.site_id left join records p on p.kind='revisions' and p.id=json_extract(r.data,'$.parentId') and p.site_id=r.site_id where r.kind='revisions' and (s.id is null or (json_extract(r.data,'$.parentId') is not null and p.id is null)) limit 1").get(), badSite = db.sql.prepare("select 1 from sites s left join records d on d.kind='revisions' and d.id=json_extract(s.data,'$.draftId') and d.site_id=s.id left join records p on p.kind='revisions' and p.id=json_extract(s.data,'$.publishedId') and p.site_id=s.id where (json_extract(s.data,'$.draftId') is not null and d.id is null) or (json_extract(s.data,'$.publishedId') is not null and p.id is null) limit 1").get(), badJob = db.sql.prepare('select 1 from jobs j left join sites s on s.id=j.site_id where s.id is null limit 1').get();
             if (badRevision || badSite || badJob)
                 throw new AppError('INVALID_INPUT', 'Связи копии повреждены.');

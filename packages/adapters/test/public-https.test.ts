@@ -52,6 +52,16 @@ function fixture(addresses = ['8.8.8.8'], response: {
     return { dependencies, options, counts: () => ({ cancellations, destroyed }) };
 }
 const expected = { hostname: 'example.com', path: '/index.html', size: 5, sha256: createHash('sha256').update('hello').digest('hex'), mediaType: 'text/html', headers: {} };
+it('classifies safe DNS/TLS/content/unsafe failures without exposing provider exception text',async()=>{
+ const f=fixture();f.dependencies.resolver=()=>({resolve4:async()=>{throw Object.assign(new Error('SECRET host'),{code:'ENOTFOUND'});},resolve6:async()=>[],cancel(){}}) as any;
+ await expect(verifyPublicHttps(expected,f.dependencies)).rejects.toMatchObject({code:'dns_pending'});
+ f.dependencies.resolver=fixture().dependencies.resolver!;
+ f.dependencies.request=((opts:RequestOptions)=>{expect(opts.rejectUnauthorized).toBe(true);const req=Object.assign(new EventEmitter(),{end(){queueMicrotask(()=>req.emit('error',Object.assign(new Error('SECRET CERT'),{code:'CERT_HAS_EXPIRED'})));},destroy(){}});return req;}) as any;
+ await expect(verifyPublicHttps(expected,f.dependencies)).rejects.toMatchObject({code:'tls_error'});
+ await expect(verifyPublicHttps(expected,fixture(['::1']).dependencies)).rejects.toMatchObject({code:'unsafe_destination'});
+ await expect(verifyPublicHttps(expected,fixture(undefined,{chunks:[Buffer.from('wrong')]}).dependencies)).rejects.toMatchObject({code:'wrong_version'});
+});
+it('aborts and destroys the actual stalled HTTPS request when the worker stops',async()=>{const f=fixture(),abort=new AbortController();let destroyed=0;f.dependencies.request=(()=>Object.assign(new EventEmitter(),{end(){},destroy(){destroyed++;}})) as any;const pending=verifyPublicHttps(expected,{...f.dependencies,signal:abort.signal});const rejected=expect(pending).rejects.toMatchObject({name:'AbortError'});await new Promise(setImmediate);abort.abort();await rejected;expect(destroyed).toBe(1);});
 it('pins public DNS and keeps original TLS hostname with isolated proxy-free agent', async () => {
     const f = fixture();
     await expect(verifyPublicHttps(expected, f.dependencies)).resolves.toHaveProperty('verifiedAt');

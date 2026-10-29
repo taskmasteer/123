@@ -33,6 +33,7 @@ const methods: Record<string, string[]> = {
     ...recoveryMethods,
     'site.list': ['cursor', 'limit', 'domain', 'status', 'batchId'], 'site.create': ['domain', 'about', 'referenceId'], 'job.status': ['siteId'],
     'job.retry': ['siteId'], 'preview.open': ['siteId', 'revisionId'], 'preview.screenshot': ['siteId', 'revisionId', 'width', 'candidateId'],
+    'site.health':['siteId'],'site.usage':['siteId'],'usage.summary':[],
     'device.status': [], 'catalog.list': [], 'catalog.style.update': ['id', 'enabled'], 'catalog.reference.update': ['id', 'description'],
     'edit.request': ['siteId', 'instruction', 'expectedRevision', 'candidateId'],
     'edit.accept': ['siteId', 'candidateId', 'expectedRevision'], 'edit.reject': ['siteId', 'candidateId'],
@@ -59,6 +60,7 @@ export function parseDesktopRequest(value: unknown): DesktopRequest {
         visualParams(value.method, p);
         return value as unknown as DesktopRequest;
     }
+    if(['site.health','site.usage'].includes(value.method)&&!uuid.test(String(p.siteId)))return invalid();
     if (value.method === 'site.list') {
         if (p.cursor !== undefined)
             cursorShape(p.cursor);

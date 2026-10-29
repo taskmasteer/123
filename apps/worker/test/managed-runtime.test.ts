@@ -2,8 +2,8 @@ import { test, expect } from 'vitest';
 import { createManagedRuntime } from '../src/managed-runtime.js';
 import type { WorkerDeps } from '../src/pipeline.js';
 test('explicit visual-only mode starts enrolled remote polling without model configuration and never asks for AI jobs',async()=>{
- const calls:{path:string;body:unknown}[]=[];const runtime=createManagedRuntime(()=>({} as WorkerDeps),()=>false,(async(url,init)=>{calls.push({path:new URL(String(url)).pathname,body:JSON.parse(String(init?.body))});return Response.json(String(url).endsWith('/claim')?null:{});}) as typeof fetch);
- const p=await runtime.request('managed.prepare',{}) as {workerId:string;token:string};await runtime.request('managed.start',{...p,controlOrigin:'https://control.test',mode:'visual'});await expect.poll(()=>calls.filter(c=>c.path.endsWith('/claim')).length).toBeGreaterThan(0);await runtime.stop();expect(calls.filter(c=>c.path.endsWith('/claim')).every(c=>JSON.stringify(c.body)==='{"mode":"visual"}')).toBe(true);
+ const calls:{path:string;body:unknown}[]=[];const runtime=createManagedRuntime(()=>({} as WorkerDeps),()=>false,(async(url,init)=>{calls.push({path:new URL(String(url)).pathname,body:JSON.parse(String(init?.body))});return Response.json(String(url).endsWith('/health/claim')?{claim:null,nextWakeAt:Date.now()+21600000}:String(url).endsWith('/claim')?null:{});}) as typeof fetch);
+ const p=await runtime.request('managed.prepare',{}) as {workerId:string;token:string};await runtime.request('managed.start',{...p,controlOrigin:'https://control.test',mode:'visual'});await expect.poll(()=>calls.filter(c=>c.path.endsWith('/claim')).length).toBeGreaterThan(0);await runtime.stop();expect(calls.filter(c=>c.path.endsWith('/jobs/claim')).every(c=>JSON.stringify(c.body)==='{"mode":"visual"}')).toBe(true);expect(calls.some(c=>c.path==='/worker/health/claim'&&JSON.stringify(c.body)==='{}')).toBe(true);
 });
 test('private enrollment generates an unpredictable token and sends only to configured HTTPS without redirects', async () => {
     const sent: RequestInit[] = [];

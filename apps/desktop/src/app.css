@@ -755,3 +755,6 @@ button[aria-pressed=true] {
 .recovery-publications li{padding:14px 0;border-bottom:1px solid var(--border,#d8e1ee);overflow-wrap:anywhere}
 .restore-review label:has(input[type=checkbox]){display:flex;align-items:flex-start;gap:8px}
 .restore-review input[type=checkbox]{width:auto;flex:none;margin:3px 0 0}
+
+/* Health observations and resource actions stay readable in the existing registry. */
+.site-registry table{table-layout:fixed;white-space:normal}.site-registry th,.site-registry td{padding:12px 10px;overflow-wrap:anywhere;vertical-align:top}.site-registry th:nth-child(1){width:19%}.site-registry th:nth-child(2){width:12%}.site-registry th:nth-child(3){width:18%}.site-registry th:nth-child(4){width:25%}.site-registry th:nth-child(5){width:26%}.site-registry td.row-actions{display:table-cell}.site-registry .row-actions button{margin:2px;white-space:normal}.health-refresh{margin-left:5px;padding:2px 6px}.site-registry small{display:block}

@@ -1,3 +1,4 @@
+import {safePublicationDiagnostic} from '../../contracts/src/publication.js';
 import { retainedPublicationRevision } from './postgres-retention.js';
 import type { PostgresQueue } from './postgres-queue.js';
 import type { R2Store } from './r2-store.js';
@@ -14,12 +15,15 @@ import { uploadFile } from './vercel/upload.js';
 import { findDeploymentPage, matchesDeployment } from './vercel/reconcile.js';
 import { domainSetup } from './vercel/domains.js';
 import { VercelError } from './vercel/client.js';
+import {PublicHttpsError} from './public-https.js';
+import type {PublicationDiagnostic} from '../../contracts/src/publication.js';
 import type { SqlTransaction } from './supabase-repository.js';
 import { authorize } from '../../core/src/permissions.js';
 import { createEditing } from '../../core/src/editing.js';
 import type { Lease } from '../../contracts/src/model.js';
 import { recoveryDigest } from '../../core/src/usage.js';
 import { observeRecoveryPublication, type RecoveryObservation } from './publication-recovery.js';
+class PublicationBindingError extends Error {}
 type Action = 'project' | 'project_create' | 'domain' | 'domain_attach' | 'verify_domain' | 'dns' | 'upload' | 'create' | 'find' | 'check' | 'promote' | 'alias' | 'https' | 'settle';
 interface Progress {
     action: Action;
@@ -191,7 +195,7 @@ export class PostgresPublication {
         const r = (await this.repo.pool.query('select p.*,floor(extract(epoch from retry_at)*1000)::text retry,d.data journal from private.provider_publications p left join private.deployments d on d.id=p.editing_intent_id where p.id=$1', [id])).rows[0];
         if (!r)
             throw new AppError('NOT_FOUND', 'Публикация не найдена.');
-        return { id: r.id, siteId: r.site_id, revisionId: r.revision_id, manifestId: r.manifest_id, manifestHash: r.manifest_hash, deploymentId: r.deployment_id, phase: r.phase, retryAt: r.retry === null ? null : Number(r.retry), cancelRequested: r.cancel_requested, settlement: r.settlement, verifiedAt: r.verified_at === null ? null : Number(r.verified_at), origin: r.editing_intent_id ? r.journal?.selection === 'rollback' ? 'rollback' : 'draft' : 'generation' };
+        return { ...(safePublicationDiagnostic(r.diagnostic)?{diagnostic:safePublicationDiagnostic(r.diagnostic)}:{}),id: r.id, siteId: r.site_id, revisionId: r.revision_id, manifestId: r.manifest_id, manifestHash: r.manifest_hash, deploymentId: r.deployment_id, phase: r.phase, retryAt: r.retry === null ? null : Number(r.retry), cancelRequested: r.cancel_requested, settlement: r.settlement, verifiedAt: r.verified_at === null ? null : Number(r.verified_at), origin: r.editing_intent_id ? r.journal?.selection === 'rollback' ? 'rollback' : 'draft' : 'generation' };
     }
     async getDomainSetup(siteId: string): Promise<DomainSetup> { const latest = await this.latest(siteId); return latest ? (await this.repo.pool.query('select data from private.provider_publications where id=$1', [latest.id])).rows[0].data.domainSetup : { records: [], verified: false }; }
     async latest(siteId: string) {
@@ -264,13 +268,14 @@ export class PostgresPublication {
         if (!claimed)
             return (await this.view(id)).phase;
         const p = claimed.data as Progress, action = p.action;
+        let diagnostic:PublicationDiagnostic|null=null;
         let phase: PublicationState = phaseFor[action], retryMs = 0, releaseCapacity = false, evidence: any = null;
         const next = (a: Action) => { p.action = a; p.dispatched = false; phase = phaseFor[a]; };
         const binding: ProviderBinding = { id, siteId: claimed.site_id, revisionId: claimed.revision_id, manifestHash: claimed.manifest_hash, projectId: p.projectId ?? '', projectName: p.projectName };
         const projectPath = `/v9/projects/${encodeURIComponent(p.projectId ?? p.projectName)}`;
         try {
             if (p.policyVersion !== publisherPolicyVersion || p.policyHash !== digest(publisherConfiguration.bytes))
-                throw new Error('Frozen publisher policy unavailable.');
+                throw new PublicationBindingError('Frozen publisher policy unavailable.');
             switch (action) {
                 case 'project':
                 case 'project_create': {
@@ -345,7 +350,7 @@ export class PostgresPublication {
                 case 'create': {
                     const deployment = await createDeployment(this.client, binding, await this.manifest(claimed));
                     if (!matchesDeployment(deployment, binding))
-                        throw new Error('Deployment binding mismatch.');
+                        throw new PublicationBindingError('Deployment binding mismatch.');
                     claimed.deployment_id = deployment.id ?? deployment.uid;
                     next('check');
                     break;
@@ -374,7 +379,7 @@ export class PostgresPublication {
                 case 'check': {
                     const deployment = await this.client.call('GET', `/v13/deployments/${encodeURIComponent(claimed.deployment_id)}`);
                     if (!matchesDeployment(deployment, binding))
-                        throw new Error('Deployment binding mismatch.');
+                        throw new PublicationBindingError('Deployment binding mismatch.');
                     if (deployment.readyState === 'READY') {
                         releaseCapacity = true;
                         next('promote');
@@ -417,6 +422,8 @@ export class PostgresPublication {
             }
         }
         catch (error) {
+            const code:PublicationDiagnostic['code']=error instanceof PublicationBindingError?'binding_mismatch':error instanceof VercelError&&[401,403].includes(error.status)?'account_configuration':error instanceof VercelError&&error.status===429?'quota':mutations.has(action)?'ambiguous_mutation':error instanceof PublicHttpsError&&['dns_pending','tls_error','wrong_version','unsafe_destination'].includes(error.code)?error.code as PublicationDiagnostic['code']:'provider_unavailable';
+            diagnostic={code,action,at:Date.now(),retryable:!['account_configuration','ambiguous_mutation','unsafe_destination','binding_mismatch'].includes(code)};
             if (error instanceof VercelError && error.status === 429) {
                 phase = 'waiting_quota';
                 retryMs = error.retryAfter;
@@ -440,7 +447,7 @@ export class PostgresPublication {
             if (current.step_token !== claimed.token || !current.live || account.step_token !== claimed.token || !account.live)
                 return; // Both authorities fence late responses.
             await tx.query('update private.provider_accounts set step_token=null,step_expires=null,active_intent=case when $3 and active_intent=$2 then null else active_intent end,blocked_until=case when $4::int>0 then clock_timestamp()+($4::int*interval \'1 millisecond\') else blocked_until end where id=$1 and step_token=$5', [claimed.account_id, id, releaseCapacity, phase === 'waiting_quota' ? retryMs : 0, claimed.token]);
-            await tx.query('update private.provider_publications set data=$2,deployment_id=$3,phase=$4,step_token=null,step_expires=null,retry_at=case when $5::int>0 then clock_timestamp()+($5::int*interval \'1 millisecond\') else null end,evidence=coalesce($6::jsonb,evidence),verified_at=coalesce($7::bigint,verified_at) where id=$1', [id, p, claimed.deployment_id, phase, retryMs, evidence, evidence?.verifiedAt ?? null]);
+            await tx.query('update private.provider_publications set data=$2,deployment_id=$3,phase=$4,step_token=null,step_expires=null,retry_at=case when $5::int>0 then clock_timestamp()+($5::int*interval \'1 millisecond\') else null end,evidence=coalesce($6::jsonb,evidence),verified_at=coalesce($7::bigint,verified_at),diagnostic=$8 where id=$1', [id, p, claimed.deployment_id, phase, retryMs, evidence, evidence?.verifiedAt ?? null,diagnostic]);
             await tx.query('update private.publication_attempts set result=$2 where id=$1', [claimed.token, p.dispatched ? 'unknown' : 'observed']);
             if (action === 'settle')
                 await this.settle(tx, id, reservation, current);
@@ -450,14 +457,14 @@ export class PostgresPublication {
     private async manifest(row: any): Promise<Manifest> {
         const manifest = (await this.repo.pool.query('select manifest from private.artifacts where id=$1 and site_id=$2 and verified', [row.manifest_id, row.site_id])).rows[0]?.manifest;
         if (!manifest || manifestHash(manifest) !== row.manifest_hash)
-            throw new Error('Immutable manifest mismatch.');
+            throw new PublicationBindingError('Immutable manifest mismatch.');
         return manifest;
     }
     private async settle(tx: SqlTransaction, id: string, reservation: any, row: any) {
         const p = row.data as Progress, site = (await this.repo.get(row.site_id, tx))!;
         const operation = (await tx.query('select * from private.site_operations where site_id=$1', [site.id])).rows[0];
         if (!row.evidence || !row.verified_at || operation?.operation_id !== id || operation.kind !== 'publication' || site.revision !== reservation.binding.expectedRevision) {
-            await tx.query("update private.provider_publications set settlement='conflict',phase='needs_attention' where id=$1", [id]);
+            await tx.query("update private.provider_publications set settlement='conflict',phase='needs_attention',diagnostic=$2 where id=$1", [id,{code:'settlement_conflict',action:'settle',at:Date.now(),retryable:false}]);
             return;
         }
         const existing = await this.repo.revision(row.revision_id, tx);

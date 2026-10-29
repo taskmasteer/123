@@ -8,6 +8,8 @@ export const publicationHeaders = {
 export const publisherPolicyVersion = 'static-headers-v1';
 export const publisherConfiguration: ArtifactFile = { path: 'vercel.json', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ headers: [{ source: '/(.*)', headers: Object.entries(publicationHeaders).map(([key, value]) => ({ key, value })) }] })) };
 export const digest = (bytes: Uint8Array, algorithm = 'sha256') => createHash(algorithm).update(bytes).digest('hex');
+/** Supported frozen policies only; a new publisher policy must keep old definitions. */
+export function publicationPolicy(version:string,hash:string):Record<string,string>|null {return version===publisherPolicyVersion&&hash===digest(publisherConfiguration.bytes)?{...publicationHeaders}:null;}
 /** Stable v1 encoding excludes private storage keys and timestamps. */
 export function manifestHash(manifest: Manifest) {
     checkArtifacts(manifest.files.map(f => ({ path: f.path, mediaType: f.mediaType, bytes: new Uint8Array() })));

@@ -1,3 +1,5 @@
+import {safePublicationDiagnostic} from '../../contracts/src/publication.js';
+import {healthObservation} from '../../contracts/src/monitoring.js';
 import { DatabaseSync } from 'node:sqlite';
 import { join, dirname } from 'node:path';
 import { AppError } from '../../contracts/src/model.js';
@@ -5,13 +7,19 @@ import type { RestoreEntry, RestoreEntries } from '../../core/src/backup.js';
 import { readFile } from 'node:fs/promises';
 import { parseCheckpointEvidence } from '../../core/src/usage.js';
 import { importLimits } from '../../contracts/src/import.js';
-export const localRecoveryTables = ['metadata', 'sites', 'jobs', 'records', 'batches', 'batch_rows', 'batch_assignments', 'operations', 'resources', 'chunks', 'payload_inventory', 'payload_edges', 'checkpoint_evidence', 'job_usage', 'publication_outcomes', 'recovery_state'] as const;
-export const managedRecoveryTables = ['public.users', 'public.memberships', 'public.sites', 'public.assignments', 'private.workers', 'private.jobs', 'private.artifacts', 'private.checkpoints', 'public.revisions', 'private.edit_requests', 'public.chat', 'private.deployments', 'public.health', 'private.batches', 'private.batch_rows', 'private.batch_assignments', 'private.import_resources', 'private.import_chunks', 'private.publication_reservations', 'private.site_operations', 'private.provider_accounts', 'private.provider_publications', 'private.publication_attempts', 'private.upload_preparations', 'private.catalog', 'private.audit', 'private.payload_inventory', 'private.payload_edges', 'private.checkpoint_evidence', 'private.job_usage', 'private.recovery_state'] as const;
+export const localRecoveryTables8 = ['metadata', 'sites', 'jobs', 'records', 'batches', 'batch_rows', 'batch_assignments', 'operations', 'resources', 'chunks', 'payload_inventory', 'payload_edges', 'checkpoint_evidence', 'job_usage', 'publication_outcomes', 'recovery_state'] as const;
+export const managedRecoveryTables8 = ['public.users', 'public.memberships', 'public.sites', 'public.assignments', 'private.workers', 'private.jobs', 'private.artifacts', 'private.checkpoints', 'public.revisions', 'private.edit_requests', 'public.chat', 'private.deployments', 'public.health', 'private.batches', 'private.batch_rows', 'private.batch_assignments', 'private.import_resources', 'private.import_chunks', 'private.publication_reservations', 'private.site_operations', 'private.provider_accounts', 'private.provider_publications', 'private.publication_attempts', 'private.upload_preparations', 'private.catalog', 'private.audit', 'private.payload_inventory', 'private.payload_edges', 'private.checkpoint_evidence', 'private.job_usage', 'private.recovery_state'] as const;
+export const localRecoveryTables=[...localRecoveryTables8,'job_activity','health_observations','health'] as const;
+export const managedRecoveryTables=[...managedRecoveryTables8,'private.job_activity','private.health_observations'] as const;
+export type RecoverySchema=8|9;
+export function recoveryTables(adapter:'local'|'managed',schema:RecoverySchema):readonly string[]{if(schema!==8&&schema!==9)throw new AppError('INVALID_INPUT','Неизвестная схема копии.');return adapter==='local'?(schema===8?localRecoveryTables8:localRecoveryTables):(schema===8?managedRecoveryTables8:managedRecoveryTables);}
+/** Never carry operational lease/replay capability into an archive or restored authority. */
+export function monitoringRecoveryRow(table:string,input:Record<string,any>,restored=false):Record<string,any>{const row=structuredClone(input);if(table.endsWith('job_activity')){const encoded=typeof row.data==='string',data=encoded?JSON.parse(row.data):row.data;data.generation=null;data.sequence=null;data.fingerprint=null;row.data=encoded?JSON.stringify(data):data;}if(table.endsWith('health_observations')){row.token=null;row.worker_id=null;row.expires_at=null;row.generation=0;row.next_due_at=0;}if(restored&&(table==='health'||table==='public.health')){const encoded=typeof row.data==='string',data=encoded?JSON.parse(row.data):row.data;if(data){data.status=null;data.code='unverified';data.provenance='restored';row.data=encoded?JSON.stringify(data):data;}row.status='unverified';}return row;}
 export type RecoveryRecord = {
     type: 'header';
     version: 1;
     adapter: 'local' | 'managed';
-    schema: 8;
+    schema: RecoverySchema;
     sourceId: string;
     createdAt: number;
     pinnedCatalogs?: string[];
@@ -32,13 +40,19 @@ export type RecoveryRecord = {
 };
 export function recoveryPath(path: string) { if (typeof path !== 'string' || path.length > 512 || path.split('/').some(p => !/^[a-z0-9][a-z0-9._@-]*$/i.test(p) || p === '.' || p === '..' || p.endsWith('.') || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(p)))
     throw new AppError('INVALID_INPUT', 'Небезопасный путь резервной копии.'); return path; }
-export function validateLogicalRecoveryRecord(record: RecoveryRecord) {
+export function validateLogicalRecoveryRecord(record: RecoveryRecord,schema:RecoverySchema=8) {
     if (record.type !== 'row')
         return;
+    if(!recoveryTables(record.table.includes('.')?'managed':'local',schema).includes(record.table))throw new AppError('INVALID_INPUT','Таблица не соответствует версии копии.');
     const row = record.row;
     if (!row || typeof row !== 'object' || Array.isArray(row))
         throw new AppError('INVALID_INPUT', 'Неверная запись метаданных.');
     const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+    if(schema===9&&(record.table==='health'||record.table==='public.health')&&data!=null){const h=healthObservation(data);if(h.siteId!==row.site_id)throw new AppError('INVALID_INPUT','Наблюдение другого сайта.');}
+    if(record.table.endsWith('job_activity')){const a=data as Record<string,unknown>;if(!a||a.jobId!==row.job_id||!Number.isSafeInteger(a.durationMs)||Number(a.durationMs)<0||a.coverage!=='partial'||a.generation!==null||a.sequence!==null||a.fingerprint!==null)throw new AppError('INVALID_INPUT','Измерение или его полномочия повреждены.');}
+    if(record.table.endsWith('health_observations')&&(row.token!==null||row.worker_id!==null||row.expires_at!==null||row.generation!==0))throw new AppError('INVALID_INPUT','Живая аренда не переносится.');
+    if(schema===9&&record.table==='private.provider_publications'&&row.diagnostic!=null&&(!safePublicationDiagnostic(row.diagnostic)||Object.keys(row.diagnostic as object).some(k=>!['code','action','at','retryable'].includes(k))))throw new AppError('INVALID_INPUT','Некорректная безопасная диагностика.');
+    if(schema===8&&((record.table==='public.health'&&row.data!=null)||(record.table==='private.provider_publications'&&row.diagnostic!=null)))throw new AppError('INVALID_INPUT','Поле не соответствует версии копии.');
     if (record.table === 'resources' || record.table === 'private.import_resources') {
         const r = data as Record<string, unknown>;
         if (!r || r.id !== row.id || typeof r.complete !== 'boolean' || !Number.isSafeInteger(r.size) || Number(r.size) < 1 || Number(r.size) > importLimits.sourceBytes || typeof r.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(r.sha256) || typeof r.name !== 'string' || r.name.length > 200)
@@ -69,7 +83,7 @@ export function validateLogicalRecoveryRecord(record: RecoveryRecord) {
 }
 export async function readRecoveryRecord(entry: RestoreEntry): Promise<RecoveryRecord> { if (!entry.name.startsWith('records/') || entry.size > 1000000)
     throw new AppError('INVALID_INPUT', 'Слишком большая запись резервной копии.'); const value = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(await readFile(entry.file))); if (!value || typeof value !== 'object' || !['header', 'row', 'file'].includes(value.type))
-    throw new AppError('INVALID_INPUT', 'Некорректная запись резервной копии.'); validateLogicalRecoveryRecord(value); return value; }
+    throw new AppError('INVALID_INPUT', 'Некорректная запись резервной копии.'); validateLogicalRecoveryRecord(value,9); return value; }
 /** Private staging indexes are independent of the live installation database/fence. */
 class RecoveryRows implements Iterable<RestoreEntry> {
     constructor(readonly path: string, readonly length: number) { }
@@ -124,7 +138,7 @@ export async function validateRecovery(entries: RestoreEntries, adapter: 'local'
         if (!headerEntry)
             throw new AppError('INVALID_INPUT', 'Нет заголовка.');
         const header = await readRecoveryRecord(headerEntry);
-        if (header.type !== 'header' || header.version !== 1 || header.schema !== 8 || header.adapter !== adapter)
+        if (header.type !== 'header' || header.version !== 1 || ![8,9].includes(header.schema) || header.adapter !== adapter)
             throw new AppError('INVALID_INPUT', 'Формат копии не соответствует целевой установке.');
         let ordinal = 0;
         const get = db.prepare("select name,size,sha256,file,used from entries where kind='payload' and name=?"), mark = db.prepare('update entries set used=1 where name=?'), lookup = db.prepare('select path,leaf from paths where key=?'), put = db.prepare('insert into paths values(?,?,?) on conflict(key) do update set leaf=max(paths.leaf,excluded.leaf)');
@@ -137,7 +151,7 @@ export async function validateRecovery(entries: RestoreEntries, adapter: 'local'
             if (record.type === 'header')
                 throw new AppError('INVALID_INPUT', 'Повторный заголовок.');
             if (record.type === 'row') {
-                const tables: readonly string[] = adapter === 'local' ? localRecoveryTables : managedRecoveryTables;
+                const tables=recoveryTables(adapter,header.schema);validateLogicalRecoveryRecord(record,header.schema);
                 if (!tables.includes(record.table))
                     throw new AppError('INVALID_INPUT', 'Неизвестная таблица копии.');
                 continue;

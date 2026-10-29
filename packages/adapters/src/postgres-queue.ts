@@ -1,4 +1,5 @@
 import { AppError } from '../../contracts/src/model.js';
+import {nextActivity} from '../../core/src/activity.js';
 import { commitPostgresProjection, retainedPublicationRevision } from './postgres-retention.js';
 import type { Checkpoint, Job, Lease, Queue, Site, SitePatch, Principal } from '../../contracts/src/model.js';
 import { authorize } from '../../core/src/permissions.js';
@@ -7,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { validJob } from './local-queue.js';
 import { SupabaseRepository, type SqlTransaction, type LeaseAuthority, type WorkerSiteMutation, type Admission } from './supabase-repository.js';
 export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation {
+    private async activityInTransaction(tx:SqlTransaction,lease:Lease,segment:import('../../contracts/src/monitoring.js').ActivitySegment){const old=(await tx.query('select data from private.job_activity where job_id=$1 for update',[lease.jobId])).rows[0]?.data??null;const next=nextActivity(old,lease.jobId,lease.generation,segment);await tx.query('insert into private.job_activity values($1,$2) on conflict(job_id) do update set data=excluded.data',[lease.jobId,next]);}
+    async recordActivity(lease:Lease,segment:import('../../contracts/src/monitoring.js').ActivitySegment):Promise<void>{await this.repository.transaction(async tx=>{await this.assertCurrent(tx,lease.workerId,lease);await this.activityInTransaction(tx,lease,segment);});}
     constructor(readonly repository: SupabaseRepository) {
     }
     /** Called only after locking the job and its site; session roles are not authority. */
@@ -44,10 +47,11 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
         await tx.query("update private.site_operations set operation_id=$2,kind='publication',generation=null,expires_at=null where site_id=$1", [site.id, id]);
         return { id };
     }
-    async pauseAtBoundary(lease: Lease): Promise<boolean> {
+    async pauseAtBoundary(lease: Lease,activity?:import('../../contracts/src/monitoring.js').ActivitySegment): Promise<boolean> {
         return this.repository.transaction(async (tx) => {
             await this.assertCurrent(tx, lease.workerId, lease);
             const paused = (await tx.query('select w.paused or j.pause_requested paused from private.jobs j join private.workers w on w.id=j.worker_id where j.id=$1', [lease.jobId])).rows[0].paused;
+            if(paused&&activity)await this.activityInTransaction(tx,lease,activity);
             if (paused)
                 await tx.query("update private.jobs set worker_id=null,expires_at=null,data=jsonb_set(data,'{state}','\"paused\"') where id=$1", [lease.jobId]);
             return paused;
@@ -270,7 +274,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
             await tx.query("update private.jobs set checkpoint_id=$2,data=data||jsonb_build_object('checkpointId',($2::uuid)::text,'stage',$3::text) where id=$1", [lease.jobId, checkpoint.id, checkpoint.stage]);
         });
     }
-    async finish(lease: Lease, state: Job['state']): Promise<void> {
+    async finish(lease: Lease, state: Job['state'],activity?:import('../../contracts/src/monitoring.js').ActivitySegment): Promise<void> {
         if (!['paused', 'waiting_provider', 'needs_attention', 'completed', 'cancelled'].includes(state))
             throw new AppError('INVALID_INPUT', 'Некорректное конечное состояние.');
         await this.repository.transaction(async (tx) => {
@@ -281,6 +285,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
                     return;
             }
             const bound = await this.authority(tx, lease.workerId, lease, true);
+            if(activity)await this.activityInTransaction(tx,lease,activity);
             if (state === 'completed' && (!current.checkpoint_id || current.data.stage !== 'completed'))
                 throw new AppError('CONFLICT', 'Завершённый этап ещё не сохранён.');
             if (state === 'completed' && (await tx.query('select 1 from private.publication_reservations where origin_job_id=$1 and resolution is null', [lease.jobId])).rowCount)

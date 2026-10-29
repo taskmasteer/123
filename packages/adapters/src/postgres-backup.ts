@@ -5,7 +5,7 @@ import { AppError } from '../../contracts/src/model.js';
 import type { RestoreReport } from '../../contracts/src/recovery.js';
 import { authorize } from '../../core/src/permissions.js';
 import type { RecoveryRecord } from './recovery-records.js';
-import { managedRecoveryTables, recoveryPath, validateLogicalRecoveryRecord } from './recovery-records.js';
+import { managedRecoveryTables, recoveryTables, recoveryPath, validateLogicalRecoveryRecord } from './recovery-records.js';
 import { SupabaseRepository, type SqlTransaction } from './supabase-repository.js';
 import type { R2Store } from './r2-store.js';
 import { PostgresRetention } from './postgres-retention.js';
@@ -50,9 +50,9 @@ export class PostgresBackup {
             await retention.closure(tx, now, true);
             await tx.query('insert into private.recovery_snapshots values($1,$2,to_timestamp($3/1000.0),$4)', [id, actor.userId, now + ttl, { kind: 'backup', adapter: 'managed' }]);
             let seq = 0;
-            await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3)', [id, seq++, { type: 'header', adapter: 'managed', version: 1, schema: 8, sourceId: id, createdAt: now }]);
+            await tx.query('insert into private.recovery_snapshot_records values($1,$2,$3)', [id, seq++, { type: 'header', adapter: 'managed', version: 1, schema: 9, sourceId: id, createdAt: now }]);
             for (const table of managedRecoveryTables) {
-                const expression = table === 'private.workers' ? "to_jsonb(t)-'token_hash'" : table === 'private.provider_publications' || table === 'private.provider_accounts' ? "to_jsonb(t)||jsonb_build_object('step_token',null,'step_expires',null)" : 'to_jsonb(t)';
+                const expression = table==='private.job_activity'?"to_jsonb(t)||jsonb_build_object('data',t.data||jsonb_build_object('generation',null,'sequence',null,'fingerprint',null))":table==='private.health_observations'?"to_jsonb(t)||jsonb_build_object('token',null,'worker_id',null,'expires_at',null,'generation',0,'next_due_at',0)":table === 'private.workers' ? "to_jsonb(t)-'token_hash'" : table === 'private.provider_publications' || table === 'private.provider_accounts' ? "to_jsonb(t)||jsonb_build_object('step_token',null,'step_expires',null)" : 'to_jsonb(t)';
                 const inserted = await tx.query('insert into private.recovery_snapshot_records select $1,$2+row_number() over()-1,jsonb_build_object(\'type\',\'row\',\'table\',$3::text,\'row\',' + expression + ') from ' + table + ' t' + (table === 'private.site_operations' ? " where kind<>'controller'" : ''), [id, seq, table]);
                 seq += inserted.rowCount ?? 0;
                 if (seq > 1000000)
@@ -100,7 +100,7 @@ export class PostgresBackup {
         return; await tx.query('delete from private.recovery_snapshot_records where snapshot_id=$1', [id]); await tx.query('delete from private.recovery_snapshots where id=$1', [id]); }); }
     async beginRestore(actor: Principal, header: RecoveryRecord, mappings: IdentityMapping[], records: number, inventoryDigest?:unknown,scope?:string) {
         await this.admin(actor);
-        if (header.type !== 'header' || header.adapter !== 'managed' || header.version !== 1 || header.schema !== 8 || !Number.isSafeInteger(records) || records < 1 || records > 1000000 || mappings.length > 5000)
+        if (header.type !== 'header' || header.adapter !== 'managed' || header.version !== 1 || ![8,9].includes(header.schema) || !Number.isSafeInteger(records) || records < 1 || records > 1000000 || mappings.length > 5000)
             throw new AppError('INVALID_INPUT', 'Неверный формат восстановления.');
         if (!this.verifyIdentity)
             throw new AppError('UNAVAILABLE', 'Проверка получателей Auth не настроена.');
@@ -128,7 +128,7 @@ export class PostgresBackup {
     async stageRecord(actor: Principal, id: string, seq: number, record: RecoveryRecord) {
         if (!Number.isSafeInteger(seq) || seq < 0 || seq >= 1000000 || Buffer.byteLength(JSON.stringify(record)) > 1000000 || !record || !['header', 'row', 'file'].includes(record.type))
             throw new AppError('INVALID_INPUT', 'Неверная запись восстановления.');
-        validateLogicalRecoveryRecord(record);
+        validateLogicalRecoveryRecord(record,9);
         if (record.type === 'row' && !(managedRecoveryTables as readonly string[]).includes(record.table))
             throw new AppError('INVALID_INPUT', 'Неизвестная таблица.');
         if (record.type === 'file') {
@@ -138,6 +138,8 @@ export class PostgresBackup {
         }
         await this.repository.transaction(async (tx) => {
             const snapshot = await this.snapshot(actor, id, tx);
+            validateLogicalRecoveryRecord(record,snapshot.data.header.schema);
+            if (record.type==='row'&&!recoveryTables('managed',snapshot.data.header.schema).includes(record.table))throw new AppError('INVALID_INPUT','Таблица не соответствует версии.');
             if (snapshot.data.kind !== 'restore' || seq >= snapshot.data.records)
                 throw new AppError('CONFLICT', 'Неверный сеанс восстановления.');
             const old = (await tx.query('select data=$3::jsonb same from private.recovery_snapshot_records where snapshot_id=$1 and seq=$2', [id, seq, record])).rows[0];

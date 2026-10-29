@@ -34,6 +34,7 @@ export interface CheckpointEvidence {
     digest: string;
 }
 export interface JobUsage {
+    imagePending?:boolean;
     version: 1;
     jobId: string;
     checkpointId: string;

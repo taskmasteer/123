@@ -4,6 +4,7 @@ import { nonemptyString } from '../../contracts/src/inputs.js';
 import { openLocalDatabase, insertLocalJob, type LocalDatabase } from './local-database.js';
 import { validJob, type LocalQueue } from './local-queue.js';
 import { commitLocalProjection } from './retention-schema.js';
+import {nextActivity} from '../../core/src/activity.js';
 export async function createSqliteQueue(directory: string, clock: Clock, database?: LocalDatabase): Promise<LocalQueue> {
     const db = database ?? await openLocalDatabase(directory);
     let closed = false;
@@ -46,6 +47,7 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
     };
     const batchActive = (r: Stored) => !r.batch_id || db.sql.prepare('select state from batches where id=?').get(r.batch_id)?.state === 'active';
     return {
+        recordActivity(lease,segment){return run(()=>{owned(lease);if(db.sql.prepare("select 1 from recovery_state where key='quarantine'").get())throw new AppError('CONFLICT','Установка ожидает проверки.');const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,segment);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));});},
         enqueue(j) {
             return run(() => {
                 if (!validJob(j) || j.state !== 'queued' || j.checkpointId !== null)
@@ -96,20 +98,22 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
             });
         },
         shouldPause(lease) { return run(() => { const r = owned(lease); return !!r.pause || !batchActive(r); }); },
-        pauseAtBoundary(lease) {
+        pauseAtBoundary(lease,activity) {
             return run(() => {
                 const r = owned(lease);
                 if (!r.pause && batchActive(r))
                     return false;
+                if(activity){const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,activity);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));}
                 save(r, { ...job(r), state: 'paused' }, null);
                 return true;
             });
         },
-        finish(lease, status) {
+        finish(lease, status,activity) {
             return run(() => {
                 if (!['paused', 'waiting_provider', 'needs_attention', 'completed', 'cancelled'].includes(status))
                     throw new AppError('INVALID_INPUT', 'Invalid final state.');
                 const r = owned(lease);
+                if(activity){const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,activity);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));}
                 save(r, { ...job(r), state: status }, null);
             });
         },

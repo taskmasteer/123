@@ -23,6 +23,7 @@ import { projectPreview } from './preview.js';
 import { visualRoute } from './routes/visual.js';
 import type { PostgresQueue } from '../../../packages/adapters/src/postgres-queue.js';
 import { jobsRoute } from './routes/jobs.js';
+import {workerHealthRoute,healthRoute} from './routes/health.js';
 import { jobControlsRoute } from './routes/job-controls.js';
 import type { PostgresPublication } from '../../../packages/adapters/src/postgres-publication.js';
 import { publicationRoute } from './routes/publication.js';
@@ -131,7 +132,7 @@ export function createApp(deps: Partial<AppDependencies>) {
                 const worker = await deps.auth.verifyWorker(token);
                 if (request.method !== 'POST')
                     throw new AppError('NOT_FOUND', 'Маршрут не найден.');
-                const data = await body(request), result = url.pathname.startsWith('/worker/') ? await jobsRoute(deps.queue, deps.store, worker.workerId, url.pathname, data, deps.publication) : await uploadsRoute(deps.store, worker.workerId, url.pathname, data);
+                const data = await body(request), result = url.pathname.startsWith('/worker/health/') ? await workerHealthRoute(deps.repository,worker.workerId,url.pathname,data) : url.pathname.startsWith('/worker/') ? await jobsRoute(deps.queue, deps.store, worker.workerId, url.pathname, data, deps.publication) : await uploadsRoute(deps.store, worker.workerId, url.pathname, data);
                 return finish(result instanceof Response ? result : json(result));
             }
             const actor = await deps.auth.verifyUser(token), repo = deps.repository;
@@ -172,6 +173,7 @@ export function createApp(deps: Partial<AppDependencies>) {
                 return finish(json(await recoveryTransferRoute(deps.backup,actor,scope,request,url,payload)));
             }
             const data = await body(request);
+            const monitoring=await healthRoute(repo,actor,request,url.pathname,data);if(monitoring!==undefined)return finish(json(monitoring));
             const recovery = await recoveryRoute(deps.backup, actor, request, url, data, deps.publication,scope);
             if (recovery !== undefined)
                 return finish(json(recovery));

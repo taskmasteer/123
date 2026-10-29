@@ -1,3 +1,4 @@
+import {localUsage,localHealth} from '../../../packages/adapters/src/local-monitoring.js';
 import { rm } from 'node:fs/promises';
 import { LocalBatches } from '../../../packages/adapters/src/local-batches.js';
 import { LocalImportResources } from '../../../packages/adapters/src/import-resources.js';
@@ -405,6 +406,9 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                         case 'visual.selection.open':
                         case 'visual.selection.status':
                         case 'visual.selection.close': return selectionRuntime.request(request.method, p);
+                        case 'usage.summary':return localUsage(database);
+                        case 'site.usage':if(!await sites.get(String(p.siteId)))throw new AppError('NOT_FOUND','Сайт не найден.');return localUsage(database,String(p.siteId));
+                        case 'site.health':if(!await sites.get(String(p.siteId)))throw new AppError('NOT_FOUND','Сайт не найден.');return localHealth(database,String(p.siteId));
                         case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
                         case 'site.list': {
                             const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;

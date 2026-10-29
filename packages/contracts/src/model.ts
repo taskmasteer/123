@@ -149,6 +149,7 @@ export interface CheckpointStore {
     }>;
 }
 export interface Queue {
+    recordActivity?(lease:Lease,segment:import('./monitoring.js').ActivitySegment):Promise<void>;
     continuePublications?(): Promise<void>;
     enqueue(job: Job): Promise<void>;
     claim(workerId: string, mode?: 'all' | 'visual'): Promise<{
@@ -158,8 +159,8 @@ export interface Queue {
     heartbeat(lease: Lease): Promise<Lease>;
     checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null, projection?: import('./recovery.js').CheckpointProjection): Promise<void>;
     shouldPause?(lease: Lease): Promise<boolean>;
-    pauseAtBoundary?(lease: Lease): Promise<boolean>;
-    finish(lease: Lease, state: Job['state']): Promise<void>;
+    pauseAtBoundary?(lease: Lease,activity?:import('./monitoring.js').ActivitySegment): Promise<boolean>;
+    finish(lease: Lease, state: Job['state'],activity?:import('./monitoring.js').ActivitySegment): Promise<void>;
 }
 export type PublicationState = 'pending' | 'uploading' | 'creating' | 'checking' | 'promoting' | 'reconciling' | 'waiting_quota' | 'awaiting_dns' | 'published' | 'needs_attention';
 export interface PublicationPort {

@@ -1,3 +1,4 @@
+import {publicationDiagnosticCaptions} from '../../../../../packages/contracts/src/publication.js';
 import React, { useEffect, useRef, useState } from 'react';
 import type { Principal, Site } from '../../../../../packages/contracts/src/model.js';
 import type { PublicationView, DomainSetup } from '../../../../../packages/contracts/src/publication.js';
@@ -68,6 +69,6 @@ export function PublicationPanel({ site, principal, onChanged }: {
    {publication?.settlement === 'pending' && canResume ? <button disabled={busy} onClick={() => void act(true)}>Продолжить публикацию</button> : null}
    {canEdit && site.draftId && site.draftId !== site.publishedId && publication?.settlement !== 'pending' ? <button className="primary" disabled={busy} onClick={() => void act(false)}>Опубликовать принятый черновик</button> : null}
   </div>
-  {error ? <p role="alert" className="error-banner">{error}</p> : null}
+  {publication?.diagnostic?<p role="status">{publicationDiagnosticCaptions[publication.diagnostic.code]} · {new Date(publication.diagnostic.at).toLocaleString('ru-RU')}</p>:null}{error ? <p role="alert" className="error-banner">{error}</p> : null}
  </section>;
 }

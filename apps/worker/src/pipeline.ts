@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { projectCheckpoint } from '../../../packages/core/src/usage.js';
+import {ActivityTimer} from './activity.js';
 import type { ArtifactFile, ArtifactStore, ChatMessage, CheckpointStore, Clock, FileTools, Job, Lease, ModelContinuation, ModelPort, ModelRequest, ModelResult, PublicationPort, Queue, RevisionRepository, SiteRepository, ValidationReport } from '../../../packages/contracts/src/model.js';
 import type { ImageHooks, ImageState } from '../../../packages/adapters/src/openai/images.js';
 import { generatePrompt } from './prompts/generate.js';
@@ -14,6 +15,7 @@ import { validateSite } from './validation/browser.js';
 import { createEditableMap } from '../../../packages/core/src/visual/editable-map.js';
 import { patchFiles } from '../../../packages/core/src/visual/html-patch.js';
 export interface WorkerDeps {
+    health?:import('../../../packages/contracts/src/monitoring.js').HealthPort;
     /** Remote ports bind protected reads/writes to this claim, never shared mutable current-job state. */
     bind?: (job: Job, lease: Lease) => Promise<WorkerDeps>;
     queue: Queue;
@@ -126,6 +128,9 @@ const illustration = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 1
  */
 export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, signal: AbortSignal): Promise<void> {
     let lease = initialLease;
+    const activity=new ActivityTimer(deps.queue.recordActivity?segment=>deps.queue.recordActivity!(lease,segment):undefined);
+    const seal=()=>activity.flush().catch(()=>{}); // Measurement loss is partial coverage, never a provider retry trigger.
+    const finish=async(state:Job['state'])=>{await activity.boundary(async segment=>{await deps.queue.finish(lease,state,segment);return true;});};
     let state: PipelineState | undefined;
     let files: ArtifactFile[] = [];
     let stage = job.stage;
@@ -148,29 +153,29 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     let leaseError: unknown;
     let heartbeat: Promise<void> = Promise.resolve();
     const timer = setInterval(() => {
-        heartbeat = heartbeat.then(async () => { lease = await deps.queue.heartbeat(lease); }).catch((error: unknown) => { leaseError = error; localAbort.abort(error); });
+        heartbeat = heartbeat.then(async () => { await seal();lease = await activity.wait(()=>deps.queue.heartbeat(lease)); }).catch((error: unknown) => { leaseError = error; localAbort.abort(error); });
     }, heartbeatIntervalMs);
     async function check() {
         activeSignal.throwIfAborted();
         if (leaseError)
             throw leaseError;
-        lease = await deps.queue.heartbeat(lease);
+        lease = await activity.wait(()=>deps.queue.heartbeat(lease));
     }
     async function save(next: string) {
         await check();
         const boundary = next !== stage;
-        const checkpoint = await deps.checkpoints.save({ ...job, stage: next }, lease, state!, files);
-        await deps.queue.checkpoint(lease, checkpoint, job.checkpointId, projectCheckpoint(checkpoint, state!, files, job.checkpointId));
+        const checkpoint = await activity.wait(()=>deps.checkpoints.save({ ...job, stage: next }, lease, state!, files));
+        const projection=projectCheckpoint(checkpoint,state!,files,job.checkpointId);await activity.wait(()=>deps.queue.checkpoint(lease,checkpoint,job.checkpointId,projection));
         job.checkpointId = checkpoint.id;
         job.stage = next;
         stage = next;
         if (boundary && next !== 'completed') {
             if (deps.queue.pauseAtBoundary) {
-                if (await deps.queue.pauseAtBoundary(lease))
+                if (await activity.boundary(segment=>deps.queue.pauseAtBoundary!(lease,segment)))
                     throw new StagePaused();
             }
             else if (await deps.queue.shouldPause?.(lease)) {
-                await deps.queue.finish(lease, 'paused');
+                await finish('paused');
                 throw new StagePaused();
             }
         }
@@ -210,7 +215,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             if (!revision || revision.siteId !== site.id || revision.manifestId !== state.manifestId || revision.kind !== 'published')
                 throw new AppError('INVALID_INPUT', 'Published revision does not match the checkpoint.');
             await save('completed');
-            await deps.queue.finish(lease, 'completed');
+            await finish('completed');
             return;
         }
         if (job.kind === 'generate' && site.revision !== job.baseRevision)
@@ -354,7 +359,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                         throw new AppError('PROVIDER_WAIT', 'Model transport failed after three retries.', { cause: error });
                     state!.transportRetries++;
                     await save(stage);
-                    await (deps.delay ?? ((milliseconds, abort) => sleep(milliseconds, undefined, { signal: abort })))(1000 * 2 ** (state!.transportRetries - 1), activeSignal);
+                    await activity.wait(()=>(deps.delay ?? ((milliseconds, abort) => sleep(milliseconds, undefined, { signal: abort })))(1000 * 2 ** (state!.transportRetries - 1), activeSignal));
                     continue;
                 }
                 if (!result || typeof result.summary !== 'string' || !Number.isSafeInteger(result.inputTokens) || result.inputTokens < 0 || !Number.isSafeInteger(result.outputTokens) || result.outputTokens < 0 || !validUncertainRequests(result.uncertainRequests))
@@ -442,7 +447,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                 if (publication === 'needs_attention')
                     throw new AppError('NEEDS_ATTENTION', 'Publication needs attention.');
                 if (publication !== 'published') {
-                    await deps.queue.finish(lease, 'waiting_provider');
+                    await finish('waiting_provider');
                     return;
                 }
                 if (deps.publication.settlement)
@@ -457,7 +462,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             }
             await save('completed');
         }
-        await deps.queue.finish(lease, 'completed');
+        await finish('completed');
     }
     catch (error) {
         if (error instanceof StagePaused)
@@ -470,7 +475,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             state.error = error instanceof Error ? error.message : String(error);
             await save(stage);
         }
-        await deps.queue.finish(lease, activeSignal.aborted ? 'paused' : error instanceof AppError && error.code === 'PROVIDER_WAIT' ? 'waiting_provider' : 'needs_attention');
+        await finish(activeSignal.aborted ? 'paused' : error instanceof AppError && error.code === 'PROVIDER_WAIT' ? 'waiting_provider' : 'needs_attention');
     }
     finally {
         clearInterval(timer);

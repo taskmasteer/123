@@ -54,7 +54,7 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
         return visual::validate(&request.method, &request.params);
     }
     let allowed: &[&str] = match request.method.as_str() {
-        "device.status" | "catalog.list" | "recovery.status" | "recovery.release" => &[],
+        "usage.summary" | "device.status" | "catalog.list" | "recovery.status" | "recovery.release" => &[],
         "site.history" => &["siteId", "offset"],
         "site.rollback" => &["siteId", "revisionId", "expectedRevision", "requestKey"],
         "source.list" => &["siteId", "revisionId"],
@@ -78,7 +78,7 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
         "batch.retry" => &["id", "rowNumber", "modelIdentity"],
         "batch.assign" => &["id", "userIds"],
         "site.create" => &["domain", "about", "referenceId"],
-        "job.status" | "job.retry" | "edit.list" | "chat.list" => &["siteId"],
+        "site.health" | "site.usage" | "job.status" | "job.retry" | "edit.list" | "chat.list" => &["siteId"],
         "edit.request" => &["siteId", "instruction", "expectedRevision", "candidateId"],
         "edit.accept" => &["siteId", "candidateId", "expectedRevision"],
         "edit.reject" => &["siteId", "candidateId"],
@@ -156,7 +156,7 @@ pub fn validate(request: &DesktopRequest) -> Result<(), AppError> {
                 return Err(invalid());
             }
         }
-        "job.status" | "job.retry" | "edit.list" | "chat.list" => {
+        "site.health" | "site.usage" | "job.status" | "job.retry" | "edit.list" | "chat.list" => {
             if !uuid("siteId") {
                 return Err(invalid());
             }
@@ -372,6 +372,16 @@ pub async fn model_settings<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn monitoring_is_scoped_read_only_and_never_accepts_probe_authority() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        for (method, params) in [("site.health", json!({"siteId":id})), ("site.usage", json!({"siteId":id})), ("usage.summary",json!({}))] {
+            assert!(validate(&DesktopRequest { id:"monitor".into(), version:1, method:method.into(), params }).is_ok());
+        }
+        for (method, params) in [("health.probe",json!({"siteId":id})),("site.health",json!({"siteId":id,"url":"https://private.test"})),("site.usage",json!({"siteId":"invalid"})),("usage.summary",json!({"role":"admin"}))] {
+            assert!(validate(&DesktopRequest { id:"monitor".into(), version:1, method:method.into(), params }).is_err());
+        }
+    }
     #[test]
     fn staged_import_schemas_reject_paths_roles_and_unbounded_fields() {
         let id = "11111111-1111-4111-8111-111111111111";

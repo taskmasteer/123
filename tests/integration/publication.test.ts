@@ -447,6 +447,7 @@ it('verified external success survives settlement CAS conflict and retains the s
         await f.pool.end();
     }
 });
+it('publication diagnostic projection never returns unrecognized fields or raw exception material',async()=>{const f=await fixture();try{await f.publication.attach(f.reservation.id);await f.pool.query('update private.provider_publications set diagnostic=$2 where id=$1',[f.reservation.id,{code:'quota',action:'create',at:1,retryable:true,raw:'SECRET provider url headers body'}]);expect(JSON.stringify(await f.publication.view(f.reservation.id))).not.toContain('SECRET');}finally{await f.pool.end();}});
 it('publication reconciles paginated unknown create, waits for alias plus HTTPS, then settles exactly once', async () => {
     const f = await fixture();
     try {
@@ -475,6 +476,7 @@ it('publication preserves exclusion and archived bytes across quota, DNS waits a
         await f.publication.attach(f.reservation.id);
         f.setQuota();
         expect(await f.advance()).toBe('waiting_quota');
+        expect((await f.publication.view(f.reservation.id)).diagnostic).toMatchObject({code:'quota',retryable:true});
         f.setDns(false);
         for (let i = 0; i < 15; i++)
             await f.advance();

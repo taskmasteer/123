@@ -1,3 +1,5 @@
+import {publicationDiagnosticCaptions} from '../../../../packages/contracts/src/publication.js';
+import {healthObservation,usageSummary} from '../../../../packages/contracts/src/monitoring.js';
 import { cursorShape } from '../../../../packages/core/src/site-pagination.js';
 import { importMethods } from '../../../../packages/contracts/src/import.js';
 import { importParams, importResponse } from '../../../../packages/contracts/src/import-wire.js';
@@ -22,7 +24,8 @@ export function sessionView(value: unknown): SessionView {
     return s as unknown as SessionView;
 }
 function publicationView(raw: unknown) {
-    const p = object(raw, ['id', 'siteId', 'revisionId', 'manifestId', 'manifestHash', 'deploymentId', 'phase', 'retryAt', 'cancelRequested', 'settlement', 'verifiedAt', 'origin']);
+    const p = object(raw, ['id', 'siteId', 'revisionId', 'manifestId', 'manifestHash', 'deploymentId', 'phase', 'retryAt', 'cancelRequested', 'settlement', 'verifiedAt', 'origin','diagnostic']);
+    if(p.diagnostic!=null){const d=object(p.diagnostic,['code','action','at','retryable']);if(!Object.hasOwn(publicationDiagnosticCaptions,String(d.code))||typeof d.retryable!=='boolean')return bad();string(d.action,100);integer(d.at);}
     for (const key of ['id', 'siteId', 'revisionId', 'manifestId'])
         uuid(p[key]);
     if (!/^[a-f0-9]{64}$/.test(String(p.manifestHash)))
@@ -53,6 +56,7 @@ function domainView(raw: unknown) {
 function validate(method: string, value: unknown): unknown {
     if (method === 'site.rollback')
         return publicationView(value);
+    if(method==='site.health')return healthObservation(value);if(method==='site.usage'||method==='usage.summary')return usageSummary(value);
     if (Object.hasOwn(recoveryMethods, method) && method !== 'recovery.release')
         return recoveryResponse(method, value);
     if (Object.hasOwn(visualMethods, method))
@@ -284,6 +288,9 @@ export class RemoteClient {
         }
         let path: string, verb = 'GET', body: unknown;
         switch (method) {
+            case 'site.health':path=`/sites/${uuid(p.siteId)}/health`;break;
+            case 'site.usage':path=`/sites/${uuid(p.siteId)}/usage`;break;
+            case 'usage.summary':object(params,[]);path='/usage';break;
             case 'batch.retry':
             case 'resource.begin':
             case 'resource.chunk':

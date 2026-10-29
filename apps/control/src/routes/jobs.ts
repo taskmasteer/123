@@ -5,6 +5,7 @@ import { PostgresRecoveryTransfer } from '../../../../packages/adapters/src/post
 import { PostgresImportResources } from '../../../../packages/adapters/src/postgres-import-resources.js';
 import { projectCheckpoint } from '../../../../packages/core/src/usage.js';
 import { AppError } from '../../../../packages/contracts/src/model.js';
+import {activitySegment} from '../../../../packages/contracts/src/monitoring.js';
 import { integer, leaseDto, object, string, uuid } from '../../../../packages/contracts/src/http.js';
 import type { PostgresQueue } from '../../../../packages/adapters/src/postgres-queue.js';
 import { metadata, type R2Store } from '../../../../packages/adapters/src/r2-store.js';
@@ -38,14 +39,15 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             throw new AppError('INVALID_INPUT', 'Invalid claim mode.');
         return queue.claim(workerId, p.mode as 'all' | 'visual' | undefined);
     }
-    const route = /^\/worker\/jobs\/([^/]+)\/(heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo|template)$/.exec(path);
+    const route = /^\/worker\/jobs\/([^/]+)\/(activity|heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo|template)$/.exec(path);
     if (!route)
         throw new AppError('NOT_FOUND', 'Маршрут исполнителя не найден.');
-    const fields: Record<string, string[]> = { template: ['styleId', 'version', 'path'], logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
+    const fields: Record<string, string[]> = {activity:['segment'], template: ['styleId', 'version', 'path'], logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state','activity'],'pause-boundary':['activity'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
     const p = object(body, ['lease', ...(fields[route[2]!] ?? [])]), lease = leaseDto(p.lease);
     if (lease.jobId !== uuid(route[1]) || lease.workerId !== workerId)
         throw new AppError('STALE_LEASE', 'Чужая аренда.');
     switch (route[2]) {
+        case 'activity':await queue.recordActivity(lease,activitySegment(p.segment));return {ok:true};
         case 'template': {
             if (!store)
                 throw new AppError('UNAVAILABLE', 'Хранилище не подключено.');
@@ -123,7 +125,7 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
         }
         case 'heartbeat': return queue.heartbeat(lease);
         case 'pause-status': return { paused: await queue.shouldPause(lease) };
-        case 'pause-boundary': return { paused: await queue.pauseAtBoundary(lease) };
+        case 'pause-boundary': return { paused: await queue.pauseAtBoundary(lease,p.activity===undefined?undefined:activitySegment(p.activity)) };
         case 'checkpoint': {
             if (!store)
                 throw new AppError('UNAVAILABLE', 'Хранилище не подключено.');
@@ -133,7 +135,7 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             return { ok: true };
         }
         case 'finish':
-            await queue.finish(lease, string(p.state, 30) as Parameters<PostgresQueue['finish']>[1]);
+            await queue.finish(lease, string(p.state, 30) as Parameters<PostgresQueue['finish']>[1],p.activity===undefined?undefined:activitySegment(p.activity));
             return { ok: true };
         case 'site': return queue.repository.transaction(async (tx) => {
             const bound = await queue.assertCurrent(tx, workerId, lease);

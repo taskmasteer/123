@@ -19,6 +19,8 @@ test('managed browser harness respects server capabilities and keeps remote fail
             result = { items: [{ id, domain: 'managed.example', ownerId: id, assignedUserIds: [], input: { domain: 'managed.example' }, revision: 1, draftId: null, publishedId: '22222222-2222-4222-8222-222222222222', generationStatus: 'completed', domainStatus: 'unconfigured', job: null }], nextCursor: null };
         else if (path === '/catalog')
             result = { styles: [], references: [] };
+        else if (path === '/usage')
+            result = { jobs: 1, measuredJobs: 1, missingJobs: 0, inputTokens: 12, outputTokens: 8, uncertainRequests: 0, requestPending: false, tokenCoverage: 'known-subtotal', provenance: ['provider'], imageTokens: null, imagePending: null, durationMs: 25, durationCoverage: 'partial', bytesStored: null, knownBytesStored: 10, storageCoverage: 'partial', estimatedCostUsd: null };
         else if (path === '/admin/users')
             result = [{ id, email: 'member@example.test', role: 'admin', active: true }];
         else if (path === '/workers')
@@ -48,6 +50,7 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await expect(page.getByText('managed.example', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Правки managed.example' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Устройство', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Расход ресурсов', exact: true })).toHaveCount(0);
     const nativeRequests = workerBridge.requests.length;
     offline = true;
     await expect(page.getByText('Нет связи с общим API.', { exact: true })).toBeVisible();
@@ -64,6 +67,9 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await page.getByLabel('Email', { exact: true }).fill('member@example.test');
     await page.getByLabel('Пароль', { exact: true }).fill('fixture-only-password');
     await page.getByRole('button', { name: 'Войти в общий реестр' }).click();
+    await page.getByRole('button', { name: 'Расход ресурсов', exact: true }).click();
+    await expect(page.getByText(/Вся установка/)).toBeVisible();
+    await expect(page.getByText('Известные токены', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Подключения', exact: true }).click();
     await expect(page.getByText('Облачная очередь', { exact: true })).toBeVisible();
     await expect(page.getByText('Не подключено', { exact: true })).toHaveCount(3);
@@ -87,6 +93,7 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await page.screenshot({ path: '.local-state/managed-workers-harness.png', fullPage: true });
     role = 'user';
     await expect(page.getByRole('button', { name: 'Пользователи', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Расход ресурсов', exact: true })).toHaveCount(0);
     await expect(page.getByLabel('API-ключ OpenAI')).toHaveCount(0);
     revoked = true;
     await expect(page.getByRole('heading', { name: 'Подключение к общему API' })).toBeVisible();
@@ -107,6 +114,8 @@ test('managed registry navigates beyond50, retries a page and resets cursors on 
             return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'Войдите в систему.' }, requestId: 'fixture' }) });
         if (url.pathname === '/session')
             result = { principal: { userId: owner, role }, mode: 'managed', capabilities: { admin: false, edit: role === 'spec-user', generation: false, publish: false, export: false, preview: true, nativeModelSettings: false } };
+        else if (/^\/sites\/[^/]+\/health$/.test(url.pathname))
+            result={siteId:url.pathname.split('/')[2],revisionId:null,outcomeId:null,checkedAt:null,status:null,code:'unverified',provenance:'managed'};
         else if (url.pathname === '/catalog')
             result = { styles: [], references: [] };
         else if (url.pathname === '/sites' && req.method() === 'POST') {

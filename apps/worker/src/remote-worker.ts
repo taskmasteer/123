@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { AppError, type ArtifactFile, type Checkpoint, type Job, type Lease, type Manifest, type Queue } from '../../../packages/contracts/src/model.js';
+import {healthClaim} from '../../../packages/contracts/src/monitoring.js';
 import { object, integer, leaseDto, siteView, string, uuid } from '../../../packages/contracts/src/http.js';
 import { validJob } from '../../../packages/adapters/src/local-queue.js';
 import { checkArtifacts } from '../../../packages/core/src/artifacts.js';
@@ -37,10 +38,10 @@ export function createRemoteWorker(options: {
     fetch?: typeof fetch;
 }, local: WorkerDeps): WorkerDeps {
     const origin = controlOrigin(options.controlOrigin), transport = options.fetch ?? fetch;
-    async function call(path: string, body: unknown, binary = false): Promise<any> {
+    async function call(path: string, body: unknown, binary = false,signal?:AbortSignal): Promise<any> {
         let response: Response;
         try {
-            response = await transport(origin + path, { method: 'POST', headers: { authorization: 'Bearer ' + options.workerToken, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(30000) });
+            response = await transport(origin + path, { method: 'POST', headers: { authorization: 'Bearer ' + options.workerToken, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'error', signal: signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000) });
         }
         catch {
             throw new AppError('UNAVAILABLE', 'Нет связи с очередью.');
@@ -61,6 +62,7 @@ export function createRemoteWorker(options: {
     }
     const endpoint = (lease: Lease, action: string) => `/worker/jobs/${lease.jobId}/${action}`;
     const queue: Queue = {
+        async recordActivity(lease,segment){await call(endpoint(lease,'activity'),{lease,segment});},
         async continuePublications() { if (options.claimMode !== 'visual')
             await call('/worker/publications/tick', {}); },
         async enqueue() {
@@ -90,8 +92,8 @@ export function createRemoteWorker(options: {
         async checkpoint(lease, checkpoint, expectedCheckpointId) {
             await call(endpoint(lease, 'checkpoint'), { lease, checkpointId: checkpoint.id, expectedCheckpointId: expectedCheckpointId ?? null });
         },
-        async finish(lease, state) {
-            await call(endpoint(lease, 'finish'), { lease, state });
+        async finish(lease, state,activity) {
+            await call(endpoint(lease, 'finish'), { lease, state,...(activity?{activity}:{}) });
         },
         async shouldPause(lease) {
             const value = object(await call(endpoint(lease, 'pause-status'), { lease }), ['paused']);
@@ -99,14 +101,14 @@ export function createRemoteWorker(options: {
                 throw new AppError('INVALID_INPUT', 'Некорректная пауза.');
             return value.paused;
         },
-        async pauseAtBoundary(lease) {
-            const value = object(await call(endpoint(lease, 'pause-boundary'), { lease }), ['paused']);
+        async pauseAtBoundary(lease,activity) {
+            const value = object(await call(endpoint(lease, 'pause-boundary'), { lease,...(activity?{activity}:{}) }), ['paused']);
             if (typeof value.paused !== 'boolean')
                 throw new AppError('INVALID_INPUT', 'Некорректная пауза.');
             return value.paused;
         },
     };
-    return { ...local, queue, async bind(job, lease) {
+    return { ...local, queue,health:{async claim(signal){const p=object(await call('/worker/health/claim',{},false,signal),['claim','nextWakeAt','serverNow']);return {claim:p.claim===null?null:healthClaim(p.claim),nextWakeAt:integer(p.nextWakeAt),...(p.serverNow===undefined?{}:{serverNow:integer(p.serverNow)})};},async complete(claim,code,signal){const p=object(await call('/worker/health/complete',{siteId:claim.siteId,token:claim.token,generation:claim.generation,code},false,signal),['accepted']);if(typeof p.accepted!=='boolean')throw new AppError('INVALID_INPUT','Некорректный ответ наблюдения.');return {accepted:p.accepted};}}, async bind(job, lease) {
             let publicationState: Record<string, unknown> | undefined;
             const scoped = (action: string, params: Record<string, unknown> = {}, binary = false) => call(endpoint(lease, action), { lease, ...params }, binary);
             async function loadCheckpoint(id: string) {

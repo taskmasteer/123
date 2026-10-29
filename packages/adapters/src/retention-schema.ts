@@ -3,6 +3,9 @@ import type { PayloadRef, PayloadInventory, CheckpointProjection } from '../../c
 import { AppError } from '../../contracts/src/model.js';
 /** All functions here are synchronous and run on the controller's already owned DB. */
 export function initializeRecovery(sql: DatabaseSync) {
+    sql.exec(`begin immediate;create table if not exists job_activity(job_id text primary key,data text not null) strict;
+    create table if not exists health_observations(site_id text primary key,next_due_at integer not null,generation integer not null,token text,worker_id text,expires_at integer,expectation text) strict;
+    create table if not exists health(site_id text primary key,status text,checked_at integer,data text) strict;commit;`);
     sql.exec('pragma temp_store=FILE;pragma cache_size=-4096;');
     sql.exec(`create table if not exists payload_inventory(kind text not null,id text not null,site_id text,data text not null,state text not null,first_orphan_at integer,claim_token text,primary key(kind,id)) strict;
  create table if not exists payload_edges(owner_kind text not null,owner_id text not null,purpose text not null,target_kind text not null,target_id text not null,primary key(owner_kind,owner_id,purpose,target_kind,target_id)) strict;

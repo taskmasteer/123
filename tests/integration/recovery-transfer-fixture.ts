@@ -193,3 +193,10 @@ export class RecoveryTransferSpool {
     }; }
     close() { this.flush(); this.db.close(); }
 }
+
+/** Task13 portable metadata only: one aggregate/job, one private+public observation/site. */
+export async function seedMonitoringVolume(pool:Pool){await pool.query(`
+insert into private.job_activity select id,jsonb_build_object('jobId',id,'durationMs',123456,'coverage','partial','generation',1,'sequence',500,'fingerprint','must-not-restore') from private.jobs;
+insert into private.health_observations(site_id,next_due_at,generation,token,worker_id,expires_at,expectation) select s.id,21600000,99,md5(s.id::text||'claim')::uuid,'44444444-4444-4444-8444-444444444444',9999999999999,jsonb_build_object('siteId',s.id,'revisionId',s.published_id,'outcomeId',p.id,'hostname',s.domain,'manifestId',p.manifest_id,'manifestHash',p.manifest_hash,'policyVersion',p.data->>'policyVersion','policyHash',p.data->>'policyHash','file',jsonb_build_object('sha256',repeat('a',64),'size',100000,'mediaType','text/html')) from public.sites s join private.provider_publications p on p.revision_id=s.published_id;
+insert into public.health(site_id,status,checked_at,data) select s.id,case when get_byte(uuid_send(s.id),0)%3=0 then 'ok' when get_byte(uuid_send(s.id),0)%3=1 then 'https_error' else 'wrong_version' end,100,jsonb_build_object('siteId',s.id,'revisionId',s.published_id,'outcomeId',p.id,'checkedAt',100,'status',case when get_byte(uuid_send(s.id),0)%3=0 then 'ok' when get_byte(uuid_send(s.id),0)%3=1 then 'https_error' else 'wrong_version' end,'code',case when get_byte(uuid_send(s.id),0)%3=0 then 'ok' when get_byte(uuid_send(s.id),0)%3=1 then 'tls_error' else 'wrong_version' end,'provenance','managed') from public.sites s join private.provider_publications p on p.revision_id=s.published_id;
+`);}

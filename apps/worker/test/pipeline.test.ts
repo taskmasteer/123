@@ -22,6 +22,7 @@ import { runWorker } from '../src/runner.js';
 import type { WorkerDeps } from '../src/pipeline.js';
 import { cleanDirectories, directory, file, site as siteFiles } from './fixtures.js';
 const openedSites: LocalState[] = [], openedQueues: LocalQueue[] = [], openedDatabases: LocalDatabase[] = [];
+test('seals activity at bounded timer/pause/end boundaries rather than every lease check',async()=>{const f=await fixture();let writes=0;const record=f.deps.queue.recordActivity?.bind(f.deps.queue);f.deps.queue.recordActivity=async(lease,segment)=>{writes++;await record?.(lease,segment);};await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(writes).toBe(0);expect(f.job.state).toBe('completed');});
 async function createLocalQueue(...args: Parameters<typeof openLocalQueue>) { const queue = await openLocalQueue(...args); openedQueues.push(queue); return queue; }
 afterEach(async () => { await Promise.all(openedQueues.splice(0).map(q => q.close())); await Promise.all(openedSites.splice(0).map(s => s.close())); await Promise.all(openedDatabases.splice(0).map(db => db.close())); await cleanDirectories(); });
 test('server settlement receipt completes an offline publication before stale lease reads or duplicate writes', async () => {

@@ -1,3 +1,4 @@
+import {postgresUsage} from '../../packages/adapters/src/postgres-monitoring.js';
 import { PostgresRestorePreparation, recoveryDependencyFactsQuery } from '../../packages/adapters/src/postgres-restore-preparation.js';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { createAuth } from '../../apps/control/src/auth.js';
@@ -14,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { NativeArchives, type NativeArchiveDeps } from '../../apps/worker/src/native-archives.js';
 import { directory, cleanDirectories } from '../../apps/worker/test/fixtures.js';
-import { RecoveryTransferSpool, seedSmallBodyRecoveryVolume } from './recovery-transfer-fixture.js';
+import { RecoveryTransferSpool, seedSmallBodyRecoveryVolume,seedMonitoringVolume } from './recovery-transfer-fixture.js';
 import { appendInstalledCatalog } from './recovery-fixture.js';
 import { AppError } from '../../packages/contracts/src/model.js';
 const digest = (b: string | Uint8Array) => createHash('sha256').update(b).digest('hex');
@@ -456,7 +457,7 @@ it('serves an authorized frozen metadata batch through actual control and SQL', 
         await pool.end();
     }
 });
-async function transportVolume(sites: number, reuseProofs = false, boundedFacts = false) {
+async function transportVolume(sites: number, reuseProofs = false, boundedFacts = false,monitoring=false) {
     const prototype = PostgresRestorePreparation.prototype as any, originalQuery = prototype.query;
     let typedQueries = 0, maxTypedQueries = 0, hadPage = false;
     if (boundedFacts)
@@ -476,11 +477,11 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
     };
     let currentActor = actor;
     const started = performance.now();
-    await writeFile('.local-state/task15-progress-' + sites + '.json', JSON.stringify({
+    await writeFile('.local-state/task13-'+'progress-' + sites + '.json', JSON.stringify({
         phase: 'seed/capture', counts, elapsedMs: 0
     }));
     let progressDetails: Record<string, unknown> = {}, progressWrite: Promise<void> | undefined;
-    const progress = () => writeFile('.local-state/task15-progress-' + sites + '.json', JSON.stringify({
+    const progress = () => writeFile('.local-state/task13-'+'progress-' + sites + '.json', JSON.stringify({
         ...progressDetails, phase, counts: {
             ...counts
         }, elapsedMs: performance.now() - started
@@ -557,7 +558,7 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
         }
     };
     try {
-        const seed = await seedSmallBodyRecoveryVolume(pool, sites), repo = new SupabaseRepository(pool);
+        const seed = await seedSmallBodyRecoveryVolume(pool, sites), repo = new SupabaseRepository(pool);if(monitoring)await seedMonitoringVolume(pool);
         const sourceTransport = {
             signPut: async () => '', put: async () => { }, head: async () => ({
                 size: 0, mediaType: ''
@@ -583,7 +584,7 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
                 verifyUser: async () => currentActor, verifyWorker: async () => { throw new Error('unused'); }
             }
         });
-        let captured = 0, snapshotId = '';
+        let captured = 0, snapshotId = '';let monitoringSummary:unknown;
         await owned({
             origin: 'https://source.test', accessToken: 'source-token'
         }, async (op) => {
@@ -605,7 +606,7 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
                 captured
             };
         });
-        expect(captured).toBe(sites * 180 + 9);
+        expect(captured).toBe(sites * (monitoring?188:180) + 9);
         expect(seed.bodyCount).toBe(sites * 54);
         expect((await pool.query('select count(*) n from private.payload_pins where id=$1', [snapshotId])).rows[0].n).toBe('0');
         const extras: any[] = [], payloads = new Map<number, Uint8Array>();
@@ -657,6 +658,7 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
         expect(report).toMatchObject({
             restoredSites: sites, restoredRevisions: sites * 6, quarantined: true
         });
+        if(monitoring){const summary=await postgresUsage(targetRepo,currentActor);monitoringSummary=summary;expect(summary).toMatchObject({jobs:sites*6,inputTokens:sites*6000,outputTokens:sites*3000,durationMs:sites*6*123456,knownBytesStored:copiedBodyBytes,estimatedCostUsd:null});expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThan(1024);expect((await pool.query('select count(*) n from private.job_activity')).rows[0].n).toBe(String(sites*6));expect((await pool.query("select sum((data->>'durationMs')::bigint)::text n from private.job_activity")).rows[0].n).toBe(String(sites*6*123456));expect((await pool.query("select 1 from private.job_activity where data->'generation'<>'null'::jsonb or data->'sequence'<>'null'::jsonb or data->'fingerprint'<>'null'::jsonb")).rowCount).toBe(0);expect((await pool.query('select 1 from private.health_observations where token is not null or worker_id is not null or expires_at is not null or generation<>0')).rowCount).toBe(0);expect((await pool.query("select count(*) n from public.health where data->>'provenance'='restored' and data->>'code'='unverified'")).rows[0].n).toBe(String(sites));}
         if (boundedFacts)
             expect(maxTypedQueries).toBeLessThanOrEqual(4);
         expect(beforeCommit).toBe(true);
@@ -675,8 +677,8 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
         const backupMetadataCalls = Object.entries(counts).filter(([key]) => key.startsWith('backup.') && key !== 'backup.resources').reduce((n, [, v]) => n + v, 0), restoreCalls = Object.entries(counts).filter(([key]) => key.startsWith('restore.')).reduce((n, [, v]) => n + v, 0);
         expect(backupMetadataCalls).toBeLessThanOrEqual(5000);
         expect(restoreCalls).toBeLessThanOrEqual(20000);
-        await writeFile('.local-state/task15-transfer-' + sites + '.json', JSON.stringify({
-            boundary: 'trusted disk-paged records AFTER encrypted extraction; same NativeArchives-owned production transfer runner/control/SQL', sites, capturedMetadata: captured, physicalDescriptors: seed.bodyCount, originalTask12MetadataBytes: 532154933, projectedFullBodyBytes: 13500000000, smallMetadataBytes, smallBodyBytes: copiedBodyBytes, inventoryDigest: stream.inventoryDigest, counts, ...(boundedFacts ? {
+        await writeFile('.local-state/task13-'+'transfer-' + sites + '.json', JSON.stringify({
+            boundary: 'trusted disk-paged records AFTER encrypted extraction; same NativeArchives-owned production transfer runner/control/SQL',...(monitoring?{monitoringSummary}:{}), sites, capturedMetadata: captured, physicalDescriptors: seed.bodyCount, originalTask12MetadataBytes: 532154933, projectedFullBodyBytes: 13500000000, smallMetadataBytes, smallBodyBytes: copiedBodyBytes, inventoryDigest: stream.inventoryDigest, counts, ...(boundedFacts ? {
                 maxTypedQueries
             } : {}), backupMetadataCalls, restoreCalls, maxInflight, maxRequest, maxResponse, commitMs, observedMs: performance.now() - started
         }, null, 2));
@@ -699,8 +701,8 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
     }
 }
 it('proofreuse: prepares checkpoint evidence from verified file digests without re-downloading its files', () => transportVolume(1, true), 120000);
-it('smoke: installs valid disk-paged transport records through the NativeArchives-owned production runner', () => transportVolume(2), 120000);
-it('measures actual900009 metadata and270000 small-body descriptors through the production transport and atomic SQL installation', () => transportVolume(5000), 1800000);
+it('smoke: installs valid disk-paged transport records through the NativeArchives-owned production runner', () => transportVolume(2,false,false,true), 120000);
+it('measures actual900009 metadata and270000 small-body descriptors through the production transport and atomic SQL installation', () => transportVolume(5000,false,false,true), 1800000);
 it('cohortfacts: batches typed availability, source and producer lookups within each production preparation page', () => transportVolume(3, false, true), 120000);
 it.each([false, true])('handles a stale receipt read followed by an already acknowledged concurrent replay (changed=%s)', (changed) => transferCase(1, async (c) => {
     const { pool, t, actor, id, binding, header } = c, query = pool.query.bind(pool);
