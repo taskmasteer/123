@@ -1,10 +1,10 @@
 {
   "format": 1,
-  "stage": "all-task-code-reviews-complete; final-branch-review-pending",
-  "sourceHead": "8768d2d2589c25615d19e251562d956b9f98e1ab",
-  "capturedUtc": "2026-10-29T15:42:39.8182400Z",
+  "stage": "final-complete;16-addressed;2-minor-parked;external-acceptance-pending;branch-kept",
+  "sourceHead": "f89d4604bd31e4052c4ea18a92dd1c53b4badbac",
+  "capturedUtc": "2026-10-29T19:30:49.6364265Z",
   "archive": "2026-10-26-records.zip",
-  "archiveSha256": "317ff02aae9f0028dcc3dba0d5d1d4fc39fd173f752281d136261e979b4a0bf1",
+  "archiveSha256": "902ee267fd977e39498e1f34341ede1adffba2a97c6154e6630cd4318e684b1e",
   "entries": [
     {
       "file": "bulk-import-preparation.md",
@@ -18,8 +18,8 @@
     },
     {
       "file": "controller-resume.md",
-      "bytes": 75114,
-      "sha256": "91970b1e852c448e3d5f3b0de3a1dd72ac3bdd9ce52472f7de4980e40137157e"
+      "bytes": 90281,
+      "sha256": "e429105fc3de0b81c3d87cec175da1dd8b4ad6a70919a83cc5408774effe2c9d"
     },
     {
       "file": "database-testing-research.md",
@@ -37,14 +37,49 @@
       "sha256": "ff91b271be88e5c73d77b70d4dfdbf92f461b4429a13ff3bc28a54a4f904baf0"
     },
     {
+      "file": "final-fix-brief.md",
+      "bytes": 6431,
+      "sha256": "a6903908536ef31a4e8074528c8f00fd92e1580d923c1eb0a34614f42f418688"
+    },
+    {
+      "file": "final-fix-report.md",
+      "bytes": 56576,
+      "sha256": "f248d3fd0bcb929821aa5391e4a66899e7a53abe330a62376d17e363a3b7c885"
+    },
+    {
+      "file": "final-fix-terra-quota-partial.diff",
+      "bytes": 19349,
+      "sha256": "4fc02f8cfbf486c9ce26f426335a1db9002c202406dcd0b3caa2a66141698a89"
+    },
+    {
+      "file": "final-fix-terra-source-wire-test.txt",
+      "bytes": 1248,
+      "sha256": "dc140e636588b127fbd206a2544c7ebc9ef30954c29860d97ab73f3bdcd2b19e"
+    },
+    {
+      "file": "final-rereview-request.md",
+      "bytes": 4918,
+      "sha256": "bcf6f7f88b2ca6a3af09f1dd6541745518f83da4818a909bea0a25b06081aed5"
+    },
+    {
+      "file": "final-rereview.md",
+      "bytes": 23654,
+      "sha256": "6a0b7ffed90769d1fa664530d3458ac32cdf5e882eb5f68c34bbabb2a6b4c3ec"
+    },
+    {
       "file": "final-review-deferred-index.md",
-      "bytes": 4416,
-      "sha256": "518d5c7ef538f65d97fa976e500df7aa3aa7db8b24723a8eae85c10941120f46"
+      "bytes": 5179,
+      "sha256": "90fee826516b15d9005014aa3cdae636951e21bbbacc485ca2d88bd39a6fb2fa"
     },
     {
       "file": "final-review-request.md",
       "bytes": 4546,
       "sha256": "fa47c446792395973c771cc859d1b764fc2658839c6a9807871a7ea198441aef"
+    },
+    {
+      "file": "final-review.md",
+      "bytes": 27155,
+      "sha256": "3ea7d0db637966643c74938770ecc86ea769b76fc3878c153db1edc6668b8dab"
     },
     {
       "file": "finishing-evidence-plan.md",
@@ -72,9 +107,14 @@
       "sha256": "e33977c00787113153f9e2a84d1aa1ccfbc29462e5c1211104d959455cea90c3"
     },
     {
+      "file": "plan-path",
+      "bytes": 65,
+      "sha256": "095d4ccdf34e4fc8e9d62a1c9b739855a0909b7a115e4643e58cfc6d8ced1db4"
+    },
+    {
       "file": "progress.md",
-      "bytes": 242266,
-      "sha256": "021ca3bfa9975654d7eb866eb069ce774a4b9e9bd8f20167b54e1fd6b837f618"
+      "bytes": 262235,
+      "sha256": "2c6a578fb58c39273a95bbe31991a4398304220d012f6bc89e3e491ad148f594"
     },
     {
       "file": "publication-boundary-preparation.md",
@@ -105,6 +145,176 @@
       "file": "retention-current-seams.md",
       "bytes": 13065,
       "sha256": "645c84bb47e613d4b031ca5958f90676d46f943b939362aaeda869d14e08f346"
+    },
+    {
+      "file": "review-00ce847..56bcfad.diff",
+      "bytes": 74509,
+      "sha256": "80cae37338f5c99a840e845682e628edc4519dd76c63765711510e3e4815510a"
+    },
+    {
+      "file": "review-1fda4c6..00ce847.diff",
+      "bytes": 253267,
+      "sha256": "0e4a2c9b65ade74b79a7cf737fbf4ec26813c5773d41c97671fa5b264025dc75"
+    },
+    {
+      "file": "review-201e9c0..2f0bdb2.diff",
+      "bytes": 37708,
+      "sha256": "64d5d74a07a9822f2f44bb183b42254c6bd2df535dec94cecefc718545348d0a"
+    },
+    {
+      "file": "review-29103db..394268e.diff",
+      "bytes": 31060,
+      "sha256": "a59514433859d264d14cd5dfc2fb402d88e5ea5c9463251d1854fe71f5583f02"
+    },
+    {
+      "file": "review-2b2fbef..4258b15.diff",
+      "bytes": 81838,
+      "sha256": "6b050cad828634ec0c7c7071a20d59fb9a1c182f60673b3381a1c859e17fe397"
+    },
+    {
+      "file": "review-2b2fbef..50c4f2f.diff",
+      "bytes": 89427,
+      "sha256": "88026fa86ed64883bacdd9f29f11d877a9c7d9d12143b8c240d7773197c401be"
+    },
+    {
+      "file": "review-2b2fbef..a345580.diff",
+      "bytes": 2882305,
+      "sha256": "a8487ea23aa79c82d1975894b0c909aa75fbe499885bc1778cdae24b6bca52f9"
+    },
+    {
+      "file": "review-2d2a9e4..82d0952.diff",
+      "bytes": 457124,
+      "sha256": "029f9c12e204477905f0e60af228d8db062e8a397139e309587dbc4b7c5a178c"
+    },
+    {
+      "file": "review-2f0bdb2..94d0c5f.diff",
+      "bytes": 223246,
+      "sha256": "875c27858912b0bbf0df242a1fb397ff65b97995e18e825860a729e8b9142698"
+    },
+    {
+      "file": "review-3289505..9dbbeb7.diff",
+      "bytes": 158884,
+      "sha256": "a7a9f15d3d2a7e770247d118c3af397cb999e96eded74fe91117d77f623027e8"
+    },
+    {
+      "file": "review-35a6c13..2d2a9e4.diff",
+      "bytes": 360152,
+      "sha256": "7d51c03037715722c80845ba7a2915cc89860fdb0eb504769745f2b9014f7918"
+    },
+    {
+      "file": "review-394268e..b7ab80f.diff",
+      "bytes": 719308,
+      "sha256": "4cdff121ae5b01d0efe69d5eed360aefe7a05f1bff21b940849c59cc970944b5"
+    },
+    {
+      "file": "review-4066f16..a4af9de.diff",
+      "bytes": 154416,
+      "sha256": "c99bfb0dee2c3b04ed6764a7121f7808fc3927e7c09ebeec66ff57a4e09bbbc8"
+    },
+    {
+      "file": "review-4488831..da74bb1.diff",
+      "bytes": 306722,
+      "sha256": "3bf6da75021f5b9623bc78aad7b81e5461c362705def2a9f457cd3ac6d20e574"
+    },
+    {
+      "file": "review-50c4f2f..593086a.diff",
+      "bytes": 68966,
+      "sha256": "45fe420ae978f93b422954794b70fe0adf5c3daeab1e3e89db30c583aead4112"
+    },
+    {
+      "file": "review-56bcfad..35a6c13.diff",
+      "bytes": 858372,
+      "sha256": "fdc83c58ce8b31399229a2acbc5cd65151f703de576e2a236e646a006246ccd5"
+    },
+    {
+      "file": "review-56f2674..e77c4ad.diff",
+      "bytes": 49461,
+      "sha256": "f7df0b62bc4777da561b76ce871dad44ae38f52f9d49244c560e1ae6e4a0bf26"
+    },
+    {
+      "file": "review-593086a..711e0a6.diff",
+      "bytes": 16920,
+      "sha256": "d9f810de76c9369aec42c98a51bbbb937d31d2f5134b2c133934e8754128b67c"
+    },
+    {
+      "file": "review-711e0a6..c268674.diff",
+      "bytes": 115971,
+      "sha256": "ad782f66bc004bf5c4d9e4c6ed076bd6d4f0b12a78a0157045010e0056261e7f"
+    },
+    {
+      "file": "review-81d934f..56f2674.diff",
+      "bytes": 281003,
+      "sha256": "7f958a4442957f5fef8498d6c65d1e1e5e7eb84b13c229ab82e800c1dcd0246d"
+    },
+    {
+      "file": "review-82d0952..4488831.diff",
+      "bytes": 34993,
+      "sha256": "84b5d3f384901ad662d8b3106de11eee1dfccacef8f0feadc4eed90f94ad3040"
+    },
+    {
+      "file": "review-83f1257..4066f16.diff",
+      "bytes": 4851,
+      "sha256": "4aa68d20e59a7b7f890771727eadd701846c3164e4f8a858bd5613c5e91162b5"
+    },
+    {
+      "file": "review-8b50351..3289505.diff",
+      "bytes": 30046,
+      "sha256": "a1348b156fec54ce30bef61a02c453f84745ce51867c7d24d5fb7fc84b88227e"
+    },
+    {
+      "file": "review-94d0c5f..29103db.diff",
+      "bytes": 59467,
+      "sha256": "72f75c60246694b4d09897993428f3a4c1799b6e23a1e5ab4833bf96f8e5f388"
+    },
+    {
+      "file": "review-9dbbeb7..83f1257.diff",
+      "bytes": 16478,
+      "sha256": "363a88c3c790f2cb37bac96d6aa942af7c92dfa7b67c1e988c841e5d0d302ce1"
+    },
+    {
+      "file": "review-a1a1be8..8b50351.diff",
+      "bytes": 218593,
+      "sha256": "58172d822db9bbf0d6a0701defff6ea5def0c6b4af56bdd4cf26f0611387cd3a"
+    },
+    {
+      "file": "review-a345580..f89d460.diff",
+      "bytes": 368380,
+      "sha256": "2540cb3ff098da21a4d3e3f19d146c5c351b318ea2f433de8ef0239afa25d719"
+    },
+    {
+      "file": "review-a4af9de..81d934f.diff",
+      "bytes": 51616,
+      "sha256": "af765d59fffa83723bb4785b6b35a7ae82b285d79b67b1c68131582a55a96d80"
+    },
+    {
+      "file": "review-b218336..8768d2d.diff",
+      "bytes": 19351,
+      "sha256": "2783c6d9600ef45dfa0fad5d58835e956f525db07fdbc7fb5eaa854001f3d2e7"
+    },
+    {
+      "file": "review-b7ab80f..1fda4c6.diff",
+      "bytes": 26996,
+      "sha256": "02ef77755501c7101ebd3180bcf0c3327897406820bfb75dfdbbe9482b491ca1"
+    },
+    {
+      "file": "review-c268674..a1a1be8.diff",
+      "bytes": 17436,
+      "sha256": "fea434e5ce3f09720354a25736ce278a2bed83586d8775dc2c4f886d6891d001"
+    },
+    {
+      "file": "review-da74bb1..e45e55d.diff",
+      "bytes": 7131,
+      "sha256": "da6ffeef0dfcb82cef71aa67d18a8969b920cb5d4e76baf61eb9b6007fa9c134"
+    },
+    {
+      "file": "review-e45e55d..b218336.diff",
+      "bytes": 266195,
+      "sha256": "fcb056d503da6847a764959124c2e05502b72c70ad7cac4fe65032d9fd433e4d"
+    },
+    {
+      "file": "review-e77c4ad..201e9c0.diff",
+      "bytes": 254784,
+      "sha256": "cf5689c73fa3b220a4fae2d520d5a803245f34e46d8018a5727159b6fb34ae6d"
     },
     {
       "file": "shared-context.md",

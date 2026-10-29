@@ -2,7 +2,7 @@
 
 Решения ниже сохранены дословно из progress.md в исходном порядке. Более поздние решения заменяют ранние временные границы там, где это прямо указано. Архив содержит также полный shared-context.md, технические ruling-документы, отчёты и ревью.
 
-Снимок: all-task-code-reviews-complete; final-branch-review-pending; исходный HEAD: 8768d2d2589c25615d19e251562d956b9f98e1ab. Число строк Ruling: 60.
+Снимок: final-complete;16-addressed;2-minor-parked;external-acceptance-pending;branch-kept; исходный HEAD: f89d4604bd31e4052c4ea18a92dd1c53b4badbac. Число строк Ruling: 72.
 
 ## Решение 1
 
@@ -243,3 +243,51 @@ Ruling: reuse the explicitly named linked worktree despite this chat starting in
 ## Решение 60
 
 Ruling: preserve every plan-local Markdown document in a tracked SHA256-verified archive plus inventory and exhaustive readable Ruling record before untracking the accidental Task1 scratch report — durable review evidence must survive later SDD cleanup — cost if wrong: regenerate the documentation archive from preserved originals; no production source or artifact changes.
+
+## Решение 61
+
+Ruling: final fix wave addresses all reported runnable Important and Minor findings in one sole-owner implementation, followed by exactly one scoped a345580..fixHEAD rereview — this follows the agreed final-review procedure and avoids per-finding owners/repeated wide suites — cost if wrong: residual defects must be explicitly adjudicated after that single rereview, not hidden in an unlimited wave.
+
+## Решение 62
+
+Ruling: keep the one-operation/publication reservation boundary while exposing a checked unpublished draft; edit is permitted only after safe cancellation or settlement, never during an unresolved provider outcome — the draft-access requirement and concurrency requirement both bind the solution — cost if wrong: a limited draft/publication state transition rework; no weakened exclusion or provider effect replay.
+
+## Решение 63
+
+Ruling: live-preflight remains a disclosed configuration preflight and is not a separate missing CLI orchestrator; actual multi-device/provider/site/visual acceptance remains external and pending — the approved plan specifies the exercise, not automatic execution of every physical/user action by the CLI — cost if wrong: add an authorized automation wrapper later, without relabeling unrun acceptance.
+
+## Решение 64
+
+Ruling: replace the quota-stopped sole production owner with available gpt-6.1-sol while continuing the SAME final wave/FIX_BASE and retaining all partial changes — retrying the exhausted Terra model buys no progress and neither a second wave nor parallel owners is needed — cost if wrong: context reconstruction and targeted re-verification; original broad review and required single scoped rereview remain unchanged.
+
+## Решение 65
+
+Ruling: I2 installs the FIRST checked draft and its immutable Revision within the existing fresh lease/checkpoint transaction, without a revision increment only when there was no prior draft/published content — exclusive generation ownership and unchanged frozen publication CAS make this a narrow initialization, not a general same-revision pointer replacement — cost if wrong: localized first-draft initialization seam/migration rework; ordinary CAS and publication reservations remain binding. Require current job/generation/site baseRevision and atomic checkpoint+revision+draft pointer, exact replay only, refusal of a different existing draft. Preserve immutable revision metadata/kind at settlement and derive actual publication from durable outcome. Active/unknown reservation keeps draft read-only; conclusively safe pre-dispatch cancellation retains draft and fences stale settlement. Cover initialization/replay, different prior draft refusal, safe cancel/edit, resume and unknown outcome. Sole owner /root/final_fix_resume received ruling; broader retry replacement would need a specific followup.
+
+## Решение 66
+
+Ruling: current local unsigned Windows release/NSIS build, fixed CLI/headless pre-bundle smoke and read-only installer extraction checks are already authorized by Task14 and continued execution; installer execution/native GUI/credential stores/live services/publisher signing remain separate — changed JS/UI/native/package inputs require a valid current artifact rather than relabeling historical bytes — cost if wrong: local build time and regenerable outputs, no external account/distribution effect. Sole owner must preserve the verified previous usable main/runtime/installer pair in an exact owned contained pre-final backup before replacement, report bytes/hashes, then freeze final source and regenerate trusted stage/provenance/compiled manifest/main, smoke before NSIS, inspect extracted output. Current free~105GB permits at most2GiB additional historical-artifact preservation separately from normal bounded prep/build phases; retain2GiB free floor and all existing artifacts/caches, no cleanup. Pinned verified Windows redownload or verified-byte reuse if needed is within existing packaging scope, with source/bytes evidence. No source mutation during active gate.
+
+## Решение 67
+
+Ruling: I10 requires truly idle/no-active-work polling to stop after the initial refresh and resume on focus/visibility/manual action; permanent60s idle polling still conflicts with the binding plan's no-continuous-polling requirement — the review's suggestion to suspend OR back off is subordinate to that stated product constraint — cost if wrong: a small scheduler/UI delta and warm current-artifact regeneration; no paid provider or external effect. Queued/running work may retain bounded backoff, hidden windows0requests, actions fresh authorization. Same sole owner /root/final_fix_resume resumed BEFORE any scoped review to complete this SAME wave; no second wave or duplicate reviewer. Only fake-clock/resume/active-cadence and relevant UI/typecheck/build plus regenerated current prebundle/NSIS/extracted checks required; no unrelated broad unit/SQL/capacity repeat or duplicate historical backup. If source already makes idle finite, owner may provide evidence instead of changing it.
+
+## Решение 68
+
+Ruling: add optional read-only ImportSummary.activeWork computed in the existing bounded per-batch SQLite/Postgres aggregate, without schema change or new authority — batch state remains active after jobs finish and visible rows alone miss off-page work, so the UI needs a safe batch-wide activity projection — cost if wrong: localized projection/scheduler rework and targeted regressions. Count queued/running or genuinely scheduled/admittable work, not valid rows deliberately left unselected for a later explicit commit. Paused/terminal/preview or fully settled batches stop, pending off-page jobs retain bounded updates; role/namespace and response-size limits remain. Cover final scheduled jobs completed with leftover unselected-valid/invalid rows. Controller approved same-wave localized seam; no unrelated broad SQL repeat.
+
+## Решение 69
+
+Ruling: park NB1 as real deferred Minor after the agreed single final rereview — uppercase local domain filter plus second DTO byte-budget truncation emits cursor with raw rather than normalized filter binding, reproduced41to39rows/INVALID_INPUT; it is localized and not load-bearing for the closed workflows — cost if wrong: local next-page search failure; lowercase or remove filter and restart pagination until maintenance normalizes this cursor path. No data loss or managed cursor failure is claimed. Keep exact probe/citations in permanent final-rereview report.
+
+## Решение 70
+
+Ruling: park NB2 as real deferred Minor after the agreed single final rereview — registry/batch activity stops on waiting_provider while independent publication reconciliation can still settle; backend publication/reservations remain intact and the issue is display freshness — cost if wrong: stale displayed status until manual refresh/focus or opening PublicationPanel, whose bounded pending-settlement updates work. Future maintenance should expose safe pending-publication activity instead of restoring idle polling. This residual does not authorize a second unreviewed wave.
+
+## Решение 71
+
+Ruling: keep the ignored SDD scratch as well as the verified permanent archive because the final report retains2adjudicatedMinor and is not an unqualified clean result; do not trigger the skill's clean-review-only scratch deletion — preserves convenient exact followup context without losing reports — cost if wrong: a few MB of ignored duplicate records. Worktree, branch, all current/historical usable artifacts and .local-state raw proofs remain. Original Task1 report was already untracked only after verified preservation; no dirty deletion. User explicitly chose keeping branch/worktree; no merge/push/menu confirmation is needed.
+
+## Решение 72
+
+Ruling: deliver every recorded Ruling in a permanent readable decisions.md and link it prominently in final handoff, alongside full archive/inventory/final reports — the user's requested durable evidence/decisions survive scratch and chat context, with all later corrections preserved in order — cost if wrong: readers must open the linked exhaustive record for detail; no decision is silently dropped or lost with temporary files.
