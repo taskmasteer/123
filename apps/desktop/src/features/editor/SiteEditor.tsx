@@ -65,9 +65,10 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
             catch (error) {
                 if (!stopped)
                     setPollError((error as Error).message);
+                throw error;
             }
         }
-        const stop=pollLoop(async()=>await poll()??{active:false,key:'error'},()=>document.visibilityState!=='hidden',document);
+        const stop=pollLoop(poll,()=>document.visibilityState!=='hidden',document,window);
         return () => { stopped = true; stop(); };
     }, [site.id, refresh]);
     async function act(method: string, params: Record<string, unknown>) {

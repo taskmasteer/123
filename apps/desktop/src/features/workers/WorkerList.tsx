@@ -1,3 +1,4 @@
+import {pollLoop} from '../../lib/polling.js';
 import { jobStageLabel, jobStateLabel } from '../../lib/labels.js';
 import React, { useEffect, useState } from 'react';
 import { desktopClient } from '../../lib/desktop-client.js';
@@ -26,37 +27,20 @@ interface NativeStatus {
 export function WorkerList() {
     const [workers, setWorkers] = useState<WorkerView[]>([]), [native, setNative] = useState<NativeStatus | null>(null), [device, setDevice] = useState<DeviceStatus | null>(null);
     const [name, setName] = useState('Это устройство'), [error, setError] = useState(''), [busy, setBusy] = useState(false);
-    async function refresh() { setWorkers(await desktopClient.request<WorkerView[]>('worker.list')); }
+    const [version,setVersion]=useState(0);
+    function refresh(){setVersion(v=>v+1);}
     useEffect(() => {
-        let stopped = false, timer: ReturnType<typeof setTimeout>;
-        async function poll() {
-            try {
-                const list = await desktopClient.request<WorkerView[]>('worker.list');
-                if (!stopped)
-                    setWorkers(list);
-                const status = await desktopClient.request<NativeStatus>('worker.status').catch(() => null);
-                if (!stopped && status) {
-                    setNative(status);
-                    if (status.name)
-                        setName(status.name);
-                }
-            }
-            catch (e) {
-                if (!stopped)
-                    setError((e as Error).message);
-            }
-            finally {
-                if (!stopped)
-                    timer = setTimeout(() => void poll(), 2000);
-            }
-        }
-        void poll();
-        void desktopClient.modelSettings<DeviceStatus>({ action: 'status' }).then(s => {
-            if (!stopped)
-                setDevice(s);
-        }).catch(() => { });
-        return () => { stopped = true; clearTimeout(timer); };
-    }, []);
+        let stopped=false;
+        const stop=pollLoop(async()=>{
+            try{
+                const [list,status]=await Promise.all([desktopClient.request<WorkerView[]>('worker.list'),desktopClient.request<NativeStatus>('worker.status').catch(()=>null)]);
+                if(!stopped){setWorkers(list);if(status){setNative(status);if(status.name)setName(status.name);}}
+                return {active:list.some(w=>w.jobs.some(j=>['queued','running'].includes(j.state))),key:JSON.stringify([list,status])};
+            }catch(e){if(!stopped)setError((e as Error).message);throw e;}
+        },()=>document.visibilityState!=='hidden',document,window);
+        void desktopClient.modelSettings<DeviceStatus>({action:'status'}).then(s=>{if(!stopped)setDevice(s);}).catch(()=>{});
+        return ()=>{stopped=true;stop();};
+    },[version]);
     async function action(method: string, params: unknown = {}) {
         setBusy(true);
         setError('');
@@ -74,7 +58,7 @@ export function WorkerList() {
         }
     }
     return <section className="device-panel worker-list">
-  <h2>Рабочие устройства</h2><p>На устройстве выполняются до двух заданий. Пауза сохраняет текущий этап перед остановкой. Закрытые устройства не получают новые задания.</p>
+  <h2>Рабочие устройства</h2><button disabled={busy} onClick={refresh}>Обновить устройства</button><p>На устройстве выполняются до двух заданий. Пауза сохраняет текущий этап перед остановкой. Закрытые устройства не получают новые задания.</p>
   {error ? <p role="alert">{error}</p> : null}
   <label>Название этого устройства<input value={name} disabled={busy || !!native?.workerId} onChange={e => setName(e.target.value)}/></label>
   <div className="row-actions">

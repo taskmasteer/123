@@ -29,6 +29,8 @@ export interface ImportSummary {
     invalidCount: number;
     total: number;
     canControl: boolean;
+    /** Current batch-wide autonomous admission/generation activity, independent of the row page. */
+    activeWork?: boolean;
     assignedUserIds?: string[];
 }
 export interface ImportPage {

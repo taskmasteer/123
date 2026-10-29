@@ -1,3 +1,4 @@
+import {pollLoop} from '../../lib/polling.js';
 import {publicationDiagnosticCaptions} from '../../../../../packages/contracts/src/publication.js';
 import React, { useEffect, useRef, useState } from 'react';
 import type { Principal, Site } from '../../../../../packages/contracts/src/model.js';
@@ -17,21 +18,17 @@ export function PublicationPanel({ site, principal, onChanged }: {
         revision: string;
         key: string;
     } | null>(null);
-    useEffect(() => { let stopped = false; let timer: ReturnType<typeof setTimeout>; async function poll() { try {
-        const next = await desktopClient.request<typeof value>('publication.status', { siteId: site.id });
-        if (!stopped) {
-            setValue(next);
-            setPollError('');
-        }
-    }
-    catch (e) {
-        if (!stopped)
-            setPollError((e as Error).message);
-    }
-    finally {
-        if (!stopped)
-            timer = setTimeout(() => void poll(), 3000);
-    } } void poll(); return () => { stopped = true; clearTimeout(timer); }; }, [site.id, refresh]);
+    useEffect(()=>{
+        let stopped=false;
+        const stop=pollLoop(async()=>{
+            try{
+                const next=await desktopClient.request<typeof value>('publication.status',{siteId:site.id});
+                if(!stopped){setValue(next);setPollError('');}
+                return {active:next?.publication?.settlement==='pending',key:JSON.stringify(next)};
+            }catch(e){if(!stopped)setPollError((e as Error).message);throw e;}
+        },()=>document.visibilityState!=='hidden',document,window);
+        return ()=>{stopped=true;stop();};
+    },[site.id,site.revision,site.draftId,site.publishedId,refresh]);
     const publication = value?.publication;
     const error = actionError || pollError;
     const canEdit = principal.role !== 'user' && (principal.role === 'admin' || site.ownerId === principal.userId || site.assignedUserIds.includes(principal.userId));
@@ -58,7 +55,7 @@ export function PublicationPanel({ site, principal, onChanged }: {
         }
     }
     return <section className="device-panel publication-panel" aria-label={'Публикация ' + site.domain}>
-  <h2>Публикация · {site.domain}</h2>
+  <h2>Публикация · {site.domain}</h2><button disabled={busy} onClick={()=>setRefresh(v=>v+1)}>Обновить публикацию</button>
   <p role="status">{publication ? phases[publication.phase] : 'Публикация ещё не запрошена'}</p>
   {publication?.cancelRequested ? <p className="conflict-note">Запрошена отмена. Уже отправленное переключение могло завершиться; здесь показан подтверждённый результат.</p> : null}
   {publication?.settlement === 'conflict' ? <p className="error-banner">Внешний результат сохранён, но версия реестра изменилась. Нужна проверка администратором.</p> : null}

@@ -116,7 +116,12 @@ export class LocalBatches {
             }
         return { items, nextCursor: results.length > importLimits.pageRows ? String(items.at(-1)!.rowNumber) : null };
     }
-    async get(actor: Principal, id: string) { const d = this.read(actor, id); const count = Number(this.db.sql.prepare("select count(*) n from batch_rows r where batch_id=? and (json_array_length(json_extract(r.data,'$.issues'))>0 or exists(select 1 from jobs j where j.id=r.site_id and j.state='needs_attention'))").get(id)!.n); return { ...d.summary, invalidCount: count, validCount: d.summary.total - count, canControl: actor.role === 'admin' || this.db.sql.prepare('select owner_id from batches where id=?').get(id)!.owner_id === actor.userId }; }
+    async get(actor: Principal, id: string) {
+        const d = this.read(actor, id);
+        const counts = this.db.sql.prepare("select coalesce(sum(case when json_array_length(json_extract(r.data,'$.issues'))>0 or j.state='needs_attention' then 1 else 0 end),0) n, coalesce(max(case when (r.site_id is null and json_array_length(json_extract(r.data,'$.issues'))=0) or j.state in ('queued','running') then 1 else 0 end),0) active from batch_rows r left join jobs j on j.id=r.site_id where r.batch_id=?").get(id)!;
+        const invalidCount=Number(counts.n);
+        return {...d.summary,invalidCount,validCount:d.summary.total-invalidCount,activeWork:d.summary.state==='active'&&!!counts.active,canControl:actor.role==='admin'||this.db.sql.prepare('select owner_id from batches where id=?').get(id)!.owner_id===actor.userId};
+    }
     async pauseBatch(actor: Principal, id: string) {
         this.db.transaction(() => {
             const d = this.read(actor, id, true);

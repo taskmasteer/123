@@ -164,5 +164,9 @@ export class PostgresBatches {
             await this.admit(actor, id, 25);
         return { ok: true };
     }
-    async get(actor: Principal, id: string) { const d = await this.read(this.repository.pool, actor, id), owner = (await this.repository.pool.query('select owner_id from private.batches where id=$1', [id])).rows[0].owner_id; const count = Number((await this.repository.pool.query("select count(*) n from private.batch_rows r left join private.jobs j on j.id=r.site_id where r.batch_id=$1 and (jsonb_array_length(r.data->'issues')>0 or j.data->>'state'='needs_attention')", [id])).rows[0].n); return { ...d.summary, ...(actor.role === 'admin' ? { assignedUserIds: (await this.repository.pool.query('select user_id from private.batch_assignments where batch_id=$1 order by user_id', [id])).rows.map(r => r.user_id as string) } : {}), invalidCount: count, validCount: d.summary.total - count, canControl: actor.role === 'admin' || actor.userId === owner }; }
+    async get(actor: Principal, id: string) {
+        const d=await this.read(this.repository.pool,actor,id),owner=(await this.repository.pool.query('select owner_id from private.batches where id=$1',[id])).rows[0].owner_id;
+        const counts=(await this.repository.pool.query("select count(*) filter(where jsonb_array_length(r.data->'issues')>0 or j.data->>'state'='needs_attention') n, coalesce(bool_or((r.site_id is null and jsonb_array_length(r.data->'issues')=0) or j.data->>'state' in ('queued','running')),false) active from private.batch_rows r left join private.jobs j on j.id=r.site_id where r.batch_id=$1",[id])).rows[0],invalidCount=Number(counts.n);
+        return {...d.summary,...(actor.role==='admin'?{assignedUserIds:(await this.repository.pool.query('select user_id from private.batch_assignments where batch_id=$1 order by user_id',[id])).rows.map(r=>r.user_id as string)}:{}),invalidCount,validCount:d.summary.total-invalidCount,activeWork:d.summary.state==='active'&&counts.active===true,canControl:actor.role==='admin'||actor.userId===owner};
+    }
 }

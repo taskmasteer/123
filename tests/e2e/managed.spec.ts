@@ -88,6 +88,7 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await expect(page.getByText('Проверка · Отменено', { exact: true })).toBeVisible();
     workerName = 'Windows machine — рабочее устройство для восстановления сохранённых заданий';
     savedStage = 'validate-awaiting-checkpoint-confirmation-after-reconnection';
+    await page.getByRole('button',{name:'Обновить устройства',exact:true}).click();
     await expect(page.getByText(workerName + ' · пауза', { exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1040, height: 680 });
     await page.screenshot({ path: '.local-state/managed-workers-harness.png', fullPage: true });

@@ -50,7 +50,7 @@ export function importParams(method: string, value: unknown) {
     return p;
 }
 function summary(value: unknown) {
-    const p = object(value, ['id', 'name', 'revision', 'state', 'total', 'validCount', 'invalidCount', 'canControl', 'assignedUserIds']);
+    const p = object(value, ['id', 'name', 'revision', 'state', 'total', 'validCount', 'invalidCount', 'canControl', 'assignedUserIds', 'activeWork']);
     uuid(p.id);
     if (p.assignedUserIds !== undefined) {
         if (!Array.isArray(p.assignedUserIds) || p.assignedUserIds.length > 100)
@@ -62,7 +62,7 @@ function summary(value: unknown) {
     integer(p.total, 0, 5000);
     integer(p.validCount, 0, 5000);
     integer(p.invalidCount, 0, 5000);
-    if (!['uploading', 'preview', 'active', 'paused', 'cancelled'].includes(String(p.state)) || typeof p.canControl !== 'boolean')
+    if (!['uploading', 'preview', 'active', 'paused', 'cancelled'].includes(String(p.state)) || typeof p.canControl !== 'boolean' || (p.activeWork !== undefined && typeof p.activeWork !== 'boolean'))
         throw new AppError('INVALID_INPUT', 'Некорректная пачка.');
     return p;
 }

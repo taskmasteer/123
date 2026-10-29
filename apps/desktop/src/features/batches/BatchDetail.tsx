@@ -1,3 +1,4 @@
+import {pollLoop} from '../../lib/polling.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { desktopClient } from '../../lib/desktop-client.js';
 import type { ImportSummary, ImportRowView, ImportPage } from '../../../../../packages/contracts/src/import.js';
@@ -18,7 +19,7 @@ export function BatchDetail({ id, onBack, admin = false }: {
     useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
     const key = useRef(crypto.randomUUID()), cursor = cursors.at(-1) ?? null;
     useEffect(() => {
-        let stopped = false, timer: ReturnType<typeof setTimeout>;
+        let stopped = false;
         async function poll() {
             try {
                 const [s, p] = await Promise.all([desktopClient.request<ImportSummary>('batch.get', { id }), desktopClient.request<ImportPage>('batch.rows', { id, status, ...(cursor ? { cursor } : {}) })]);
@@ -28,18 +29,16 @@ export function BatchDetail({ id, onBack, admin = false }: {
                     setNext(p.nextCursor);
                     setPollError('');
                 }
+                return {active:s.state==='active'&&(s.activeWork??p.items.some(r=>['queued','running'].includes(r.job?.state??''))),key:JSON.stringify([s,p])};
             }
             catch (e) {
                 if (!stopped)
                     setPollError((e as Error).message);
-            }
-            finally {
-                if (!stopped)
-                    timer = setTimeout(() => void poll(), 1500);
+                throw e;
             }
         }
-        void poll();
-        return () => { stopped = true; clearTimeout(timer); };
+        const stop=pollLoop(poll,()=>document.visibilityState!=='hidden',document,window);
+        return () => { stopped = true; stop(); };
     }, [id, cursor, status, version]);
     async function action(method: string, params: Record<string, unknown>) {
         setBusy(true);
@@ -71,7 +70,7 @@ export function BatchDetail({ id, onBack, admin = false }: {
     useEffect(() => { if (summary?.assignedUserIds)
         setAssignees(summary.assignedUserIds); }, [summary?.assignedUserIds?.join(',')]);
     const editable = summary?.state === 'preview' && summary.canControl;
-    return <section className="batch-detail"><button onClick={onBack}>Все пачки</button><h2>{summary?.name ?? 'Загрузка пачки…'}</h2>{summary ? <><p>Корректных строк: {summary.validCount}. С ошибками: {summary.invalidCount}.</p><div className="row-actions">{editable ? <button className="primary" disabled={busy || !summary.validCount} onClick={() => void action('import.commit', { id, revision: summary.revision, requestKey: key.current })}>Запустить корректные строки</button> : summary.canControl ? <>{summary.state === 'active' ? <button disabled={busy} onClick={() => void action('batch.pause', { id })}>Пауза пачки</button> : summary.state === 'paused' ? <button disabled={busy} onClick={() => void action('batch.resume', { id })}>Продолжить пачку</button> : null}{!['cancelled', 'preview'].includes(summary.state) ? <button disabled={busy} onClick={() => void action('batch.cancel', { id })}>Отменить пачку</button> : null}</> : <span>Доступ к просмотру пачки</span>}</div><p className="hint">Корректные строки запускаются отдельно. Строки с ошибками остаются здесь. Пауза действует на границе сохранённого этапа; продолжение не повторяет завершённые или неудачные задания.</p></> : null}
+    return <section className="batch-detail"><button onClick={onBack}>Все пачки</button><button disabled={busy} onClick={()=>setVersion(v=>v+1)}>Обновить пачку</button><h2>{summary?.name ?? 'Загрузка пачки…'}</h2>{summary ? <><p>Корректных строк: {summary.validCount}. С ошибками: {summary.invalidCount}.</p><div className="row-actions">{editable ? <button className="primary" disabled={busy || !summary.validCount} onClick={() => void action('import.commit', { id, revision: summary.revision, requestKey: key.current })}>Запустить корректные строки</button> : summary.canControl ? <>{summary.state === 'active' ? <button disabled={busy} onClick={() => void action('batch.pause', { id })}>Пауза пачки</button> : summary.state === 'paused' ? <button disabled={busy} onClick={() => void action('batch.resume', { id })}>Продолжить пачку</button> : null}{!['cancelled', 'preview'].includes(summary.state) ? <button disabled={busy} onClick={() => void action('batch.cancel', { id })}>Отменить пачку</button> : null}</> : <span>Доступ к просмотру пачки</span>}</div><p className="hint">Корректные строки запускаются отдельно. Строки с ошибками остаются здесь. Пауза действует на границе сохранённого этапа; продолжение не повторяет завершённые или неудачные задания.</p></> : null}
  {pollError ? <p role="alert">Не удалось обновить пачку: {pollError}</p> : null}{error ? <p role="alert">{error}</p> : null}<label className="batch-filter">Показать строки<select value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); setRows([]); }}><option value="all">Все</option><option value="invalid">С ошибками</option><option value="valid">Без ошибок</option></select></label>
  <BatchTable rows={rows} editable={!!editable} busy={busy} {...(summary?.canControl && summary.state === 'active' ? { onRetry: (row: ImportRowView) => void action('batch.retry', { id, rowNumber: row.rowNumber }) } : {})} onEdit={row => { setEditRevision(summary?.revision ?? 0); setEdit(row); setAbout(row.input.about ?? ''); setDomain(row.input.domain); }} onLogo={(row, file) => {
             if (!summary)

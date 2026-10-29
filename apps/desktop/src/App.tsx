@@ -127,6 +127,7 @@ export default function App() {
                         setSection('Режим работы');
                     }
                 }
+                throw error;
             }
             finally {
                 if (!stopped) {
@@ -135,7 +136,7 @@ export default function App() {
                 }
             }
         }
-        const stop=pollLoop(async()=>await poll()??{active:false,key:'error'},()=>document.visibilityState!=='hidden',document);
+        const stop=pollLoop(poll,()=>document.visibilityState!=='hidden',document,window);
         return () => { stopped = true; stop(); };
     }, [refresh, managed, session, cursor, filters,section]);
     async function action(method: string, site: DesktopSite) {
