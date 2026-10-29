@@ -582,12 +582,15 @@ export class PostgresRestorePreparation {
             id: string;
             email: string;
         }>;
+        const mappingDigest = sha(Buffer.from(JSON.stringify(mappings)));
         const { sites, revisions } = state, { catalog, catalogVersions } = state.final;
         const order = ['public.users', 'public.memberships', 'public.sites', 'private.batches', 'private.workers', 'private.jobs', 'private.artifacts', 'private.checkpoints', 'public.revisions', 'public.assignments', 'private.edit_requests', 'public.chat', 'private.deployments', 'public.health', 'private.batch_rows', 'private.batch_assignments', 'private.import_resources', 'private.import_chunks', 'private.publication_reservations', 'private.site_operations', 'private.provider_accounts', 'private.provider_publications', 'private.publication_attempts', 'private.upload_preparations', 'private.catalog', 'private.audit', 'private.payload_inventory', 'private.payload_edges', 'private.checkpoint_evidence', 'private.job_usage', 'private.recovery_state'];
         await this.activate(async (tx) => {
             await this.snapshot(actor, id, tx);
             await tx.query("set local lock_timeout='5s';set local statement_timeout='15s';set local work_mem='4MB'");
-            const ready = (await tx.query("select phase,data from private.recovery_transfers where id=$1 for update", [id])).rows[0];
+            const ready = (await tx.query("select t.phase,t.data,((t.data->>'mappingDigest')=$2 and (s.data->'verified')=$3::jsonb) mappings_match from private.recovery_transfers t join private.recovery_snapshots s on s.id=t.id where t.id=$1 for update of t", [id, mappingDigest, mappings])).rows[0];
+            if (ready?.mappings_match !== true)
+                throw new AppError('CONFLICT', 'Привязки Auth не совпадают с закреплённой подготовкой.');
             if (ready?.phase === 'committed')
                 return;
             if (ready?.phase !== 'ready')

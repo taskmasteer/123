@@ -162,7 +162,7 @@ export class PostgresBackup {
             throw new AppError('FORBIDDEN', 'Получатель не подтверждён.');
         verified[m.sourceId] = identity;
     } await this.repository.transaction(async (tx) => { const snapshot = await this.snapshot(actor, id, tx); if (snapshot.data.kind !== 'restore')
-        throw new AppError('CONFLICT', 'Не сеанс восстановления.'); if((await tx.query("select 1 from private.recovery_transfers where id=$1 and data ? 'mappingDigest'",[id])).rowCount){if(Object.entries(verified).some(([key,value])=>snapshot.data.verified[key]?.id!==value.id))throw new AppError('CONFLICT','Привязки уже закреплены началом передачи.');return;} const merged = { ...snapshot.data.verified, ...verified }, values = Object.values(merged) as {
+        throw new AppError('CONFLICT', 'Не сеанс восстановления.'); if((await tx.query("select 1 from private.recovery_transfers where id=$1 and (data ? 'mappingDigest' or phase<>'staging')",[id])).rowCount){if(Object.entries(verified).some(([key,value])=>snapshot.data.verified[key]?.id!==value.id))throw new AppError('CONFLICT','Привязки уже закреплены началом передачи.');return;} const merged = { ...snapshot.data.verified, ...verified }, values = Object.values(merged) as {
         id: string;
     }[]; if (values.length > 5000 || new Set(values.map(v => v.id)).size !== values.length)
         throw new AppError('INVALID_INPUT', 'Привязки должны сохранять отдельные подтверждённые личности.'); await tx.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, merged]); }); return { ok: true }; }

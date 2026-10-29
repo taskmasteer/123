@@ -831,15 +831,212 @@ it('activates a validated READY catalog version list with one setwise edge inser
         }
     };
     // Isolate the trusted READY activation port; real archive/catalog validation is covered by native roundtrips.
-    await pool.query("update private.recovery_transfers set phase='ready',data=jsonb_build_object('preparation',$2::jsonb) where id=$1", [id, state]);
+    await pool.query("update private.recovery_transfers set phase='ready',data=jsonb_build_object('preparation',$2::jsonb,'mappingDigest',$3::text) where id=$1", [id, state, digest('{}')]);
     transport.get = async () => { throw Error('READY activation must not read bodies'); };
     const engine: any = new PostgresRestorePreparation(backup), activate = engine.activate.bind(engine);
     let inserts = 0;
     engine.activate = (action: any) => activate((tx: any) => action({
-        query: async (text: string, values?: any[]) => { if (text.startsWith('insert into private.payload_edges') && !text.includes('jsonb_populate_record'))
-            inserts++; return tx.query(text, values); }
+        query: async (text: string, values?: any[]) => {
+            if (text.startsWith('insert into private.payload_edges') && !text.includes('jsonb_populate_record'))
+                inserts++;
+            return tx.query(text, values);
+        }
     }));
     await engine.commit(actor, id, state);
     expect((await pool.query("select owner_id from private.payload_edges where target_kind='catalog' and target_id=$1 order by owner_id", ['restore-' + id])).rows.map((r: any) => r.owner_id)).toEqual(['fixture-one@1.0.0', 'fixture-two@2.0.0']);
     expect(inserts).toBe(1);
+}));
+it.each([['metadata', false], ['resources', false], ['metadata', true], ['resources', true]] as const)('fixI1: keeps a delayed %s acknowledgement behind a newer batch (demoted=%s)', (kind, demoted) => transferCase(3, async (c) => {
+    const { pool, t, actor, id, binding, header, objects } = c, bytes = Buffer.alloc(48000, 7), later = Buffer.from('second object'), file = (n: number, b: Buffer) => ({
+        type: 'file', root: 'object', path: 'private/artifacts/' + randomUUID() + '/' + randomUUID() + '/files/' + n, payload: 'payloads/' + n + '.bin', size: b.length, sha256: digest(b), mediaType: 'text/html'
+    }), files = [file(1, bytes), file(2, later)];
+    if (kind === 'resources')
+        await t.stageBatch(actor, id, envelope(binding, 'metadata', [header, ...files].map(metadataPart)));
+    const audit = (n: number) => ({
+        type: 'row', table: 'private.audit', row: {
+            id: n, actor_id: actor.userId, action: 'late ACK', target_id: actor.userId, created_at: new Date(1).toISOString()
+        }
+    }), part = (offset: number, b: Buffer, complete: boolean) => ({
+        seq: 1, offset, size: bytes.length, sha256: digest(bytes), base64: b.toString('base64'), complete
+    });
+    const a = kind === 'metadata' ? envelope(binding, kind, [metadataPart(header, 0)]) : envelope(binding, kind, [part(0, bytes.subarray(0, 24000), false)]), b = kind === 'metadata' ? envelope(binding, kind, [metadataPart(audit(1), 1)]) : envelope(binding, kind, [part(24000, bytes.subarray(24000), true)]), query = pool.query.bind(pool);
+    let entered!: () => void, release!: () => void, once = true;
+    const reached = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
+    pool.query = async (text: any, values: any[]) => { const result = await query(text, values); if (once && text === 'select * from private.recovery_transfer_receipts where id=$1 and cursor=$2' && values[1] === a.cursor && result.rows[0]?.complete === false) {
+        once = false;
+        entered();
+        await hold;
+    } return result; };
+    let puts = 0;
+    const put = c.transport.put;
+    c.transport.put = async (...args: any[]) => { puts++; return put(...args); };
+    const delayed = t.stageBatch(actor, id, a).then((value: any) => ({
+        value
+    }), (error: any) => ({
+        error
+    }));
+    try {
+        await reached;
+        await t.stageBatch(actor, id, a);
+        const newer = await t.stageBatch(actor, id, b);
+        if (demoted)
+            await query("update public.memberships set role='user' where user_id=$1", [actor.userId]);
+        release();
+        const result = await delayed;
+        if (demoted)
+            expect(result).toHaveProperty('error.code', 'FORBIDDEN');
+        else
+            expect(result).toHaveProperty('value.cursor', newer.cursor);
+        if (demoted)
+            await query("update public.memberships set role='admin' where user_id=$1", [actor.userId]);
+        const state = (await query('select metadata_seq,resource_seq,resource_offset from private.recovery_transfers where id=$1', [id])).rows[0];
+        if (kind === 'metadata') {
+            expect(state.metadata_seq).toBe('2');
+            expect(Number((await query("select data->>'metadataBytes' n from private.recovery_snapshots where id=$1", [id])).rows[0].n)).toBe(Buffer.byteLength(JSON.stringify(header)) + Buffer.byteLength(JSON.stringify(audit(1))));
+            expect((await query('select count(*) n from private.recovery_transfer_metadata where id=$1', [id])).rows[0].n).toBe('2');
+            await t.stageBatch(actor, id, envelope(binding, kind, [metadataPart(audit(2), 2)]));
+        }
+        else {
+            expect(state.resource_seq).toBe('2');
+            expect(state.resource_offset).toBe(0);
+            expect(objects.size).toBe(1);
+            expect(puts).toBe(1);
+            expect(Number((await query("select data->>'objectStagingBytes' n from private.recovery_snapshots where id=$1", [id])).rows[0].n)).toBe(0);
+            expect((await query('select count(*) n from private.recovery_transfer_parts where id=$1', [id])).rows[0].n).toBe('0');
+            await t.stageBatch(actor, id, envelope(binding, kind, [{
+                    seq: 2, offset: 0, size: later.length, sha256: digest(later), base64: later.toString('base64'), complete: true
+                }]));
+            expect(objects.size).toBe(2);
+            expect(puts).toBe(2);
+        }
+    }
+    finally {
+        release();
+        await delayed;
+        pool.query = query;
+    }
+}));
+it('fixI2: freezes legacy HTTP Auth mappings at first preparation and preserves them through READY and commit', () => transferCase(1, async (c) => {
+    const { pool, repo, store, backup, actor } = c, source = randomUUID(), destination = identities.user, other = identities.spec, header = {
+        ...c.header, pinnedCatalogs: [], storedCatalogs: [], hasInstalledCatalog: false
+    }, app = createApp({
+        repository: repo, store, backup, auth: {
+            verifyUser: async () => actor, verifyWorker: async () => { throw Error('unused'); }
+        }
+    });
+    const post = (path: string, body: unknown = {}) => app(new Request('https://control.test/admin/recovery/' + path, {
+        method: 'POST', headers: {
+            authorization: 'Bearer fixture', 'content-type': 'application/json'
+        }, body: JSON.stringify(body)
+    }));
+    const begun = await post('restores', {
+        header, mappings: [{
+                sourceId: source, destinationId: destination
+            }], records: 300
+    });
+    expect(begun.status).toBe(200);
+    const { id } = await begun.json(), path = 'restores/' + id + '/', rows = [header, ...Array.from({
+            length: 298
+        }, (_, n) => ({
+            type: 'row', table: 'private.audit', row: {
+                id: n + 1, actor_id: source, action: 'legacy map', target_id: source, created_at: new Date(1).toISOString()
+            }
+        })), {
+            type: 'row', table: 'private.recovery_state', row: {
+                key: 'installed-catalog', data: {
+                    versions: []
+                }
+            }
+        }];
+    for (const [seq, row] of rows.entries()) {
+        expect((await post(path + 'record-part', {
+            seq, index: 0, base64: Buffer.from(JSON.stringify(row)).toString('base64')
+        })).status).toBe(200);
+        expect((await post(path + 'record-complete', {
+            seq
+        })).status).toBe(200);
+    }
+    const mappings = (id: string) => post(path + 'mappings', {
+        mappings: [{
+                sourceId: source, destinationId: id
+            }]
+    }), prototype = PostgresRestorePreparation.prototype, upgrade = prototype.upgradeProofs;
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
+    prototype.upgradeProofs = async function (...args) { entered(); await hold; return upgrade.apply(this, args); };
+    const preparing = post(path + 'prepare');
+    try {
+        await reached;
+        expect((await mappings(other)).status).toBe(409);
+        expect((await mappings(destination)).status).toBe(200);
+        expect((await post(path + 'prepare')).status).toBe(503);
+    }
+    finally {
+        release();
+        await preparing;
+        prototype.upgradeProofs = upgrade;
+    }
+    const page = prototype.preparePage;
+    let cohortEntered!: () => void, cohortRelease!: () => void;
+    const cohortReached = new Promise<void>(r => cohortEntered = r), cohortHold = new Promise<void>(r => cohortRelease = r);
+    prototype.preparePage = async function (...args) { const result = await page.apply(this, args); cohortEntered(); await cohortHold; return result; };
+    const cohort = post(path + 'prepare');
+    try {
+        await cohortReached;
+        expect((await mappings(other)).status).toBe(409);
+        expect((await mappings(destination)).status).toBe(200);
+        expect((await post(path + 'prepare')).status).toBe(503);
+    }
+    finally {
+        cohortRelease();
+        expect((await cohort).status).toBe(200);
+        prototype.preparePage = page;
+    }
+    let ready = false;
+    for (let n = 0; n < 60; n++) {
+        const response = await post(path + 'prepare');
+        expect(response.status).toBe(200);
+        if ((await response.json()).phase === 'ready') {
+            ready = true;
+            break;
+        }
+    }
+    expect(ready).toBe(true);
+    expect((await mappings(other)).status).toBe(409);
+    expect((await mappings(destination)).status).toBe(200);
+    const frozen = (await pool.query("select data->'verified' verified from private.recovery_snapshots where id=$1", [id])).rows[0].verified, changed = {
+        ...frozen, [source]: {
+            id: other, email: (await pool.query('select email from public.users where id=$1', [other])).rows[0].email
+        }
+    };
+    await pool.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, changed]);
+    expect((await post(path + 'prepare')).status).toBe(409);
+    expect((await post(path + 'commit')).status).toBe(409);
+    expect((await pool.query('select count(*) n from private.audit')).rows[0].n).toBe('0');
+    await pool.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, frozen]);
+    const privatePrototype = prototype as any, activate = privatePrototype.activate;
+    let commitEntered!: () => void, commitRelease!: () => void;
+    const commitReached = new Promise<void>(r => commitEntered = r), commitHold = new Promise<void>(r => commitRelease = r);
+    privatePrototype.activate = async function (action: any) { commitEntered(); await commitHold; return activate.call(this, action); };
+    const pendingCommit = post(path + 'commit');
+    try {
+        await commitReached;
+        await pool.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, changed]);
+        commitRelease();
+        expect((await pendingCommit).status).toBe(409);
+        expect((await pool.query('select count(*) n from private.audit')).rows[0].n).toBe('0');
+    }
+    finally {
+        commitRelease();
+        await pendingCommit;
+        privatePrototype.activate = activate;
+        await pool.query("update private.recovery_snapshots set data=jsonb_set(data,'{verified}',$2::jsonb) where id=$1", [id, frozen]);
+    }
+    const installed = await post(path + 'commit');
+    expect(installed.status).toBe(200);
+    expect((await pool.query('select distinct actor_id from private.audit')).rows).toEqual([{
+            actor_id: destination
+        }]);
+    expect((await pool.query("select data#>>'{authMapping," + source + "}' destination from private.recovery_state where key='installation'")).rows[0].destination).toBe(destination);
+    expect((await pool.query('select count(*) n from private.audit')).rows[0].n).toBe('298');
 }));

@@ -33,7 +33,7 @@ export class PostgresRecoveryTransfer {
         };
         await tx.query("insert into private.recovery_transfers(id,session_scope,binding,resource_seq,created_at,max_expires_at) select $1,$2,$3,$4,expires_at-interval '1 hour',expires_at+interval '23 hours' from private.recovery_snapshots where id=$1", [id, this.scope ?? null, binding, resourceSeq]);
     }
-    private async state(actor: Principal, id: string, tx: SqlTransaction): Promise<State> {
+    private async state(actor: Principal, id: string, tx: SqlTransaction, mappings?: 'freeze' | 'verify'): Promise<State> {
         const snapshot = await this.backup.snapshot(actor, id, tx);
         let state = (await tx.query('select *,max_expires_at>clock_timestamp() live from private.recovery_transfers where id=$1 for update', [id])).rows[0];
         if (!state) {
@@ -56,6 +56,17 @@ export class PostgresRecoveryTransfer {
             await tx.query('update private.recovery_transfers set session_scope=$2 where id=$1', [id, this.scope]);
         if (state.phase === 'cancelled' || state.phase === 'failed')
             throw new AppError('CONFLICT', 'Сеанс восстановления закрыт.');
+        if (mappings) {
+            const digest = sha(JSON.stringify(snapshot.data.verified)), frozen = state.data.mappingDigest;
+            if (frozen === undefined && mappings === 'freeze' && state.phase === 'staging') {
+                await tx.query("update private.recovery_transfers set data=data||jsonb_build_object('mappingDigest',$2::text) where id=$1", [id, digest]);
+                state.data = {
+                    ...state.data, mappingDigest: digest
+                };
+            }
+            else if (frozen !== digest)
+                throw new AppError('CONFLICT', 'Привязки Auth не совпадают с закреплённой подготовкой.');
+        }
         return state;
     }
     async authorize(actor: Principal, id: string, kind?: string, closing = false) {
@@ -240,8 +251,6 @@ export class PostgresRecoveryTransfer {
         const old = (await this.repo.pool.query('select * from private.recovery_transfer_receipts where id=$1 and cursor=$2', [id, batch.cursor])).rows[0];
         if (old && old.digest !== batch.digest)
             throw new AppError('CONFLICT', 'Повтор пакета содержит другие байты.');
-        if (old?.complete)
-            return this.progress(state);
         if (!old) {
             if (state.phase !== 'staging' || batch.cursor !== this.progress(state).cursor)
                 return bad();
@@ -360,12 +369,19 @@ export class PostgresRecoveryTransfer {
             });
         }
         const receipt = (await this.repo.pool.query('select * from private.recovery_transfer_receipts where id=$1 and cursor=$2', [id, batch.cursor])).rows[0];
-        if (batch.kind === 'resources') {
+        if (batch.kind === 'resources' && !receipt.complete) {
             if (!await this.finishObjects(actor, id, receipt.data.completed))
                 return this.progress(state);
         }
         return this.repo.transaction(async (tx) => {
             state = await this.state(actor, id, tx);
+            const receipt = (await tx.query('select * from private.recovery_transfer_receipts where id=$1 and cursor=$2 for update', [id, batch.cursor])).rows[0];
+            if (!receipt || receipt.digest !== batch.digest || receipt.kind !== batch.kind)
+                throw new AppError('CONFLICT', 'Подтверждение пакета изменено.');
+            if (receipt.complete)
+                return this.progress(state);
+            if (state.phase !== 'staging' || this.progress(state).cursor !== batch.cursor)
+                return bad('Курсор подтверждения пакета изменился.');
             if (batch.kind === 'metadata') {
                 const next = receipt.data.seq === state.binding.records ? (await tx.query("select min(seq) seq from private.recovery_snapshot_records where snapshot_id=$1 and seq<1000000 and data->>'type'='file'", [id])).rows[0].seq : null;
                 await tx.query("update private.recovery_transfers set metadata_seq=$2,data=data||jsonb_build_object('metadataOffset',$3::int,'metadataPending',$5::jsonb),resource_seq=case when $2=(binding->>'records')::bigint then $4 else resource_seq end where id=$1", [id, receipt.data.seq, receipt.data.offset, next ?? state.binding.records, receipt.data.pendingMetadata]);
@@ -462,7 +478,7 @@ export class PostgresRecoveryTransfer {
     async prepareBatch(actor: Principal, id: string): Promise<RecoveryPreparationProgress> {
         const token = randomUUID();
         let state = await this.repo.transaction(async (tx) => {
-            const s = await this.state(actor, id, tx);
+            const s = await this.state(actor, id, tx, 'freeze');
             if (s.phase === 'ready' || s.phase === 'committed')
                 return s;
             if (s.phase === 'staging') {
@@ -504,7 +520,7 @@ export class PostgresRecoveryTransfer {
                     next = result;
             }
             return await this.repo.transaction(async (tx) => {
-                state = await this.state(actor, id, tx);
+                state = await this.state(actor, id, tx, 'verify');
                 const claim = (await tx.query('select claim,claim_expires>clock_timestamp() live from private.recovery_transfers where id=$1', [id])).rows[0];
                 if (claim.claim !== token || !claim.live)
                     throw new AppError('CONFLICT', 'Подготовка истекла.');
@@ -520,7 +536,7 @@ export class PostgresRecoveryTransfer {
         }
     }
     async commitPrepared(actor: Principal, id: string) {
-        const state = await this.repo.transaction(tx => this.state(actor, id, tx));
+        const state = await this.repo.transaction(tx => this.state(actor, id, tx, 'verify'));
         if (!['ready', 'committed'].includes(state.phase))
             throw new AppError('CONFLICT', 'Подготовка восстановления ещё не завершена.');
         if (state.phase === 'committed')
