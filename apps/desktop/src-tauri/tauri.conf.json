@@ -18,7 +18,9 @@
         "width": 1280,
         "height": 800,
         "minWidth": 1040,
-        "minHeight": 680
+        "minHeight": 680,
+        "theme": "Dark",
+        "backgroundColor": "#101216"
       }
     ],
     "security": {
@@ -30,8 +32,16 @@
   },
   "bundle": {
     "active": false,
-    "targets": ["nsis"],
-    "windows": {"webviewInstallMode":{"type":"offlineInstaller"}},
-    "macOS": {"minimumSystemVersion":"14.0"}
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
   }
 }

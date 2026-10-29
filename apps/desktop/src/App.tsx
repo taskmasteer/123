@@ -1,3 +1,4 @@
+import brandLogo from '../icon.svg?url';
 import {pollLoop} from './lib/polling.js';
 import { siteCount } from './lib/labels.js';
 import type { SiteFilters } from '../../../packages/contracts/src/model.js';
@@ -151,7 +152,7 @@ export default function App() {
     }
     return (<div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">▦</span>Site Factory</div>
+        <div className="brand"><img className="brand-mark" src={brandLogo} alt="" aria-hidden="true"/>Site Factory</div>
         <nav aria-label="Разделы">
           {['Сайты', 'Пачки', 'Референсы', ...(managed ? session?.capabilities.admin ? ['Пользователи', 'Подключения', 'Исполнители', 'Расход ресурсов', 'Резервные копии'] : [] : ['Устройство', 'Расход ресурсов', 'Резервные копии']), 'Режим работы'].map(name => (<button key={name} aria-current={section === name ? 'page' : undefined} onClick={() => { setSection(name); setEditorId(null); }}>{name}</button>))}
         </nav>

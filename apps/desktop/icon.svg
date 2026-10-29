@@ -1,1 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" rx="40" fill="#2459BD"/><g fill="#fff"><rect x="52" y="52" width="152" height="24" rx="4"/><rect x="52" y="96" width="64" height="108" rx="4"/><rect x="136" y="96" width="68" height="44" rx="4"/><rect x="136" y="160" width="68" height="44" rx="4"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="112" height="112" viewBox="0 0 112 112">
+  <title>Site Factory</title>
+  <rect width="112" height="112" rx="22" fill="#080a0d"/>
+  <g fill="#ffdf43" transform="translate(0 16)">
+    <path d="M39 11h32c4.3 15.8 11.4 26.6 28 34l-7 19C74.8 57.4 62.4 44.1 55.5 26 48.6 44.1 36.2 57.4 19 64l-7-19C28.6 37.6 34.7 26.8 39 11Z"/>
+    <path d="M44 50h24v20H44Z"/>
+  </g>
+</svg>
