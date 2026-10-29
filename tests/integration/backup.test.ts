@@ -189,7 +189,9 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
         finally {
             preparationPrototype.query = originalPreparationQuery;
         }
-        let entered!: () => void, release!: () => void, released = false, earlyState = false;
+        let entered!: () => void, release!: () => void, released = false, earlyState = false, stateReads=0;
+        const originalGet=targetStorage.get.bind(targetStorage);
+        targetStorage.get=async(key:string)=>{const bytes=await originalGet(key);if(createHash('sha256').update(bytes).digest('hex')===sourceCheckpoint.state.sha256){stateReads++;if(!released)earlyState=true;}return bytes;};
         const enteredRemap = new Promise<void>(r => entered = r), hold = new Promise<void>(r => release = r);
         lookups = 0;
         preparationPrototype.query = (async function(this:PostgresRestorePreparation,sql: any, params: any[]) { if (String(sql).includes("data->>'source'=any")) {
@@ -197,14 +199,15 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
                 entered();
                 await hold;
             }
-            if (params?.[1] === sourceStateKey && lookups === 1 && !released)
-                earlyState = true;
         } return originalPreparationQuery.call(this,sql, params); });
         const installing = target.install(admin, begun.id);
         let report: Awaited<typeof installing>;
         try {
             await enteredRemap;
             expect(earlyState).toBe(false);
+            const actualStateKey=[...targetStorage.objects].find(([,value])=>createHash('sha256').update(value.bytes).digest('hex')===sourceCheckpoint.state.sha256)![0];
+            // Positive control: the observer really sees an early state BODY read while remapping is held.
+            await targetStorage.get(actualStateKey);expect(earlyState).toBe(true);expect(stateReads).toBe(1);earlyState=false;stateReads=0;
         }
         finally {
             released = true;
@@ -214,8 +217,10 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
             }
             finally {
                 preparationPrototype.query = originalPreparationQuery;
+                targetStorage.get=originalGet;
             }
         }
+        expect(earlyState).toBe(false);expect(stateReads).toBeGreaterThan(0);
         expect(Buffer.from((await targetStore.load(cp.id)).files[0]!.bytes)).toEqual(Buffer.from(checkpointFiles[0]!.bytes));
         expect((await pool.query('select metadata from private.checkpoints where id=$1', [cp.id])).rows[0].metadata.manifest.files[0].objectKey).not.toBe(sourceFileKey);
         expect(report).toMatchObject({ restoredSites: 1, restoredRevisions: 9, quarantined: true });

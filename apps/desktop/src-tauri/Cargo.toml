@@ -7,11 +7,14 @@ name = "site_factory_desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 [build-dependencies]
 tauri-build = { version = "=2.7.2", features = [] }
+sha2 = "=0.10.9"
+serde_json = "=1.0.145"
 [dependencies]
 tauri = { version = "=2.12.3", features = [] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 fs2 = "=0.4.3"
+sha2 = "=0.10.9"
 rfd = { version = "=0.17.2", default-features = false }
 [dev-dependencies]
 tauri = { version = "=2.12.3", features = ["test"] }
@@ -19,3 +22,4 @@ tauri = { version = "=2.12.3", features = ["test"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Security_Credentials", "Win32_UI_Shell"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "=3.7.0"
+libc = "=0.2.191"

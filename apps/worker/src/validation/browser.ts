@@ -7,15 +7,12 @@ import { privateDirectory, writeExclusive } from '../../../../packages/adapters/
 import { serveFiles } from '../preview/server.js';
 import { localReference, validateStatic } from './static.js';
 import type { Issue } from './static.js';
+import { browserLaunchOptions } from '../browser-launch.js';
 
 const deadlineMs = 10_000;
 // Deliberate allowlist: never inherit provider keys, proxy settings or application secrets.
 export function browserEnvironment(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LOCALAPPDATA']) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
-  return env;
+  return browserLaunchOptions(true).env!;
 }
 class ValidationTimeout extends Error {}
 
@@ -39,7 +36,7 @@ export async function validateSite(files: ArtifactFile[], options: { screenshotR
   const documents = files.filter((file) => file.mediaType === 'text/html');
   try {
     const work = async () => {
-      browser = await chromium.launch({ headless: true, chromiumSandbox: true, env: browserEnvironment(), timeout: 5_000 });
+      browser = await chromium.launch({ ...browserLaunchOptions(true), timeout: 5_000 });
       const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false, permissions: [], javaScriptEnabled: true });
       context.setDefaultTimeout(2_000); context.setDefaultNavigationTimeout(2_500);
       await context.addInitScript(() => {

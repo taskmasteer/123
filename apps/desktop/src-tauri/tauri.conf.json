@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "local.sitefactory.desktop",
   "build": {
-    "beforeDevCommand": "npm.cmd run dev",
+    "beforeDevCommand": "node ../../scripts/desktop-web.mjs dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm.cmd run build",
+    "beforeBuildCommand": "node ../../scripts/desktop-web.mjs build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -29,6 +29,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "targets": ["nsis"],
+    "windows": {"webviewInstallMode":{"type":"offlineInstaller"}},
+    "macOS": {"minimumSystemVersion":"14.0"}
   }
 }

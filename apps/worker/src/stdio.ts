@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { createDesktopRuntime } from './desktop-runtime.js';
+import { waitForNativeStart } from './bootstrap.js';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { record } from '../../../packages/contracts/src/inputs.js';
 import { activeLocalRoot } from './local-root.js';
@@ -7,8 +7,10 @@ import { activeLocalRoot } from './local-root.js';
 const root = process.env.SITE_FACTORY_DATA_ROOT, source = process.env.SITE_FACTORY_SOURCE_ROOT;
 if (!root || !source)
     throw new Error('Trusted worker paths are required.');
+const nativePersistencePermit=await waitForNativeStart(process.stdin, process.env.SITE_FACTORY_NATIVE_START_GATE === '1');
+const { createDesktopRuntime } = await import('./desktop-runtime.js');
 const selected = await activeLocalRoot(resolve(root), resolve(source));
-const runtime = await createDesktopRuntime(selected.root, selected.sourceRoot, { baseRoot: resolve(root), native: process.env.SITE_FACTORY_NATIVE === '1' });
+const runtime = await createDesktopRuntime(selected.root, selected.sourceRoot, { baseRoot: resolve(root), native: process.env.SITE_FACTORY_NATIVE === '1',...(nativePersistencePermit?{nativePersistencePermit}:{}) });
 let pending = Buffer.alloc(0), tail = Promise.resolve(), closing = false;
 function reply(value: unknown) { process.stdout.write(JSON.stringify(value) + '\n'); }
 process.stdin.on('data', (chunk: Buffer) => {
@@ -39,6 +41,7 @@ process.stdin.on('data', (chunk: Buffer) => {
         });
     }
 });
+process.stdin.resume();
 async function close() { if (closing)
     return; closing = true; await tail; await runtime.close(); }
 process.stdin.on('end', () => void close());

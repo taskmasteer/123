@@ -31,6 +31,17 @@ it('leases read-only health once for six hours, fences changed outcomes/revocati
         expect((await health.read(claim.siteId)).checkedAt).toBe(now);
         now += healthIntervalMs;
         expect((await health.read(claim.siteId)).checkedAt).toBeLessThanOrEqual(now - healthIntervalMs);
+        const oldOutcomeClaim=(await health.claim(worker)).claim!;
+        const newer=(await pool.query('select id from private.provider_publications where site_id=$1 and id<>$2 limit 1',[claim.siteId,oldOutcomeClaim.outcomeId])).rows[0].id;
+        await pool.query(`update private.provider_publications target set revision_id=source.revision_id,manifest_id=source.manifest_id,manifest_hash=source.manifest_hash,data=source.data,evidence=source.evidence,verified_at=$3,settlement='settled',settled_seq=(select max(settled_seq)+1 from private.provider_publications) from private.provider_publications source where source.id=$1 and target.id=$2`,[oldOutcomeClaim.outcomeId,newer,now]);
+        expect((await pool.query('select published_id from public.sites where id=$1',[claim.siteId])).rows[0].published_id).toBe(oldOutcomeClaim.revisionId);
+        expect(await health.read(claim.siteId)).toMatchObject({revisionId:oldOutcomeClaim.revisionId,status:null,code:'unverified'});
+        expect(await health.complete(worker,{...oldOutcomeClaim,code:'ok'})).toEqual({accepted:false});
+        const newOutcomeClaim=(await health.claim(worker)).claim!;
+        expect(newOutcomeClaim).toMatchObject({revisionId:oldOutcomeClaim.revisionId,outcomeId:newer});
+        expect(await health.complete(worker,{...newOutcomeClaim,code:'ok'})).toEqual({accepted:true});
+        expect(await health.read(claim.siteId)).toMatchObject({outcomeId:newer,status:'ok',code:'ok'});
+        now+=healthIntervalMs;
         const altered=(await health.claim(worker)).claim!;await pool.query("update private.health_observations set expectation=jsonb_set(expectation,'{file,sha256}',to_jsonb($2::text)) where site_id=$1",[altered.siteId,'0'.repeat(64)]);expect(await health.complete(worker,{...altered,code:'ok'})).toEqual({accepted:false});
         const next = (await health.claim(worker)).claim!;
         expect(next).not.toBeNull();

@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "inspector": "7-Zip26.05 Alone2/7zz, compiled locally from official source with existing MSVC x64",
+  "officialDownloadPage": "https://www.7-zip.org/download.html",
+  "trust": "controlled official HTTPS release retrieval, expected digests recorded in this reviewed checkout; no upstream signature claimed",
+  "sources": [
+    {"file":"7zr.exe","url":"https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe","sha256":"9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7"},
+    {"file":"extra.7z","url":"https://github.com/ip7z/7zip/releases/download/26.05/7z2605-extra.7z","sha256":"f27a8f103c84785026edcba1f67faf1357225df9d19ddb0b7760d55947141bc7"},
+    {"file":"source.tar.xz","url":"https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz","sha256":"0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e"}
+  ],
+  "localBuild": {
+    "path":".local-state/package-tools/7zip-26.05/source/tree/CPP/7zip/Bundles/Alone2/x64/7zz.exe",
+    "sha256":"043b418b66f7c696484c6e7d69bd0538ae82787a07c2fc71c35ac1c0957af4ce",
+    "recipe":"VsDevCmd.bat -arch=x64 -host_arch=x64; nmake /nologo PLATFORM=x64 in CPP/7zip/Bundles/Alone2",
+    "portability":"This is the measured local binary digest, not a reproducible-build or upstream binary claim. A different toolchain build requires an explicitly reviewed expected digest."
+  }
+}

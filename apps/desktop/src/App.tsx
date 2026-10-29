@@ -1,25 +1,25 @@
-import {UsagePanel} from './features/settings/UsagePanel.js';
 import { siteCount } from './lib/labels.js';
-import { Batches } from './features/batches/BatchDetail.js';
 import type { SiteFilters } from '../../../packages/contracts/src/model.js';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { desktopClient } from './lib/desktop-client.js';
-import { CreateSiteDialog } from './features/sites/CreateSiteDialog.js';
 import { SiteList } from './features/sites/SiteList.js';
 import type { DesktopSite } from './features/sites/SiteList.js';
-import { ReferenceLibrary } from './features/references/ReferenceLibrary.js';
 import type { Catalog } from './features/references/ReferenceLibrary.js';
-import { SiteEditor } from './features/editor/SiteEditor.js';
-import { ModelSettings } from './features/settings/ModelSettings.js';
-import { BackupSettings } from './features/settings/BackupSettings.js';
 import type { DeviceStatus } from './features/settings/ModelSettings.js';
-import { Login } from './features/auth/Login.js';
-import { UsersSettings } from './features/settings/UsersSettings.js';
-import { IntegrationsSettings } from './features/settings/IntegrationsSettings.js';
 import type { SessionView } from '../../../packages/contracts/src/http.js';
 import './app.css';
-import { PublicationPanel } from './features/sites/PublicationPanel.js';
-import { WorkerList } from './features/workers/WorkerList.js';
+const UsagePanel = lazy(() => import('./features/settings/UsagePanel.js').then(m => ({default:m.UsagePanel})));
+const Batches = lazy(() => import('./features/batches/BatchDetail.js').then(m => ({default:m.Batches})));
+const CreateSiteDialog = lazy(() => import('./features/sites/CreateSiteDialog.js').then(m => ({default:m.CreateSiteDialog})));
+const ReferenceLibrary = lazy(() => import('./features/references/ReferenceLibrary.js').then(m => ({default:m.ReferenceLibrary})));
+const SiteEditor = lazy(() => import('./features/editor/SiteEditor.js').then(m => ({default:m.SiteEditor})));
+const ModelSettings = lazy(() => import('./features/settings/ModelSettings.js').then(m => ({default:m.ModelSettings})));
+const BackupSettings = lazy(() => import('./features/settings/BackupSettings.js').then(m => ({default:m.BackupSettings})));
+const Login = lazy(() => import('./features/auth/Login.js').then(m => ({default:m.Login})));
+const UsersSettings = lazy(() => import('./features/settings/UsersSettings.js').then(m => ({default:m.UsersSettings})));
+const IntegrationsSettings = lazy(() => import('./features/settings/IntegrationsSettings.js').then(m => ({default:m.IntegrationsSettings})));
+const PublicationPanel = lazy(() => import('./features/sites/PublicationPanel.js').then(m => ({default:m.PublicationPanel})));
+const WorkerList = lazy(() => import('./features/workers/WorkerList.js').then(m => ({default:m.WorkerList})));
 type Device = DeviceStatus;
 export default function App() {
     const [managed, setManaged] = useState(false);
@@ -168,6 +168,7 @@ export default function App() {
           {section === 'Сайты' ? editedSite ? <button onClick={() => setEditorId(null)}>← Сайты</button> : <button className="primary" disabled={managed && !session} onClick={() => setCreating(true)}>Создать сайт</button> : null}
         </header>
         <div className={editedSite && section === 'Сайты' ? 'workspace editor-workspace' : 'workspace'}>
+          <Suspense fallback={<p role="status">Загрузка раздела…</p>}>
           {pollError ? <div role="alert" className="error-banner"><strong>Не удалось обновить состояние</strong><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить состояние</button></div> : null}
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => { })}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
@@ -198,14 +199,17 @@ export default function App() {
               <dl><dt>Режим</dt><dd>{device?.mode === 'live' ? 'Реальная модель · локальные данные' : device?.mode === 'demo' ? 'Локальное демо' : 'Требуется настройка'}</dd><dt>Активные задания</dt><dd>{device ? `${device.activeJobs} из ${device.maxJobs}` : 'Нет связи'}</dd></dl>
               <p className="hint">При закрытии приложения текущая работа сохраняется. После запуска исполнение продолжится.</p>
             </section><ModelSettings device={device} onChanged={next => { setDevice(next); setRefresh(value => value + 1); }}/></>) : <p>Этот раздел недоступен для текущей роли.</p>}
+          </Suspense>
         </div>
       </main>
+      <Suspense fallback={<p role="status">Загрузка диалога…</p>}>
       {creating ? <CreateSiteDialog styles={catalog.styles} references={catalog.references} onClose={() => setCreating(false)} onCreated={() => {
                 setCreating(false);
                 if (managed)
                     changePage([null]);
                 setRefresh(value => value + 1);
             }}/> : null}
+      </Suspense>
       {preview ? <Screenshot site={preview} onClose={() => setPreview(null)}/> : null}
     </div>);
 }

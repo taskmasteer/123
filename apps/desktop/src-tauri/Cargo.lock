@@ -2842,10 +2842,12 @@ name = "site-factory-desktop"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "libc",
  "rfd",
  "security-framework",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "windows-sys 0.61.2",

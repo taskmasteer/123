@@ -1,4 +1,5 @@
 import {postgresUsage} from '../../packages/adapters/src/postgres-monitoring.js';
+import {testEvidencePrefix} from './evidence.js';
 import { PostgresRestorePreparation, recoveryDependencyFactsQuery } from '../../packages/adapters/src/postgres-restore-preparation.js';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { createAuth } from '../../apps/control/src/auth.js';
@@ -458,6 +459,7 @@ it('serves an authorized frozen metadata batch through actual control and SQL', 
     }
 });
 async function transportVolume(sites: number, reuseProofs = false, boundedFacts = false,monitoring=false) {
+    const evidencePrefix=testEvidencePrefix('recovery-'+Date.now());
     const prototype = PostgresRestorePreparation.prototype as any, originalQuery = prototype.query;
     let typedQueries = 0, maxTypedQueries = 0, hadPage = false;
     if (boundedFacts)
@@ -477,11 +479,11 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
     };
     let currentActor = actor;
     const started = performance.now();
-    await writeFile('.local-state/task13-'+'progress-' + sites + '.json', JSON.stringify({
+    await writeFile('.local-state/'+evidencePrefix+'-progress-' + sites + '.json', JSON.stringify({
         phase: 'seed/capture', counts, elapsedMs: 0
     }));
     let progressDetails: Record<string, unknown> = {}, progressWrite: Promise<void> | undefined;
-    const progress = () => writeFile('.local-state/task13-'+'progress-' + sites + '.json', JSON.stringify({
+    const progress = () => writeFile('.local-state/'+evidencePrefix+'-progress-' + sites + '.json', JSON.stringify({
         ...progressDetails, phase, counts: {
             ...counts
         }, elapsedMs: performance.now() - started
@@ -677,7 +679,7 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
         const backupMetadataCalls = Object.entries(counts).filter(([key]) => key.startsWith('backup.') && key !== 'backup.resources').reduce((n, [, v]) => n + v, 0), restoreCalls = Object.entries(counts).filter(([key]) => key.startsWith('restore.')).reduce((n, [, v]) => n + v, 0);
         expect(backupMetadataCalls).toBeLessThanOrEqual(5000);
         expect(restoreCalls).toBeLessThanOrEqual(20000);
-        await writeFile('.local-state/task13-'+'transfer-' + sites + '.json', JSON.stringify({
+        await writeFile('.local-state/'+evidencePrefix+'-transfer-' + sites + '.json', JSON.stringify({
             boundary: 'trusted disk-paged records AFTER encrypted extraction; same NativeArchives-owned production transfer runner/control/SQL',...(monitoring?{monitoringSummary}:{}), sites, capturedMetadata: captured, physicalDescriptors: seed.bodyCount, originalTask12MetadataBytes: 532154933, projectedFullBodyBytes: 13500000000, smallMetadataBytes, smallBodyBytes: copiedBodyBytes, inventoryDigest: stream.inventoryDigest, counts, ...(boundedFacts ? {
                 maxTypedQueries
             } : {}), backupMetadataCalls, restoreCalls, maxInflight, maxRequest, maxResponse, commitMs, observedMs: performance.now() - started

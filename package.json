@@ -10,10 +10,14 @@
     "node": ">=24.21.0"
   },
   "scripts": {
-    "test": "vitest run --pool=threads",
+    "test": "node scripts/test-unit.mjs",
+    "test:package": "node scripts/test/package-runtime.test.mjs && node scripts/test/package-download.test.mjs",
+    "verify": "node scripts/verify.mjs",
+    "package:desktop": "node scripts/package-desktop.mjs",
+    "pilot": "node scripts/pilot.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json && npm run build --workspace @site-factory/desktop",
-    "test:e2e": "playwright test",
+    "test:e2e": "node scripts/test-e2e.mjs",
     "tauri:dev": "npm run build && node scripts/desktop-dev.mjs",
     "test:integration": "node scripts/test-integration.mjs"
   },

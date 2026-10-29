@@ -6,11 +6,11 @@ import { authorize } from '../../core/src/permissions.js';
 import { normalizeDomain } from '../../core/src/sites.js';
 import type { EditingStore } from '../../contracts/src/editing.js';
 import { sqliteEditing } from './sqlite-editing.js';
-import { openLocalDatabase, existingLocalDatabase, insertLocalSite, type LocalDatabase } from './local-database.js';
+import { openLocalDatabase, existingLocalDatabase, insertLocalSite, isNativeLocalDatabase, type LocalDatabase } from './local-database.js';
 import { sitePagePrefix, siteFilters, filterBinding, encodeCursor, decodeCursor, type SiteFilters } from '../../core/src/site-pagination.js';
 /** Private editor journal; write-ahead intents bridge registry and queue transactions. */
 export async function createLocalEditingStore(directory: string, database?: LocalDatabase): Promise<EditingStore> {
-    if (process.env.NODE_ENV === 'production')
+    if (process.env.NODE_ENV === 'production'&&!isNativeLocalDatabase(database))
         throw new AppError('FORBIDDEN', 'Local editing is a demonstration adapter.');
     if (database)
         return sqliteEditing(database);

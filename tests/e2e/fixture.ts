@@ -18,7 +18,8 @@ export const test = base.extend<{
 }>({
     workerBridge: [async ({ page }, use) => {
             const data = await mkdtemp(join(tmpdir(), 'site-factory-e2e-'));
-            const worker = spawn(process.execPath, [resolve('dist/apps/worker/src/stdio.js')], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, SITE_FACTORY_DATA_ROOT: data, SITE_FACTORY_SOURCE_ROOT: resolve('.') } });
+            const environment={...process.env};if(environment.NO_COLOR!==undefined)delete environment.FORCE_COLOR;
+            const worker = spawn(process.execPath, [resolve('dist/apps/worker/src/stdio.js')], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...environment, SITE_FACTORY_DATA_ROOT: data, SITE_FACTORY_SOURCE_ROOT: resolve('.') } });
             let closing = false;
             const pending = new Map<string, {
                 resolve: (v: unknown) => void;

@@ -9,8 +9,14 @@ import { parseQueueState } from './local-queue.js';
 import { parseRevision } from './local-revisions.js';
 import { privateDirectory, safeFile, readRegular, missing } from './safe-files.js';
 import { initializeRecovery } from './retention-schema.js';
+import {isNativePersistencePermit,type NativePersistencePermit} from './native-persistence.js';
 const controllers = new Set<string>();
 const handles = new Map<string, LocalDatabase>();
+const nativeHandles=new WeakSet<object>();
+export function isNativeLocalDatabase(value:unknown):value is LocalDatabase{return !!value&&typeof value==='object'&&nativeHandles.has(value);}
+export async function openNativeLocalDatabase(directory:string,permit:NativePersistencePermit):Promise<LocalDatabase>{if(!isNativePersistencePermit(permit))throw new AppError('FORBIDDEN','Verified private native bootstrap is required.');return openDatabase(directory,true);}
+/** Only verified restore code with its actual source handle can carry this process-local scope. */
+export async function openRestoredLocalDatabase(directory:string,source:LocalDatabase):Promise<LocalDatabase>{return openDatabase(directory,isNativeLocalDatabase(source));}
 export async function existingLocalDatabase(directory: string) { const root = await privateDirectory(directory); return handles.get(process.platform === 'win32' ? root.toLowerCase() : root); }
 export interface LocalDatabase {
     sql: DatabaseSync;
@@ -30,10 +36,13 @@ export function insertLocalJob(db: LocalDatabase, job: Job, batchId: string | nu
         db.sql.prepare('insert into operations values(?,?,?)').run(job.siteId, job.id, 'job');
 }
 export async function openLocalDatabase(directory: string): Promise<LocalDatabase> {
+    return openDatabase(directory,false);
+}
+async function openDatabase(directory:string,nativePrivate:boolean):Promise<LocalDatabase>{
     const version = process.versions.node.split('.'), major = Number(version[0]), minor = Number(version[1]);
     if (major < 24 || (major === 24 && minor < 21))
         throw new AppError('UNAVAILABLE', 'Node 24.21.0 or newer is required for normalized local storage.');
-    if (process.env.NODE_ENV === 'production')
+    if (process.env.NODE_ENV === 'production'&&!nativePrivate)
         throw new AppError('FORBIDDEN', 'Local storage is a demonstration adapter.');
     const root = await privateDirectory(directory), key = process.platform === 'win32' ? root.toLowerCase() : root;
     if (controllers.has(key))
@@ -180,6 +189,7 @@ export async function openLocalDatabase(directory: string): Promise<LocalDatabas
         if (!schema)
             sql.prepare('insert into metadata values(?,?)').run('schemaVersion', '1');
         handles.set(key, db);
+        if(nativePrivate)nativeHandles.add(db);
         const close = db.close.bind(db);
         db.close = async () => {
             if (handles.get(key) === db)

@@ -1,9 +1,11 @@
 import {localUsage,localHealth} from '../../../packages/adapters/src/local-monitoring.js';
+import { browserLaunchOptions } from './browser-launch.js';
+import type {NativePersistencePermit} from '../../../packages/adapters/src/native-persistence.js';
 import { rm } from 'node:fs/promises';
 import { LocalBatches } from '../../../packages/adapters/src/local-batches.js';
 import { LocalImportResources } from '../../../packages/adapters/src/import-resources.js';
 import { importMethods } from '../../../packages/contracts/src/import.js';
-import { openLocalDatabase } from '../../../packages/adapters/src/local-database.js';
+import { openLocalDatabase,openNativeLocalDatabase } from '../../../packages/adapters/src/local-database.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -44,10 +46,11 @@ const principal = { userId: 'local-demo-admin', role: 'admin' } as const;
 export async function createDesktopRuntime(root: string, sourceRoot: string, options: {
     baseRoot?: string;
     native?: boolean;
+    nativePersistencePermit?:NativePersistencePermit;
     transport?: typeof fetch;
 } = {}) {
     const clock = { now: Date.now };
-    const database = await openLocalDatabase(root);
+    const database = options.native&&options.nativePersistencePermit?await openNativeLocalDatabase(root,options.nativePersistencePermit):await openLocalDatabase(root);
     const sites = await createLocalState(join(root, 'sites'), clock, database);
     const queue = await createLocalQueue(root, clock, database), artifacts = await createLocalArtifacts(join(root, 'artifacts'));
     const revisions = await createLocalRevisions(root, database), checkpoints = await createCheckpointStore(join(root, 'checkpoints'), clock);
@@ -480,7 +483,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                             const { revision } = await scoped(p.siteId as string, p.revisionId as string), server = await serveFiles(await artifacts.read(revision.manifestId));
                             let browser: Browser;
                             try {
-                                browser = await chromium.launch({ headless: false, chromiumSandbox: true, env: browserEnvironment() });
+                                browser = await chromium.launch(browserLaunchOptions(false));
                             }
                             catch (error) {
                                 await server.close();
@@ -543,12 +546,4 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     };
     closeForRestore = () => runtime.close();
     return runtime;
-}
-function browserEnvironment() {
-    const env: Record<string, string> = {};
-    for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LOCALAPPDATA']) {
-        if (process.env[key])
-            env[key] = process.env[key];
-    }
-    return env;
 }

@@ -29,7 +29,7 @@ test.describe('invite acceptance browser HTTP fixtures (not provider acceptance)
    await page.getByLabel('Новый пароль',{exact:true}).fill('fixture-new-password');await page.getByRole('button',{name:'Сохранить пароль и войти',exact:true}).click();
    if(scenario==='password-retry'){await expect(page.getByRole('alert')).toContainText('Не удалось сохранить пароль');await expect(page.getByLabel('Новый пароль',{exact:true})).toHaveValue('');await page.getByLabel('Новый пароль',{exact:true}).fill('fixture-new-password');await page.getByRole('button',{name:'Сохранить пароль и войти',exact:true}).click();}
    if(scenario==='pending'){
-    await expect(page.getByRole('alert')).toContainText('попросите администратора повторить приглашение');await expect(page.getByLabel('Пароль',{exact:true})).toHaveValue('');await page.screenshot({path:'.local-state/managed-invite-pending-harness.png',fullPage:true});
+    await expect(page.getByRole('alert')).toContainText('попросите администратора повторить приглашение');await expect(page.getByLabel('Пароль',{exact:true})).toHaveValue('');await page.setViewportSize({width:1280,height:800});await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:'.local-state/managed-invite-pending-viewport.png',fullPage:false});
     pending=false;await page.getByLabel('Пароль',{exact:true}).fill('fixture-new-password');await page.getByRole('button',{name:'Войти в общий реестр',exact:true}).click();
    }
    await expect(page.getByRole('button',{name:'Создать сайт',exact:true})).toBeVisible();expect(passwords).toBe(scenario==='password-retry'?2:1);

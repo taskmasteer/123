@@ -1,0 +1,55 @@
+name: Verify and package
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Build unsigned artifacts on configured matching hosts
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: [self-hosted, site-factory-win11-x64]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '24.21.0'
+      - run: npm ci --ignore-scripts
+      - run: node scripts/prepare-browser.mjs --target win32-x64
+      - run: npm run verify
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/package/win32-x64/runtime/browsers'
+      - run: npm run pilot -- --fixtures
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/package/win32-x64/runtime/browsers'
+  package:
+    if: github.event_name == 'workflow_dispatch' && inputs.package
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - target: win32-x64
+            runner: site-factory-win11-x64
+          - target: darwin-arm64
+            runner: site-factory-macos14-arm64
+          - target: darwin-x64
+            runner: site-factory-macos14-x64
+    runs-on: [self-hosted, '${{ matrix.runner }}']
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '24.21.0'
+      - run: npm ci --ignore-scripts
+      - run: npm run package:desktop -- --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: |
+            .local-state/cargo-target/**/release/bundle/
+            .local-state/package/${{ matrix.target }}/package-result.json
+            .local-state/build-receipts/${{ matrix.target }}.json

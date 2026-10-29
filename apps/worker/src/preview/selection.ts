@@ -6,7 +6,7 @@ import { verifiedProjection } from '../../../../packages/core/src/visual/project
 import { escapeAttribute } from '../../../../packages/core/src/visual/html-patch.js';
 import { acceptSelection, type SelectionSession } from '../../../../packages/contracts/src/visual-selection.js';
 import { serveFiles } from './server.js';
-import { browserEnvironment } from '../validation/browser.js';
+import { browserLaunchOptions } from '../browser-launch.js';
 const bridge = `(()=>{const c=JSON.parse(document.currentScript.dataset.config);let last=null,seq=0,at=0;Object.defineProperty(window,'__siteFactorySelection',{get:()=>last,configurable:false});for(const type of ['click','auxclick','submit','dragstart','drop'])document.addEventListener(type,e=>{e.preventDefault();e.stopImmediatePropagation();if(type!=='click'||performance.now()-at<50)return;const el=e.target instanceof Element?e.target.closest('[data-sf-element]'):null;if(!el)return;at=performance.now();document.querySelectorAll('[data-sf-selected]').forEach(e=>e.removeAttribute('data-sf-selected'));el.setAttribute('data-sf-selected','');last={version:1,...c,elementId:el.getAttribute('data-sf-element'),sequence:++seq};},true);})();`;
 export function selectionDocument(html: string, config: Omit<Selection, 'version' | 'elementId' | 'sequence'>, nonce: string) {
     const script = `<script nonce="${nonce}" data-config="${escapeAttribute(JSON.stringify(config))}">${bridge}</script><style>[data-sf-selected]{outline:3px solid #3457bb!important;outline-offset:3px!important;cursor:crosshair!important}</style>`;
@@ -42,7 +42,7 @@ export async function openSelection(input: Projection, documentPath?: string, op
         await server.close();
     };
     try {
-        browser = await chromium.launch({ headless: options.headless ?? false, chromiumSandbox: true, env: browserEnvironment(), timeout: 5000 });
+        browser = await chromium.launch({ ...browserLaunchOptions(options.headless ?? false), timeout: 5000 });
         const context = await browser.newContext({ serviceWorkers: 'block', permissions: [], acceptDownloads: false });
         context.setDefaultTimeout(2000);
         await context.route('**/*', async (route) => {

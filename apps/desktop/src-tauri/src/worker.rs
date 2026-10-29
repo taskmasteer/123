@@ -39,11 +39,10 @@ impl LaunchConfig {
         let runtime = resources.join("runtime");
         let config = Self {
             node: runtime.join(if cfg!(windows) { "node.exe" } else { "node" }),
-            script: runtime.join("worker/stdio.js"),
+            script: runtime.join("apps/worker/src/stdio.js"),
             source: runtime,
             data,
         };
-        config.check()?;
         Ok(config)
     }
     fn check(&self) -> Result<(), AppError> {
@@ -55,7 +54,10 @@ impl LaunchConfig {
             || !self.source.is_dir()
             || !self.data.is_absolute()
         {
-            return Err(AppError::new("Trusted Node, worker script and resource paths must exist. Set SITE_FACTORY_DEV_CONFIG for development."));
+            return Err(crate::runtime_package::unavailable());
+        }
+        if !cfg!(debug_assertions) || self.source.join("manifest.json").is_file() {
+            crate::runtime_package::verify_installed(&self.source)?;
         }
         Ok(())
     }
@@ -68,9 +70,39 @@ struct Process {
     _job: WindowsJob,
 }
 impl Process {
+    fn exited(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            return libc::waitid(
+                libc::P_PID,
+                self.child.id() as _,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) == 0
+                && info.si_pid() != 0;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.child.try_wait().ok().flatten().is_some()
+        }
+    }
     fn stop(&mut self) {
         self.input.take(); // EOF lets Node checkpoint active jobs and close Chromium.
         let deadline = Instant::now() + Duration::from_secs(15);
+        #[cfg(target_os = "macos")]
+        {
+            while !self.exited() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            // Retain the direct guard/Node Child until its owned group is killed, preventing PID reuse.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
+            let _ = self.child.wait();
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => break,
@@ -97,8 +129,17 @@ pub struct Worker {
     secrets: Box<dyn SecretStore>,
 }
 impl Worker {
+    pub fn lazy(config: LaunchConfig) -> Result<Self, AppError> {
+        Self::create(config, false)
+    }
+    #[cfg(test)]
     pub fn new(config: LaunchConfig) -> Result<Self, AppError> {
-        config.check()?;
+        Self::create(config, true)
+    }
+    fn create(config: LaunchConfig, start: bool) -> Result<Self, AppError> {
+        if start {
+            config.check()?;
+        }
         std::fs::create_dir_all(&config.data)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -115,19 +156,49 @@ impl Worker {
             response_timeout: Duration::from_secs(30),
             secrets: Box::new(OsSecretStore),
         };
-        worker.start()?;
+        if start {
+            worker.start()?;
+        }
         Ok(worker)
     }
     fn start(&mut self) -> Result<(), AppError> {
-        let mut command = Command::new(&self.config.node);
+        self.config.check()?;
+        let packaged =
+            !cfg!(debug_assertions) || self.config.source.join("manifest.json").is_file();
+        #[cfg(target_os = "macos")]
+        let mut command = if packaged {
+            let mut c = Command::new(
+                self.config
+                    .source
+                    .join("helpers/site-factory-runtime-guard"),
+            );
+            c.arg("--worker");
+            c
+        } else {
+            let mut c = Command::new(&self.config.node);
+            c.arg(&self.config.script);
+            c
+        };
+        #[cfg(not(target_os = "macos"))]
+        let mut command = {
+            let mut c = Command::new(&self.config.node);
+            c.arg(&self.config.script);
+            c
+        };
         command
-            .arg(&self.config.script)
             .current_dir(&self.config.data)
             .env_clear()
             .env("SITE_FACTORY_DATA_ROOT", &self.config.data)
             .env("SITE_FACTORY_SOURCE_ROOT", &self.config.source)
             .env("SITE_FACTORY_NATIVE", "1")
-            .env("NODE_ENV", "development")
+            .env(
+                "NODE_ENV",
+                if cfg!(debug_assertions) {
+                    "development"
+                } else {
+                    "production"
+                },
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -139,11 +210,39 @@ impl Worker {
             "HOME",
             "USERPROFILE",
             "LOCALAPPDATA",
-            "PLAYWRIGHT_BROWSERS_PATH",
         ] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        if packaged {
+            let temp = self.config.data.join("runtime-temp");
+            std::fs::create_dir_all(&temp)?;
+            command
+                .env("NODE_ENV", "production")
+                .env("SITE_FACTORY_PACKAGED", "1")
+                .env("SITE_FACTORY_RUNTIME_ROOT", &self.config.source)
+                .env(
+                    "PLAYWRIGHT_BROWSERS_PATH",
+                    self.config.source.join("browsers"),
+                )
+                .env("TEMP", &temp)
+                .env("TMP", &temp)
+                .env("TMPDIR", &temp);
+        } else if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+            command.env("PLAYWRIGHT_BROWSERS_PATH", path);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let start_gate = self
+            .config
+            .script
+            .ends_with(Path::new("apps/worker/src/stdio.js"));
+        if start_gate {
+            command.env("SITE_FACTORY_NATIVE_START_GATE", "1");
         }
         #[cfg(windows)]
         {
@@ -160,7 +259,15 @@ impl Worker {
                 return Err(e.into());
             }
         };
-        let input = child.stdin.take();
+        let mut input = child.stdin.take();
+        // The fixed bootstrap cannot import worker/runtime or create children before this grant.
+        // On Windows this point is strictly after successful kill-on-close Job attachment.
+        if start_gate {
+            if let Some(pipe) = input.as_mut() {
+                pipe.write_all(b"SF_NATIVE_START_V1\n")?;
+                pipe.flush()?;
+            }
+        }
         let stdout = child
             .stdout
             .take()
@@ -215,12 +322,7 @@ impl Worker {
     }
     pub fn request(&mut self, request: DesktopRequest) -> Result<Value, AppError> {
         validate(&request)?;
-        if self
-            .process
-            .as_mut()
-            .map(|p| p.child.try_wait().ok().flatten().is_some())
-            .unwrap_or(true)
-        {
+        if self.process.as_mut().map(|p| p.exited()).unwrap_or(true) {
             self.shutdown();
             self.start()?;
         }
@@ -283,12 +385,7 @@ impl Worker {
         })
     }
     pub fn managed(&mut self, request: crate::managed::ManagedRequest) -> Result<Value, AppError> {
-        if self
-            .process
-            .as_mut()
-            .map(|p| p.child.try_wait().ok().flatten().is_some())
-            .unwrap_or(true)
-        {
+        if self.process.as_mut().map(|p| p.exited()).unwrap_or(true) {
             self.shutdown();
             self.start()?;
         }
@@ -306,12 +403,7 @@ impl Worker {
         )
     }
     pub fn archive(&mut self, params: Value) -> Result<Value, AppError> {
-        if self
-            .process
-            .as_mut()
-            .map(|p| p.child.try_wait().ok().flatten().is_some())
-            .unwrap_or(true)
-        {
+        if self.process.as_mut().map(|p| p.exited()).unwrap_or(true) {
             self.shutdown();
             self.start()?;
         }
@@ -392,6 +484,102 @@ impl Drop for Worker {
         self.shutdown();
     }
 }
+pub fn package_smoke(resources: &Path) -> Result<Value, AppError> {
+    struct FixtureSecrets;
+    impl SecretStore for FixtureSecrets {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            Ok(None)
+        }
+        fn put(&self, _: &str, _: &str) -> Result<(), AppError> {
+            Err(AppError::new("Fixture cannot store credentials"))
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            Err(AppError::new("Fixture cannot delete credentials"))
+        }
+    }
+    let parent = std::env::temp_dir().canonicalize()?;
+    let data = parent.join(format!(
+        "site-factory-package-smoke-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let result = (|| {
+        let config = LaunchConfig::resolve(resources, data.clone())?;
+        let mut worker = Worker::lazy(config)?;
+        worker.secrets = Box::new(FixtureSecrets);
+        worker.settings(SettingsRequest::Demo {})?;
+        let request = |method: &str, params: Value| DesktopRequest {
+            id: "package-smoke".into(),
+            version: 1,
+            method: method.into(),
+            params,
+        };
+        let created=worker.request(request("site.create",serde_json::json!({"domain":"package-fixture.example","about":"A personal noncommercial fixture about careful garden tools.","referenceId":"editorial"})))?;
+        let id = created["site"]["id"]
+            .as_str()
+            .ok_or_else(|| AppError::new("Fixture did not create a site"))?
+            .to_owned();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let published;
+        loop {
+            let list = worker.request(request("site.list", serde_json::json!({})))?;
+            let site = list["items"]
+                .as_array()
+                .and_then(|sites| sites.iter().find(|s| s["id"] == id))
+                .ok_or_else(|| AppError::new("Fixture site missing"))?;
+            if site["generationStatus"] == "completed" {
+                published = site["publishedId"].clone();
+                break;
+            }
+            if Instant::now() > deadline || site["generationStatus"] == "needs_attention" {
+                return Err(AppError::new(format!(
+                    "Fixture generation did not finish: {}",
+                    site["generationStatus"]
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        worker.shutdown();
+        let restored = worker.request(request("site.list", serde_json::json!({})))?;
+        let restart = restored["items"].as_array().is_some_and(|sites| {
+            sites
+                .iter()
+                .any(|site| site["id"] == id && site["publishedId"] == published)
+        });
+        let mut forwarded = false;
+        let denied = crate::managed::handle(
+            &FixtureSecrets,
+            |_, _| {
+                forwarded = true;
+                Ok(Value::Null)
+            },
+            crate::managed::ManagedRequest::Start {
+                expected_origin: "https://fixture.invalid".into(),
+                mode: Some("visual".into()),
+            },
+        )
+        .is_err()
+            && !forwarded;
+        worker.shutdown();
+        if !restart || !denied {
+            return Err(AppError::new("Package restart/enrollment fixture failed"));
+        }
+        Ok(
+            serde_json::json!({"fixture":true,"generation":"completed","bundledNode":true,"bundledHeadlessBrowser":true,"restartPreservedSite":restart,"unenrolledManagedDenied":denied,"gui":false,"credentials":"memory-only","platformAcceptance":false}),
+        )
+    })();
+    if data.parent() == Some(parent.as_path())
+        && data.file_name().is_some_and(|n| {
+            n.to_string_lossy()
+                .starts_with("site-factory-package-smoke-")
+        })
+    {
+        let _ = std::fs::remove_dir_all(&data);
+    }
+    result
+}
 #[cfg(windows)]
 struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
 #[cfg(windows)]
@@ -435,6 +623,40 @@ impl Drop for WindowsJob {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn missing_package_keeps_controller_alive_and_returns_a_recoverable_error() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let data = root.join(format!(
+            ".local-state/missing-package-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = LaunchConfig {
+            node: data.join("missing/node.exe"),
+            script: data.join("missing/apps/worker/src/stdio.js"),
+            source: data.join("missing"),
+            data: data.clone(),
+        };
+        let mut worker = Worker::lazy(config)
+            .expect("A missing packaged runtime must not prevent panel/controller construction");
+        let error = worker
+            .request(DesktopRequest {
+                id: "missing".into(),
+                version: 1,
+                method: "device.status".into(),
+                params: json!({}),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "NEEDS_ATTENTION");
+        assert!(error.message.contains("переустанов"));
+        drop(worker);
+        std::fs::remove_dir_all(data).unwrap();
+    }
     #[test]
     fn private_settings_rotate_delete_and_reload_without_secret_in_public_results() {
         use std::sync::{Arc, Mutex};
@@ -728,5 +950,70 @@ lines.on('line', line => { tail=tail.then(async()=>{
         ] {
             run_failure_case(failure);
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_descendant_tests {
+    use super::*;
+    #[test]
+    fn private_grant_follows_job_attachment_and_job_close_kills_detached_descendant() {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let bootstrap = root.join("dist/apps/worker/src/bootstrap.js");
+        let script = format!(
+            r#"
+const {{pathToFileURL}} = await import('node:url');
+const {{waitForNativeStart}} = await import(pathToFileURL({}).href);
+process.stdout.write('READY\n');
+await waitForNativeStart(process.stdin,true);
+const {{spawn}} = await import('node:child_process');
+const child=spawn(process.execPath,['-e','setInterval(()=>{{}},1000)'],{{detached:true,stdio:'ignore',windowsHide:true}});
+process.stdout.write(child.pid+'\n');
+setInterval(()=>{{}},1000);
+"#,
+            serde_json::to_string(bootstrap.to_str().unwrap().trim_start_matches(r"\\?\")).unwrap()
+        );
+        let mut child = Command::new(std::env::var_os("SITE_FACTORY_TEST_NODE").unwrap())
+            .args(["--input-type=module", "-e", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .creation_flags(0x08000000)
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line, "READY\n");
+        let job = WindowsJob::attach(&child).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"SF_NATIVE_START_V1\n")
+            .unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let descendant: u32 = line.trim().parse().unwrap();
+        unsafe {
+            let descendant_handle = OpenProcess(0x00100000, 0, descendant);
+            assert!(!descendant_handle.is_null());
+            assert_eq!(WaitForSingleObject(descendant_handle, 0), 0x102);
+            drop(job);
+            assert_eq!(
+                WaitForSingleObject(descendant_handle, 5000),
+                0,
+                "The owned detached descendant must die with the Job"
+            );
+            windows_sys::Win32::Foundation::CloseHandle(descendant_handle);
+        }
+        // Windows Job termination may report exit code zero; successful reaping
+        // and the descendant wait above are the lifecycle observations.
+        child.wait().unwrap();
     }
 }

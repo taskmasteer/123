@@ -11,7 +11,7 @@ import type { BackupEntry } from '../../core/src/backup.js';
 import type { RestoreReport } from '../../contracts/src/recovery.js';
 import { authorize } from '../../core/src/permissions.js';
 import type { LocalDatabase } from './local-database.js';
-import { openLocalDatabase } from './local-database.js';
+import { openRestoredLocalDatabase } from './local-database.js';
 import { privateDirectory, safeFile, readRegular, writeExclusive, missing } from './safe-files.js';
 import { portableArchive } from './backup-archive.js';
 import { localRecoveryTables, monitoringRecoveryRow, recoveryPath, validateRecovery, readRecoveryRecord, type RecoveryRecord } from './recovery-records.js';
@@ -153,7 +153,7 @@ export class LocalBackup {
             }
             const parent = await privateDirectory(join(targetRoot, '..'), false);
             stage = await mkdtemp(join(parent, '.restored-'));
-            db = await openLocalDatabase(stage);
+            db = await openRestoredLocalDatabase(stage,this.db);
             for (const entry of rows) {
                 const record = await readRecoveryRecord(entry);
                 if (record.type === 'file') {
@@ -222,7 +222,7 @@ export class LocalBackup {
             await this.verifyCatalog(db, join(db.root, '.catalog'));
             await db.close();
             db = undefined;
-            const validated = await openLocalDatabase(stage);
+            const validated = await openRestoredLocalDatabase(stage,this.db);
             await validated.close();
             await rename(stage, targetRoot);
             stage = undefined;

@@ -1,0 +1,60 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { inventoryRuntime, checkRuntime, checkArchitecture, workspaceClosure } from '../lib/package-runtime.mjs';
+import {expectedNsisMain,tauriPackageConfiguration} from '../lib/package-native.mjs';
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+test('expected installer main permits only the exact pinned first bundle-type transformation',()=>{
+ const original=Buffer.from('prefix:__TAURI_BUNDLE_TYPE_VAR_UNK:suffix'),expected=Buffer.from('prefix:__TAURI_BUNDLE_TYPE_VAR_NSS:suffix'),proof=expectedNsisMain(original);
+ assert.equal(proof.sha256,sha(expected));assert.equal(proof.replacementCount,1);assert.equal(original.toString(),'prefix:__TAURI_BUNDLE_TYPE_VAR_UNK:suffix');
+ expected[0]^=1;assert.notEqual(proof.sha256,sha(expected));assert.throws(()=>expectedNsisMain(Buffer.from('missing marker')),/marker/);
+});
+test('target config preserves Mac runtime directory links using supported Contents files mapping',()=>{
+ for(const target of ['darwin-arm64','darwin-x64']){const config=tauriPackageConfiguration('/fixed/runtime',target);assert.deepEqual(config.bundle.resources,{});assert.deepEqual(config.bundle.macOS.files,{'Resources/runtime':'/fixed/runtime'});assert.deepEqual(config.bundle.targets,['app','dmg']);}
+ const win=tauriPackageConfiguration('C:/checked/runtime','win32-x64','C:/CHECKE~1/runtime');assert.deepEqual(win.bundle.resources,{'C:/CHECKE~1/runtime/':'runtime/'});assert.equal(win.bundle.macOS,undefined);
+});
+async function fixture(action) { const root = await mkdtemp(join(tmpdir(), 'sf-package-test-')); try { await action(root); } finally { await rm(root, { recursive: true, force: true }); } }
+test('resource plus adjacent manifest/checksum replacement cannot satisfy an independent expected anchor', async () => fixture(async root => {
+  await writeFile(join(root, 'worker.js'), 'original');
+  const manifest = await inventoryRuntime(root, { target: 'win32-x64' });
+  const bytes = Buffer.from(JSON.stringify(manifest)); await writeFile(join(root, 'manifest.json'), bytes);
+  await checkRuntime(root, sha(bytes), { required: false, target: 'win32-x64' });
+  await writeFile(join(root, 'worker.js'), 'changed');
+  const changed = Buffer.from(JSON.stringify(await inventoryRuntime(root, { target: 'win32-x64' })));
+  await writeFile(join(root, 'manifest.json'), changed); await writeFile(join(root, 'manifest.sha256'), sha(changed));
+  await assert.rejects(checkRuntime(root, sha(bytes), { required: false, target: 'win32-x64' }), /anchor/i);
+}));
+test('missing, extra and corrupt files fail exact inventory validation', async () => fixture(async root => {
+  await writeFile(join(root, 'worker.js'), 'original');
+  const bytes = Buffer.from(JSON.stringify(await inventoryRuntime(root, { target: 'win32-x64' })));
+  await writeFile(join(root, 'manifest.json'), bytes);
+  await writeFile(join(root, 'worker.js'), 'corrupted');
+  await assert.rejects(checkRuntime(root, sha(bytes), { required: false, target: 'win32-x64' }), /hash|inventory|size/i);
+  await writeFile(join(root, 'worker.js'), 'original'); await writeFile(join(root, 'extra'), 'x');
+  await assert.rejects(checkRuntime(root, sha(bytes), { required: false, target: 'win32-x64' }), /inventory/i);
+  await rm(join(root, 'extra')); await rm(join(root, 'worker.js'));
+  await assert.rejects(checkRuntime(root, sha(bytes), { required: false, target: 'win32-x64' }), /inventory/i);
+}));
+test('PE and Mach-O architecture checks reject a different target and truncated headers', () => {
+  const pe = Buffer.alloc(160); pe.write('MZ'); pe.writeUInt32LE(64, 60); pe.write('PE\0\0', 64); pe.writeUInt16LE(0x8664, 68);
+  assert.equal(checkArchitecture(pe, 'win32-x64'), true);
+  assert.throws(() => checkArchitecture(pe, 'darwin-arm64'), /architecture/i);
+  const macho = Buffer.alloc(32); macho.writeUInt32LE(0xfeedfacf); macho.writeUInt32LE(0x0100000c, 4);
+  assert.equal(checkArchitecture(macho, 'darwin-arm64'), true);
+  assert.throws(() => checkArchitecture(macho, 'darwin-x64'), /architecture/i);
+  assert.throws(() => checkArchitecture(Buffer.from('MZ'), 'win32-x64'), /header|architecture/i);
+});
+test('preserved emitted imports include actual modules and fail unresolved or nonliteral workspace imports', async () => fixture(async root => {
+  await mkdir(join(root, 'apps/worker/src'), { recursive: true }); await mkdir(join(root, 'packages/core/src'), { recursive: true });
+  const entry = 'apps/worker/src/stdio.js';
+  await writeFile(join(root, entry), "import '../../../packages/core/src/run.js'; import {readFile} from 'node:fs/promises';");
+  await writeFile(join(root, 'packages/core/src/run.js'), 'export const run=1;');
+  assert.deepEqual((await workspaceClosure(root, entry)).files.sort(), [entry, 'packages/core/src/run.js']);
+  await writeFile(join(root, entry), "import './missing.js';");
+  await assert.rejects(workspaceClosure(root, entry), /resolve|missing/i);
+  await writeFile(join(root, entry), 'export const run=p=>import(p);');
+  await assert.rejects(workspaceClosure(root, entry), /nonliteral/i);
+}));
