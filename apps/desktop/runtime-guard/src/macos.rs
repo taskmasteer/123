@@ -1,16 +1,15 @@
 //! Fixed resource-only roles. No Tauri, credential store, shell, PID selector or general broker.
-use site_factory_runtime_guard::{validate, BrowserRequest, Ownership};
+use site_factory_runtime_guard::{
+    owner_socket::{OwnerListener, WorkerPaths},
+    validate, BrowserRequest, Ownership,
+};
 use std::{
     collections::BTreeMap,
     env, fs,
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-        unix::{
-            fs::PermissionsExt,
-            net::{UnixListener, UnixStream},
-            process::CommandExt,
-        },
+        unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -486,21 +485,16 @@ fn worker() -> Result<()> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let socket = data.join(format!(".guard-{}.sock", &token[..12]));
-    if socket.as_os_str().len() > 100 {
-        return Err(invalid().into());
-    }
-    let listener = UnixListener::bind(&socket)?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
+    let paths = WorkerPaths::create(&data)?;
+    let listener = paths.bind()?;
     let stopping = Arc::new(AtomicBool::new(false));
     let force = Arc::new(AtomicBool::new(false));
     let stop_listener = stopping.clone();
     let force_listener = force.clone();
-    let temp = data.join("runtime-temp");
+    let temp = paths.temp.clone();
     fs::create_dir_all(&temp)?;
     fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))?;
-    let socket_for_node = socket.clone();
+    let socket_for_node = paths.socket.clone();
     let token_for_node = token.clone();
     let listener_thread = thread::spawn(move || {
         let mut work: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -539,6 +533,7 @@ fn worker() -> Result<()> {
             let _ = thread.join();
         }
     });
+    let mut listener_owner = OwnerListener::new(stopping.clone(), force.clone(), listener_thread);
     let mut command = Command::new(root.join("node"));
     command
         .arg(root.join("apps/worker/src/stdio.js"))
@@ -573,9 +568,9 @@ fn worker() -> Result<()> {
         thread::sleep(Duration::from_millis(25));
     }
     force.store(true, Ordering::SeqCst);
-    let _ = listener_thread.join();
+    listener_owner.stop();
     owned.stop()?;
-    fs::remove_file(socket)?;
+    paths.close()?;
     Ok(())
 }
 pub fn run() -> Result<()> {

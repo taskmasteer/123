@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", test))]
+pub mod owner_socket;
 use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
