@@ -11,7 +11,7 @@ test('healthy polling preserves a failed preview explanation until action retry 
  await expect(page.getByRole('alert')).toContainText('Chromium test launch failed');
  await page.screenshot({path:'.local-state/desktop-action-error.png',fullPage:true});
  const before=workerBridge.polls();
- await expect.poll(()=>workerBridge.polls()).toBeGreaterThanOrEqual(before+3);
+ for(let i=1;i<=3;i++){await page.getByRole('button',{name:'Обновить',exact:true}).click();await expect.poll(()=>workerBridge.polls()).toBeGreaterThanOrEqual(before+i);}
  await expect(page.getByRole('alert')).toContainText('Chromium test launch failed');
  await page.getByRole('button',{name:'Повторить операцию'}).click();
  await expect(page.getByRole('alert')).toHaveCount(0);
@@ -22,7 +22,7 @@ test('healthy polling preserves a catalog error until catalog reload succeeds',a
  await page.goto('/');
  await expect(page.getByRole('alert')).toContainText('Catalog test read failed');
  const before=workerBridge.polls();
- await expect.poll(()=>workerBridge.polls()).toBeGreaterThanOrEqual(before+3);
+ for(let i=1;i<=3;i++){await page.getByRole('button',{name:'Обновить',exact:true}).click();await expect.poll(()=>workerBridge.polls()).toBeGreaterThanOrEqual(before+i);}
  await expect(page.getByRole('alert')).toContainText('Catalog test read failed');
  await page.getByRole('button',{name:'Загрузить референсы повторно'}).click();
  await expect(page.getByRole('alert')).toHaveCount(0);

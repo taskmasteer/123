@@ -1,3 +1,4 @@
+import {batchDirection} from '../../core/src/generation-direction.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { AppError } from '../../contracts/src/model.js';
 import type { Principal, Job } from '../../contracts/src/model.js';
@@ -78,7 +79,9 @@ export class PostgresBatches {
                     // The domain reservation, job, operation and row association commit together.
                     try {
                         const input = { domain: r.input.domain, ...(r.input.about ? { about: r.input.about } : {}), ...(r.input.referenceId ? { referenceId: r.input.referenceId } : {}), ...(r.input.logoAssetId ? { logoAssetId: r.input.logoAssetId } : {}) };
-                        const site = await this.repository.insertSiteInTransaction(tx, input, { ...actor, userId: owner }, randomUUID(), id);
+                        const styles=(await tx.query("select data from private.catalog where kind='style' order by id")).rows.map(r=>r.data);
+                        const generation=styles.length?batchDirection(styles,id,r.rowNumber,input.referenceId):undefined;
+                        const site = await this.repository.insertSiteInTransaction(tx, input, { ...actor, userId: owner }, randomUUID(), id,generation);
                         r.siteId = site.id;
                     }
                     catch (error) {

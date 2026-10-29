@@ -63,6 +63,8 @@ export interface Job {
     checkpointId: string | null;
     baseRevision: number;
     generation?: {
+        /** Safe inherited topic for edits of an automatically briefed site. */
+        topic?:string;
         seed: number;
         styleId: string;
         templateVersion: string;
@@ -174,7 +176,7 @@ export interface ChatMessage {
     createdAt: number;
 }
 export interface ModelRequest {
-    mode: 'generate' | 'edit';
+    mode: 'generate' | 'edit' | 'plan';
     site: Site;
     instruction: string;
     baseManifestId: string | null;

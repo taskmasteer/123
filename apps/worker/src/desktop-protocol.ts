@@ -32,7 +32,7 @@ const methods: Record<string, string[]> = {
     ...visualMethods,
     ...recoveryMethods,
     'site.list': ['cursor', 'limit', 'domain', 'status', 'batchId'], 'site.create': ['domain', 'about', 'referenceId'], 'job.status': ['siteId'],
-    'job.retry': ['siteId'], 'preview.open': ['siteId', 'revisionId'], 'preview.screenshot': ['siteId', 'revisionId', 'width', 'candidateId'],
+    'job.cancel': ['siteId'], 'job.retry': ['siteId'], 'preview.open': ['siteId', 'revisionId'], 'preview.screenshot': ['siteId', 'revisionId', 'width', 'candidateId'],
     'site.health':['siteId'],'site.usage':['siteId'],'usage.summary':[],
     'device.status': [], 'catalog.list': [], 'catalog.style.update': ['id', 'enabled'], 'catalog.reference.update': ['id', 'description'],
     'edit.request': ['siteId', 'instruction', 'expectedRevision', 'candidateId'],

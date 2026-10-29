@@ -24,3 +24,23 @@ test('private enrollment generates an unpredictable token and sends only to conf
     await expect(runtime.request('managed.start', { ...a, controlOrigin: 'https://control.test' })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     await runtime.stop();
 });
+
+for(const phase of ['prepare','put','complete'])test('managed stop converges during pending upload '+phase,async()=>{
+ let claimed=false,entered!:()=>void;const waiting=new Promise<void>(r=>entered=r);let lease:any;const id='11111111-1111-4111-8111-111111111111';
+ const runtime=createManagedRuntime(()=>({clock:{now:Date.now},workspace:'.local-state/test-stop',templates:{load:async()=>[]},model:{run:async()=>({summary:'done',inputTokens:0,outputTokens:0})}} as unknown as WorkerDeps),()=>true,async(url,init)=>{
+  const path=new URL(String(url)).pathname,body=init?.body&&init.method!=='PUT'?JSON.parse(String(init.body)):{};
+  const current=path==='/uploads/prepare'?'prepare':init?.method==='PUT'?'put':path==='/uploads/complete'?'complete':null;
+  if(current===phase){entered();return new Promise<Response>(()=>{});}
+  if(path==='/uploads/prepare'){const files=[...body.files,...(body.state?[body.state]:[])];return Response.json({uploadId:id,expiresAt:Date.now()+600000,files:files.map((f:any)=>({path:f.path,objectKey:'immutable/'+f.path,url:'https://fixture.r2.cloudflarestorage.com/'+f.path,headers:{'content-type':f.mediaType,'if-none-match':'*'}}))});}
+  if(init?.method==='PUT')return new Response(null,{status:200});
+  if(path.endsWith('/jobs/claim')){if(claimed)return Response.json(null);claimed=true;lease={jobId:id,workerId:body.workerId??workerId,generation:1,expiresAt:Date.now()+120000};return Response.json({job:{id,siteId:id,kind:'generate',stage:'brief',state:'running',checkpointId:null,baseRevision:0,generation:{seed:2,styleId:'editorial',templateVersion:'1.0.0'}},lease});}
+  if(path.endsWith('/health/claim'))return Response.json({claim:null,nextWakeAt:Date.now()+21600000});
+  if(path.endsWith('/publication-receipt'))return Response.json(null);
+  if(path.endsWith('/heartbeat'))return Response.json(lease);
+  if(path.endsWith('/site'))return Response.json({id,domain:'stop.test',ownerId:id,assignedUserIds:[],input:{domain:'stop.test',about:'A provided event tracing concept'},revision:0,draftId:null,publishedId:null,generationStatus:'queued',domainStatus:'pending'});
+  return Response.json({ok:true});
+ });
+ const prepared=await runtime.request('managed.prepare',{}) as {workerId:string;token:string},workerId=prepared.workerId;
+ await runtime.request('managed.start',{...prepared,controlOrigin:'https://control.test'});await waiting;
+ expect(await Promise.race([runtime.stop().then(()=> 'stopped'),new Promise<string>(r=>setTimeout(()=>r('stuck'),250))])).toBe('stopped');
+});

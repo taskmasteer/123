@@ -1,3 +1,4 @@
+import {safeTopic} from '../../contracts/src/registry.js';
 import { AppError } from '../../contracts/src/model.js';
 import type { CheckpointStore, Clock, IdSource, Job, Principal, PublicationPort, Queue, RevisionRepository, Site, SiteRepository, ValidationReport } from '../../contracts/src/model.js';
 import type { Candidate, EditingState, EditingStore, PublishIntent } from '../../contracts/src/editing.js';
@@ -412,7 +413,8 @@ export function createEditing(deps: EditingDeps) {
                     if (saved.checkpoint.jobId !== sourceJob.id || saved.state.siteId !== siteId || !record(selection) ||
                         !Number.isSafeInteger(selection.seed) || typeof selection.styleId !== 'string' || typeof selection.templateVersion !== 'string')
                         throw new AppError('INVALID_INPUT', 'Исходная версия не соответствует заданию.');
-                    job.generation = { seed: selection.seed as number, styleId: selection.styleId, templateVersion: selection.templateVersion };
+                    const topic=safeTopic(saved.state.topic??saved.state.brief);
+                    job.generation = { seed: selection.seed as number, styleId: selection.styleId, templateVersion: selection.templateVersion,...(topic?{topic}:{}) };
                 }
                 const candidate: Candidate = { id, siteId, jobId, baseRevision: job.baseRevision, baseDraftId, baseManifestId: parent.manifestId,
                     parentRevisionId, manifestId: null, status: 'queued', validation: null, summary: '', createdAt, job, acceptance: null, ...(visual ? { visualSave: visual.save } : {}) };

@@ -6,6 +6,7 @@ export class FakeModel implements ModelPort {
   readonly runtimeStatus = { mode: 'demo', realModel: false } as const;
   async run(request: ModelRequest, tools: FileTools, signal: AbortSignal): Promise<ModelResult> {
     signal.throwIfAborted();
+    if (request.mode === 'plan') return {summary:JSON.stringify({topic:'A demonstration concept for verifiable event tracing at '+request.site.domain}),inputTokens:0,outputTokens:0};
     const html = await tools.read('index.html');
     if (request.mode === 'edit') {
       // A deliberately narrow demonstration: replace only the existing main heading.

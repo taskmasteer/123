@@ -43,11 +43,15 @@ export function recoveryResponse(method: string, value: unknown) {
         string(p.mediaType, 100);
         integer(p.size, 0, 2000000);
         integer(p.offset, 0, 2000000);
-        const bytes = string(p.base64, 32000);
-        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(bytes))
+        const bytes = p.base64;
+        if (typeof bytes !== 'string' || bytes.length > 32000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(bytes))
             throw new Error('Invalid source chunk');
-        if (p.nextOffset !== null)
-            integer(p.nextOffset, 0, 2000000);
+        const decoded = atob(bytes);
+        if (btoa(decoded) !== bytes || Number(p.offset) > Number(p.size) || decoded.length !== Math.min(24000, Number(p.size) - Number(p.offset)))
+            throw new Error('Invalid source chunk');
+        const end = Number(p.offset) + decoded.length;
+        if (p.nextOffset !== (end < Number(p.size) ? end : null))
+            throw new Error('Invalid source chunk');
         return p;
     }
     if (method === 'site.history') {

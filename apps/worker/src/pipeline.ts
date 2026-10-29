@@ -1,3 +1,4 @@
+import {compositionSignature} from '../../../packages/core/src/composition.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -15,9 +16,10 @@ import { validateSite } from './validation/browser.js';
 import { createEditableMap } from '../../../packages/core/src/visual/editable-map.js';
 import { patchFiles } from '../../../packages/core/src/visual/html-patch.js';
 export interface WorkerDeps {
+    compareComposition?:(signature:string[],job:Job)=>Promise<{score:number;compared:number;repeated:boolean}>;
     health?:import('../../../packages/contracts/src/monitoring.js').HealthPort;
     /** Remote ports bind protected reads/writes to this claim, never shared mutable current-job state. */
-    bind?: (job: Job, lease: Lease) => Promise<WorkerDeps>;
+    bind?: (job: Job, lease: Lease, signal?: AbortSignal) => Promise<WorkerDeps>;
     queue: Queue;
     sites: SiteRepository;
     artifacts: ArtifactStore;
@@ -73,6 +75,7 @@ interface PipelineState extends Record<string, unknown> {
     pendingRepairInstruction?: string;
     error?: string;
     continuation?: ModelContinuation;
+    promptVersion?: 2;
     imageRun?: ImageState;
     modelIdentity?: string;
     providerRecoveryId?: string;
@@ -80,7 +83,7 @@ interface PipelineState extends Record<string, unknown> {
         previousIdentity: string;
     })[];
 }
-const stages = ['assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
+const stages = ['brief', 'assets', 'generate', 'validate', 'archive', 'publication', 'completed'];
 export const heartbeatIntervalMs = 30000;
 class StagePaused extends Error {
 }
@@ -110,7 +113,8 @@ function parseState(value: Record<string, unknown>, job: Job): PipelineState {
         (value.pendingRepairInstruction !== undefined && (typeof value.pendingRepairInstruction !== 'string' || !value.pendingRepairInstruction || (value.repairAttempts as number) < 1)) ||
         (value.providerRecoveryId !== undefined && typeof value.providerRecoveryId !== 'string') ||
         (value.providerRecoveries !== undefined && (!Array.isArray(value.providerRecoveries) || !value.providerRecoveries.every(item => record(item) && ['id', 'checkpointId', 'modelIdentity', 'previousIdentity'].every(key => typeof item[key] === 'string')))) ||
-        (value.selectedElementId !== undefined && typeof value.selectedElementId !== 'string')) {
+        (value.selectedElementId !== undefined && typeof value.selectedElementId !== 'string') ||
+        (value.promptVersion !== undefined && value.promptVersion !== 2)) {
         throw new AppError('INVALID_INPUT', 'Private checkpoint does not match this job or is corrupt.');
     }
     return value as PipelineState;
@@ -121,7 +125,6 @@ function seedFor(id: string) {
         seed = Math.imul(seed ^ char.charCodeAt(0), 16777619);
     return seed >>> 0;
 }
-const topics = ['Observable event pipelines', 'Privacy-aware analytics', 'Reliable distributed storage', 'Open protocol infrastructure', 'Verifiable digital records'];
 const illustration = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 180" role="img" aria-label="Connected data processing stages"><path d="M80 90H520" stroke="#3457bb" stroke-width="4"/><g fill="#e7efff" stroke="#24449b" stroke-width="3"><circle cx="80" cy="90" r="38"/><circle cx="300" cy="90" r="38"/><circle cx="520" cy="90" r="38"/></g></svg>';
 /** Stages commit private snapshots before queue advancement. A retry starts only from that snapshot.
  * The caller owns scheduling/concurrency; this run renews its lease while model/browser work is pending.
@@ -163,7 +166,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     }
     async function save(next: string) {
         await check();
-        const boundary = next !== stage;
+        const boundary = next !== stage || !job.checkpointId;
         const checkpoint = await activity.wait(()=>deps.checkpoints.save({ ...job, stage: next }, lease, state!, files));
         const projection=projectCheckpoint(checkpoint,state!,files,job.checkpointId);await activity.wait(()=>deps.queue.checkpoint(lease,checkpoint,job.checkpointId,projection));
         job.checkpointId = checkpoint.id;
@@ -183,8 +186,8 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
     function canApplyRecovery() {
         const ticket = job.providerRecovery;
         return !!(state && ticket && state.providerRecoveryId !== ticket.id && ticket.checkpointId === job.checkpointId &&
-            ticket.modelIdentity === deps.model.identity && deps.model.recover && ['generate', 'validate'].includes(stage) && state.imageRun?.status !== 'pending' &&
-            deps.model.canRecover?.(state.continuation, state.error));
+            ticket.modelIdentity === deps.model.identity && deps.model.recover && ['brief','generate', 'validate'].includes(stage) && state.imageRun?.status !== 'pending' &&
+            deps.model.canRecover?.(stage==='brief'?state.planningContinuation:state.continuation, state.error));
     }
     try {
         await check();
@@ -212,7 +215,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
         // A crash between site CAS and the final checkpoint is reconciled without another publication.
         if (!deps.publication.settlement && job.kind === 'generate' && state?.revisionId && site.publishedId === state.revisionId && site.revision === job.baseRevision + 1) {
             const revision = await deps.revisions.get(state.revisionId);
-            if (!revision || revision.siteId !== site.id || revision.manifestId !== state.manifestId || revision.kind !== 'published')
+            if (!revision || revision.siteId !== site.id || revision.manifestId !== state.manifestId || !['published','draft'].includes(revision.kind))
                 throw new AppError('INVALID_INPUT', 'Published revision does not match the checkpoint.');
             await save('completed');
             await finish('completed');
@@ -234,13 +237,32 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             if (job.kind === 'generate' && !prepared?.generation && site.input.referenceId)
                 throw new AppError('INVALID_INPUT', 'A catalog is required to resolve the selected reference.');
             const selection = prepared?.generation ?? (job.kind === 'edit' ? { seed, styleId: 'existing-site', templateVersion: 'existing' } : { seed, styleId: ['light-product', 'dark-tech', 'editorial', 'corporate', 'diagram'][seed % 5]!, templateVersion: '1.0.0' });
-            const brief = site.input.about?.trim() || `${topics[selection.seed % topics.length]} for ${site.domain}`;
-            state = { ...(job.edit?.producer ? { visualProducer: job.edit.producer } : {}), schema: 1, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief, modelIdentity: deps.model.identity ?? 'demo',
+            const automatic = job.kind === 'generate' && !site.input.about?.trim();
+            const brief = automatic ? 'Automatic topic pending' : site.input.about?.trim()?site.input.about:job.generation?.topic??'Preserve the existing website topic and facts from its current files.';
+            state = { ...(job.edit?.producer ? { visualProducer: job.edit.producer } : {}), schema: 1, promptVersion: 2, jobId: job.id, siteId: site.id, baseRevision: job.baseRevision, selection, brief, modelIdentity: deps.model.identity ?? 'demo',
                 image: selection.seed % 100 < 10 ? 'assets/network.svg' : null, repairAttempts: 0, transportRetries: 0, transcript: [], toolTranscript: [], manifestId: null, intentId: null,
                 baseManifestId: parent?.manifestId ?? null, parentRevisionId, revisionId: null, revisionCreatedAt: null,
                 instruction: job.edit?.instruction ?? deps.request?.instruction ?? brief, conversation: job.edit?.conversation ?? deps.request?.conversation ?? [],
                 ...(deps.request?.selectedElementId === undefined ? {} : { selectedElementId: deps.request.selectedElementId }) };
             parseState(state, job);
+            await save(automatic ? 'brief' : 'assets');
+        }
+        if (stage === 'brief') {
+            const denied = async (): Promise<never> => { throw new AppError('FORBIDDEN', 'Brief planning cannot mutate website files.'); };
+            const request: ModelRequest = {mode:'plan',site,instruction:'Invent a distinct English IT or crypto concept topic for this domain. Return only a JSON object with one topic field (20–1000 characters). No fixed topic list. Domain and seed are variation cues, not factual evidence. Seed: '+state.selection.seed,
+                instructions:'Invent an English IT or crypto topic. Describe a concept, never fabricate an existing business, reviews, clients, teams, awards, contacts or success metrics. Facts may come only from supplied inputs. Return the requested JSON only.',
+                baseManifestId:null,conversation:[],styleId:state.selection.styleId,operationId:job.id+':brief'+(state.providerRecoveryId?':'+state.providerRecoveryId:''),...(state.planningContinuation ? {continuation:state.planningContinuation as ModelContinuation} : {})};
+            if(job.providerRecovery&&state.providerRecoveryId!==job.providerRecovery.id){
+                if(!canApplyRecovery())throw new AppError('NEEDS_ATTENTION','Brief recovery does not match this checkpoint.');
+                const ticket=job.providerRecovery,previousIdentity=state.modelIdentity!;
+                state.planningContinuation=deps.model.recover!(request,state.planningContinuation as ModelContinuation,{previousIdentity,operationId:job.id+':brief:'+ticket.id,...(state.error?{diagnostic:state.error}:{})});
+                state.providerRecoveries=[...(state.providerRecoveries??[]),{...ticket,previousIdentity}];state.providerRecoveryId=ticket.id;state.modelIdentity=ticket.modelIdentity;delete state.error;
+                request.continuation=state.planningContinuation as ModelContinuation;request.operationId=job.id+':brief:'+ticket.id;await save('brief');
+            }
+            const result=await deps.model.run(request,{list:async()=>[],read:denied,write:denied,replace:denied},activeSignal,{async checkpoint(value){state!.planningContinuation=value;await save('brief');}});
+            let topic:unknown;try{topic=JSON.parse(result.summary).topic;}catch{throw new AppError('NEEDS_ATTENTION','Invalid automatic topic response.');}
+            if(typeof topic!=='string'||topic.trim().length<20||topic.length>1000||/[\x00-\x1f<>]/.test(topic))throw new AppError('NEEDS_ATTENTION','Invalid automatic topic response.');
+            state.brief=topic.trim();state.instruction=state.brief;state.transcript.push(result);delete state.planningContinuation;
             await save('assets');
         }
         if (stage === 'assets') {
@@ -301,13 +323,16 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             checkArtifacts(files);
         }
         async function generate(instruction: string) {
+            if(!state!.continuation&&state!.promptVersion===undefined){state!.promptVersion=2;await save(stage);}
             function modelRequest(): ModelRequest {
                 const request: ModelRequest = { mode: job.kind, site: { ...site!, input: { ...site!.input, about: state!.brief } }, instruction,
                     baseManifestId: state!.baseManifestId, conversation: state!.conversation, styleId: state!.selection.styleId,
                     operationId: `${job.id}:${state!.repairAttempts}${state!.providerRecoveryId ? ':' + state!.providerRecoveryId : ''}`,
                     ...(state!.continuation ? { continuation: state!.continuation } : {}),
                     ...(state!.selectedElementId === undefined ? {} : { selectedElementId: state!.selectedElementId }) };
-                request.instructions = job.kind === 'edit' ? editPrompt(request) : generatePrompt(request);
+                // Pre-existing continuations bind the original prompt; finish them without changing the provider replay binding.
+                const legacy = !!state!.continuation && state!.promptVersion === undefined;
+                request.instructions = job.kind === 'edit' ? editPrompt(request, legacy) : generatePrompt(request, legacy);
                 return request;
             }
             if (job.providerRecovery && state!.providerRecoveryId !== job.providerRecovery.id) {
@@ -410,6 +435,10 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                 if (!validReport(report))
                     throw new AppError('INVALID_INPUT', 'Invalid validation report.');
                 state.validation = report;
+                if(report.ok&&job.kind==='generate'){
+                    state.composition=compositionSignature(files);
+                    state.similarity=deps.compareComposition?await deps.compareComposition(state.composition as string[],job):{score:0,compared:0,repeated:false};
+                }
                 if (report.ok) {
                     await save('archive');
                     break;
@@ -453,7 +482,8 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                 if (deps.publication.settlement)
                     throw new AppError('CONFLICT', 'Сервер ещё не подтвердил установку версии.');
                 await check();
-                await deps.revisions.put({ id: state.revisionId!, siteId: site.id, parentId: state.parentRevisionId, manifestId: state.manifestId!, kind: 'published', createdAt: state.revisionCreatedAt! });
+                const initial=await deps.revisions.get(state.revisionId!);
+                await deps.revisions.put(initial ?? { id: state.revisionId!, siteId: site.id, parentId: state.parentRevisionId, manifestId: state.manifestId!, kind: 'published', createdAt: state.revisionCreatedAt! });
                 const publishedPatch = { publishedId: state.revisionId, draftId: null, generationStatus: 'completed' };
                 if (deps.sites.settlePublication)
                     await deps.sites.settlePublication(site.id, job.baseRevision, publishedPatch, { id: state.intentId!, siteId: site.id, revisionId: state.revisionId!, manifestId: state.manifestId!, settledAt: deps.clock.now(), verifiedAt: null, settlement: 'settled', origin: 'generation', mode: 'demo' }, lease);

@@ -1,3 +1,7 @@
+import {jobView} from '../../../packages/contracts/src/http.js';
+import {sitePagePrefix,encodeCursor,filterBinding} from '../../../packages/core/src/site-pagination.js';
+import {compareCompositions} from '../../../packages/core/src/composition.js';
+import {registryProjection} from '../../../packages/contracts/src/registry.js';
 import {localUsage,localHealth} from '../../../packages/adapters/src/local-monitoring.js';
 import { browserLaunchOptions } from './browser-launch.js';
 import type {NativePersistencePermit} from '../../../packages/adapters/src/native-persistence.js';
@@ -55,7 +59,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     const queue = await createLocalQueue(root, clock, database), artifacts = await createLocalArtifacts(join(root, 'artifacts'));
     const revisions = await createLocalRevisions(root, database), checkpoints = await createCheckpointStore(join(root, 'checkpoints'), clock);
     const catalog = await createLocalCatalog(sourceRoot, root), validationRoot = await privateDirectory(join(root, 'validation'));
-    const batches = new LocalBatches(database), imports = new LocalImportResources(batches);
+    const batches = new LocalBatches(database,catalog), imports = new LocalImportResources(batches);
+    const jobAborts=new Map<string,AbortController>();
     const abort = new AbortController(), active = new Set<Promise<void>>();
     const previews = new Set<{
         browser: Browser;
@@ -76,7 +81,10 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
     let managedMode = false;
     const deps: WorkerDeps & {
         queue: typeof queue;
-    } = { readValidationScreenshot: async (id) => {
+    } = { compareComposition:async(signature,job)=>{
+            const rows=database.sql.prepare("select e.data from jobs self join batch_rows me on me.site_id=self.site_id join batch_rows r on r.batch_id=me.batch_id and r.row_number between me.row_number-16 and me.row_number+16 join jobs j on j.site_id=r.site_id and json_extract(j.data,'$.kind')='generate' join checkpoint_evidence e on e.id=json_extract(j.data,'$.checkpointId') where self.id=? and j.id<>self.id and j.batch_id=self.batch_id order by abs(r.row_number-me.row_number),r.row_number limit 16").all(job.id);
+            return compareCompositions(signature,rows.map(r=>JSON.parse(String(r.data)).state.composition));
+        },readValidationScreenshot: async (id) => {
             if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
                 throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.');
             return readRegular(await safeFile(root, id), 8000000);
@@ -167,10 +175,11 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                     await queue.finish(claimed.lease, 'paused');
                     break;
                 }
-                const work = runJob(claimed.job, claimed.lease, { ...deps, sites: { ...sites, compareAndSet: (id, expected, patch) => sites.workerCompareAndSet(id, expected, patch, claimed.lease) } }, AbortSignal.any([abort.signal, credentialsAbort.signal]))
+                const jobAbort=new AbortController();jobAborts.set(claimed.job.id,jobAbort);
+                const work = runJob(claimed.job, claimed.lease, { ...deps, sites: { ...sites, compareAndSet: (id, expected, patch) => sites.workerCompareAndSet(id, expected, patch, claimed.lease) } }, AbortSignal.any([abort.signal, credentialsAbort.signal,jobAbort.signal]))
                     .then(async () => { await editing.recover(claimed.job.siteId); await updateUsage(claimed.job.id); })
-                    .catch(error => console.error('Worker job failed:', String(error)))
-                    .finally(() => active.delete(work));
+                    .catch(async error => {if(error instanceof AppError&&error.code==='STALE_LEASE'&&(await queue.get(claimed.job.id))?.state==='cancelled')return;console.error('Worker job failed:',String(error));})
+                    .finally(() => {jobAborts.delete(claimed.job.id);active.delete(work);});
                 active.add(work);
             }
         })().finally(() => { pumping = null; });
@@ -332,7 +341,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                             let recovery: typeof job.providerRecovery;
                             if (job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
                                 const saved = await checkpoints.load(job.checkpointId);
-                                if (saved.checkpoint.jobId === job.id && saved.state.siteId === job.siteId && ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') && deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                                if (saved.checkpoint.jobId === job.id && saved.state.siteId === job.siteId && ['brief','generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') && deps.model.canRecover?.(saved.checkpoint.stage==='brief'?saved.state.planningContinuation:saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
                                     recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
                             }
                             if (job.state === 'needs_attention' && deps.model.identity && !recovery)
@@ -415,7 +424,9 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                         case 'device.status': return { mode, available: mode !== 'blocked' && !configuring, activeJobs: active.size, maxJobs: 2, model: modelName, imageModel, images: imageModel ? 'enabled' : 'disabled', storage: 'local', publication: 'demo', ...(usage ? { usage } : {}) };
                         case 'site.list': {
                             const page = await sites.list(principal, p.cursor as string | undefined, Number(p.limit ?? 50), { ...(p.domain ? { domain: String(p.domain) } : {}), ...(p.status ? { status: String(p.status) } : {}), ...(p.batchId ? { batchId: String(p.batchId) } : {}) }), items = page.items;
-                            return { items: await Promise.all(items.map(async (site) => ({ ...site, job: await queue.current(site.id) }))), nextCursor: page.nextCursor };
+                            const all=await Promise.all(items.map(async(site)=>{const job=await queue.current(site.id),e=job?.checkpointId?database.sql.prepare('select data from checkpoint_evidence where id=?').get(job.checkpointId):null,operation=database.sql.prepare('select kind from operations where site_id=?').get(site.id);return {...site,job:job?jobView(job):null,operation:operation?.kind??null,registry:registryProjection(site,job,e?JSON.parse(String(e.data)).state:undefined)};})),prefix=sitePagePrefix(all,s=>s,100);
+                            const filters={...(p.domain?{domain:String(p.domain)}:{}),...(p.status?{status:String(p.status)}:{}),...(p.batchId?{batchId:String(p.batchId)}:{})},last=prefix.at(-1),seq=last?database.sql.prepare('select seq from sites where id=?').get(last.id)?.seq:undefined;
+                            return {items:prefix,nextCursor:prefix.length<all.length&&seq?encodeCursor(String(seq),filterBinding(principal,filters)):page.nextCursor};
                         }
                         case 'site.create': {
                             if (p.referenceId)
@@ -434,6 +445,11 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                                 throw new AppError('NOT_FOUND', 'Задание не найдено.');
                             return job;
                         }
+                        case 'job.cancel': {
+                            const job=await queue.current(String(p.siteId));if(!job)throw new AppError('NOT_FOUND','Задание не найдено.');
+                            if(job.state==='completed')throw new AppError('CONFLICT','Задание уже завершено.');
+                            await queue.cancel(job.id);jobAborts.get(job.id)?.abort();await editing.recover(job.siteId);return {ok:true};
+                        }
                         case 'job.retry': {
                             const job = await queue.current(p.siteId as string);
                             if (!job)
@@ -444,8 +460,8 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
                             if (job.kind === 'generate' && job.state === 'needs_attention' && job.checkpointId && deps.model.identity && deps.model.recover) {
                                 const saved = await checkpoints.load(job.checkpointId);
                                 if (saved.checkpoint.jobId === job.id && saved.state.jobId === job.id && saved.state.siteId === job.siteId && saved.state.baseRevision === job.baseRevision &&
-                                    ['generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') &&
-                                    deps.model.canRecover?.(saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
+                                    ['brief','generate', 'validate'].includes(saved.checkpoint.stage) && (!record(saved.state.imageRun) || saved.state.imageRun.status !== 'pending') &&
+                                    deps.model.canRecover?.(saved.checkpoint.stage==='brief'?saved.state.planningContinuation:saved.state.continuation, typeof saved.state.error === 'string' ? saved.state.error : undefined))
                                     recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity: deps.model.identity };
                             }
                             await queue.retry(job.id, recovery);

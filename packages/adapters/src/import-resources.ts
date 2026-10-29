@@ -217,7 +217,7 @@ export class LocalImportResources {
                 });
                 await new Promise<void>(resolve => setImmediate(resolve));
             }
-            db.transaction(() => { const draft = this.batches.read(actor, id, true); draft.summary.state = 'preview'; this.batches.save(draft); r.complete = true; assertLocalPayload(db.sql, { kind: 'resource', id: r.id }); db.sql.prepare("update payload_inventory set state='available' where kind='resource' and id=?").run(r.id); db.sql.prepare('update resources set data=? where id=?').run(JSON.stringify(r), id); });
+            db.transaction(() => { const current = this.resource(actor, id), draft = this.batches.read(actor, id, true); if (current.complete || draft.summary.state !== 'uploading' || draft.hash !== r.sha256) return; draft.summary.state = 'preview'; this.batches.save(draft); r.complete = true; assertLocalPayload(db.sql, { kind: 'resource', id: r.id }); db.sql.prepare("update payload_inventory set state='available' where kind='resource' and id=?").run(r.id); db.sql.prepare('update resources set data=? where id=?').run(JSON.stringify(r), id); });
             return this.batches.get(actor, id);
         }
         if (method === 'import.update') {

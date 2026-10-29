@@ -153,7 +153,7 @@ export class PostgresPublication {
             const saved = await this.store.load(r.binding.checkpointId);
             if (saved.state.revisionId !== r.binding.revisionId || saved.state.manifestId !== r.binding.manifestId || saved.checkpoint.jobId !== r.origin_job_id || !Number.isSafeInteger(saved.state.revisionCreatedAt))
                 throw new AppError('CONFLICT', 'Снимок публикации изменился.');
-            revision = { id: r.binding.revisionId, siteId: r.site_id, manifestId: r.binding.manifestId, parentId: saved.state.parentRevisionId as string | null, kind: 'published', createdAt: saved.state.revisionCreatedAt as number };
+            revision ??= { id: r.binding.revisionId, siteId: r.site_id, manifestId: r.binding.manifestId, parentId: saved.state.parentRevisionId as string | null, kind: 'published', createdAt: saved.state.revisionCreatedAt as number };
         }
         if (!revision || revision.siteId !== r.site_id || revision.manifestId !== r.binding.manifestId)
             throw new AppError('CONFLICT', 'Версия публикации не найдена.');

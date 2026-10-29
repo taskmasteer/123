@@ -148,7 +148,7 @@ export class SupabaseRepository {
             throw new AppError('FORBIDDEN', 'Нет доступа.');
         return { userId: actor.userId, role: row.role } as Principal;
     }
-    async insertSiteInTransaction(tx: SqlTransaction, input: SiteInput, actor: Principal, id = randomUUID(), batchId?: string): Promise<Site> {
+    async insertSiteInTransaction(tx: SqlTransaction, input: SiteInput, actor: Principal, id = randomUUID(), batchId?: string, generation?: Job['generation']): Promise<Site> {
         input = parseSiteInput(input);
         const domain = normalizeDomain(input.domain);
         if ((input.about?.length ?? 0) > 8000)
@@ -156,7 +156,7 @@ export class SupabaseRepository {
         const inserted = await tx.query('insert into public.sites(id,domain,owner_id,input) values($1,$2,$3,$4) on conflict(domain) do nothing returning id', [id, domain, actor.userId, { ...input, domain }]);
         if (!inserted.rowCount)
             throw new AppError('DUPLICATE_DOMAIN', 'Домен уже существует.');
-        const job: Job = { id, siteId: id, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0 };
+        const job: Job = { id, siteId: id, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(generation?{generation}:{}) };
         await tx.query('insert into private.jobs(id,site_id,data,batch_id) values($1,$1,$2,$3)', [id, job, batchId ?? null]);
         await tx.query("insert into private.site_operations(site_id,operation_id,kind) values($1,$1,'job')", [id]);
         return (await this.get(id, tx))!;
@@ -172,6 +172,11 @@ export class SupabaseRepository {
         const rows = (await this.pool.query<DbSite>(siteSelect + ` where ($1='admin' or s.owner_id=$2 or exists(select 1 from public.assignments a where a.site_id=s.id and a.user_id=$2) or private.has_batch_assignment(s.id,$2)) and ($3::uuid is null or s.id>$3) and ($5='' or position($5 in s.domain)>0) and ($6='' or coalesce((select j.data->>'state' from private.jobs j where j.site_id=s.id order by case when j.data->>'state' in ('completed','cancelled') then 1 else 0 end,j.id desc limit 1),s.generation_status)=$6) and ($7::uuid is null or exists(select 1 from private.batch_rows b where b.batch_id=$7 and b.site_id=s.id)) order by s.id limit $4`, [actor.role, actor.userId, key, limit + 1, filters.domain ?? '', filters.status ?? '', filters.batchId || null])).rows;
         const page = sitePagePrefix(rows, site, limit);
         return { items: page.map(site), nextCursor: rows.length > page.length ? (filtered ? encodeCursor(page.at(-1)!.id, binding) : page.at(-1)!.id) : null };
+    }
+    async registryRows(siteIds:string[]) {
+        if(siteIds.length>100)throw new AppError('INVALID_INPUT','Слишком большая страница.');
+        const rows=(await this.pool.query("select requested.id site_id,j.data job,e.data->'state' state,case when o.kind='controller' and o.expires_at<=clock_timestamp() then null else o.kind end operation from unnest($1::uuid[]) requested(id) left join lateral(select * from private.jobs where site_id=requested.id order by case when data->>'state' in ('completed','cancelled') then 1 else 0 end,id desc limit 1) j on true left join private.checkpoint_evidence e on e.id=j.checkpoint_id left join private.site_operations o on o.site_id=requested.id",[siteIds])).rows;
+        return new Map(rows.map(r=>[r.site_id,{job:r.job as Job|null,state:r.state as Record<string,unknown>|undefined,operation:r.operation as 'job'|'publication'|'controller'|null}]));
     }
     async current(siteId: string) { return (await this.pool.query('select data from private.jobs where site_id=$1 order by case when data->>\'state\' in (\'completed\',\'cancelled\') then 1 else 0 end,id desc limit 1', [siteId])).rows[0]?.data as Job | undefined ?? null; }
     async acquire(actor: Principal, siteId: string): Promise<Admission> {

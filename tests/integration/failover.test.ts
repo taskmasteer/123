@@ -154,7 +154,8 @@ test('managed HTTP pipeline uploads matching private checkpoints and reserves pu
         expect((await repo.get(site.id))!.publishedId).toBeNull();
         const saved = await store.load(job.checkpointId!);
         expect(saved.state.manifestId).toBeTruthy();
-        expect(saved.state.transcript).toHaveLength(1);
+        expect(saved.state.transcript).toHaveLength(2);
+        expect((await repo.get(site.id))!.draftId).toBe(saved.state.revisionId);
         expect((await pool.query('select binding from private.publication_reservations where origin_job_id=$1', [job.id])).rows[0].binding.checkpointId).toBe(job.checkpointId);
         const reservation = (await pool.query('select * from private.publication_reservations where origin_job_id=$1', [job.id])).rows[0];
         await expect(repo.transaction(tx => queue.settlePublicationInTransaction(tx, reservation.id, 'settled'))).rejects.toMatchObject({ code: 'CONFLICT' });
@@ -162,7 +163,7 @@ test('managed HTTP pipeline uploads matching private checkpoints and reserves pu
         // resolution share this one transaction. No provider success is asserted here.
         await repo.transaction(async (tx) => {
             await tx.query('select id from public.sites where id=$1 for update', [site.id]);
-            await tx.query("insert into public.revisions values($1,$2,null,$3,'published',1)", [reservation.binding.revisionId, site.id, reservation.binding.manifestId]);
+            expect(await repo.revision(reservation.binding.revisionId,tx)).toMatchObject({kind:'draft',manifestId:reservation.binding.manifestId});
             await tx.query('update public.sites set published_id=$2,revision=1 where id=$1', [site.id, reservation.binding.revisionId]);
             await queue.settlePublicationInTransaction(tx, reservation.id, 'settled');
         });

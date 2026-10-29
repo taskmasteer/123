@@ -1,3 +1,4 @@
+import {parseComposition,compareCompositions} from '../../../../packages/core/src/composition.js';
 import { PostgresBatches } from '../../../../packages/adapters/src/postgres-batches.js';
 import { PostgresRetention } from '../../../../packages/adapters/src/postgres-retention.js';
 import { PostgresBackup } from '../../../../packages/adapters/src/postgres-backup.js';
@@ -39,10 +40,10 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             throw new AppError('INVALID_INPUT', 'Invalid claim mode.');
         return queue.claim(workerId, p.mode as 'all' | 'visual' | undefined);
     }
-    const route = /^\/worker\/jobs\/([^/]+)\/(activity|heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo|template)$/.exec(path);
+    const route = /^\/worker\/jobs\/([^/]+)\/(activity|heartbeat|checkpoint|finish|pause-status|pause-boundary|site|publication|snapshot|resource|artifact|revision|catalog|logo|template|composition)$/.exec(path);
     if (!route)
         throw new AppError('NOT_FOUND', 'Маршрут исполнителя не найден.');
-    const fields: Record<string, string[]> = {activity:['segment'], template: ['styleId', 'version', 'path'], logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state','activity'],'pause-boundary':['activity'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
+    const fields: Record<string, string[]> = {composition:['signature'],activity:['segment'], template: ['styleId', 'version', 'path'], logo: ['id'], checkpoint: ['checkpointId', 'expectedCheckpointId'], finish: ['state','activity'],'pause-boundary':['activity'], publication: ['binding'], snapshot: ['id'], resource: ['id', 'kind', 'path'], artifact: ['id'], revision: ['id'] };
     const p = object(body, ['lease', ...(fields[route[2]!] ?? [])]), lease = leaseDto(p.lease);
     if (lease.jobId !== uuid(route[1]) || lease.workerId !== workerId)
         throw new AppError('STALE_LEASE', 'Чужая аренда.');
@@ -72,6 +73,11 @@ export async function jobsRoute(queue: PostgresQueue | undefined, store: R2Store
             const file = await new PostgresImportResources(new PostgresBatches(queue.repository)).readLogo(String(p.id), bound.siteId);
             return new Response(Buffer.from(file.bytes), { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } });
         }
+        case 'composition':return queue.repository.transaction(async tx=>{
+            await queue.assertCurrent(tx,workerId,lease);const signature=parseComposition(p.signature);
+            const peers=(await tx.query("select e.data#>'{state,composition}' signature from private.jobs self join private.batch_rows me on me.site_id=self.site_id join private.batch_rows r on r.batch_id=me.batch_id and r.row_number between me.row_number-16 and me.row_number+16 join private.jobs j on j.site_id=r.site_id and j.data->>'kind'='generate' join private.checkpoint_evidence e on e.id=j.checkpoint_id where self.id=$1 and j.id<>self.id and j.batch_id=self.batch_id order by abs(r.row_number-me.row_number),r.row_number limit 16",[lease.jobId])).rows.map(r=>r.signature);
+            return compareCompositions(signature,peers);
+        });
         case 'catalog': return queue.repository.transaction(async (tx) => {
             await queue.assertCurrent(tx, workerId, lease);
             return (await tx.query("select data from private.catalog where kind='style' order by id")).rows.map(r => r.data);

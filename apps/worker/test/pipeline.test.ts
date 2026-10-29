@@ -137,7 +137,7 @@ test('managed runner executes queued work and graceful pause commits the current
     await runWorker(f.deps, 'runner-device', abort.signal);
     const saved = (await queue.get(jobId))!;
     expect(saved.state).toBe('paused');
-    expect(saved.stage).toBe('assets');
+    expect(saved.stage).toBe('brief');
     expect(saved.checkpointId).not.toBeNull();
     expect(modelCalls).toBe(0);
     await queue.close();
@@ -445,7 +445,7 @@ test('rejects a private checkpoint from another site before invoking the model',
 test('persists the selected illustration across a model quota wait', async () => {
     const f = await fixture('');
     f.job.generation!.seed = 3;
-    f.deps.model = { async run() { throw new AppError('PROVIDER_WAIT', 'Quota wait'); } };
+    f.deps.model = { async run(request) { if(request.mode==='plan')return {summary:JSON.stringify({topic:'An invented concept for reliable event tracing'}),inputTokens:0,outputTokens:0};throw new AppError('PROVIDER_WAIT', 'Quota wait'); } };
     await runJob(f.job, f.lease, f.deps, new AbortController().signal);
     expect(f.job.state).toBe('waiting_provider');
     const saved = await f.deps.checkpoints.load(f.job.checkpointId!);
@@ -535,4 +535,61 @@ test.each(['quota', 'abort'] as const)('resumes the same pending repair after re
     expect(completed.state.repairAttempts).toBe(1);
     expect(completed.state.pendingRepairInstruction).toBeUndefined();
     expect((await f.deps.sites.get(f.site.id))!.publishedId).not.toBeNull();
+});
+
+test.each(['generate', 'edit'] as const)('sends factuality and concept rules in the actual %s provider request', async (mode) => {
+    const facts = 'A research concept for observing event streams.';
+    const f = await fixture(facts);
+    if (mode === 'edit') {
+        const base = await f.deps.artifacts.put(f.site.id, siteFiles('<h1>Research concept</h1>'), '1.0.0');
+        const revision = { id: randomUUID(), siteId: f.site.id, parentId: null, manifestId: base.id, kind: 'published' as const, createdAt: f.deps.clock.now() };
+        await f.deps.revisions.put(revision);
+        const updated = await f.deps.sites.compareAndSet(f.site.id, 0, { publishedId: revision.id });
+        f.job.kind = 'edit'; f.job.baseRevision = updated.revision;
+    }
+    const bodies: any[] = [];
+    f.deps.model = createResponsesModel({ apiKey: 'synthetic', model: 'configured' }, (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: 'Updated content.' }] }] });
+    }) as typeof fetch);
+    await runJob(f.job, f.lease, f.deps, new AbortController().signal);
+    expect(f.job.state).toBe('completed');
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].instructions).toMatch(/reviews.*clients.*teams.*awards.*contacts.*metrics/i);
+    expect(bodies[0].instructions).toMatch(/factual claims.*provided/i);
+    expect(bodies[0].instructions).toMatch(/concept.*concept/i);
+    expect(JSON.parse(bodies[0].input[0].content).about).toBe(facts);
+});
+
+test('automatic model brief is checkpointed before assets and survives a restart at the provider boundary',async()=>{
+ const f=await fixture(''),topic='A concept for tracing cryptographic proofs across distributed event logs',bodies:any[]=[];
+ f.deps.model=createResponsesModel({apiKey:'synthetic',model:'configured'},async(_url,init)=>{const body=JSON.parse(String(init?.body));bodies.push(body);return Response.json({status:'completed',output:[{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:bodies.length===1?JSON.stringify({topic}):'Created the concept site.'}]}],usage:{input_tokens:4,output_tokens:8}});});
+ const abort=new AbortController(),checkpoint=f.deps.queue.checkpoint;
+ f.deps.queue.checkpoint=async(...args)=>{await checkpoint(...args);const s=await f.deps.checkpoints.load(args[1].id);if(s.state.brief===topic&&args[1].stage==='assets')abort.abort();};
+ await runJob(f.job,f.lease,f.deps,abort.signal);
+ expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.brief).toBe(topic);
+ expect(bodies).toHaveLength(1);expect(bodies[0].instructions).toMatch(/invent.*English.*IT.*crypto/i);expect(bodies[0].tools).toEqual([]);
+ const seed=(await f.deps.checkpoints.load(f.job.checkpointId!)).state.selection;
+ f.deps.queue.checkpoint=checkpoint;await runJob(f.job,f.lease,f.deps,new AbortController().signal);
+ expect(f.job.state).toBe('completed');expect(bodies).toHaveLength(2);expect(JSON.parse(bodies[1].input[0].content).about).toBe(topic);
+ expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.selection).toEqual(seed);
+});
+
+test('records a bounded batch composition similarity signal without rejecting a repeated design',async()=>{
+ const f=await fixture();let observed:string[]=[];f.deps.compareComposition=async(signature)=>{observed=signature;return {score:1,compared:1,repeated:true};};
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(observed.length).toBeGreaterThan(0);expect(observed.length).toBeLessThanOrEqual(128);expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.similarity).toEqual({score:1,compared:1,repeated:true});expect(f.job.state).toBe('completed');
+});
+
+test('explicit provider recovery resumes automatic brief planning before generation',async()=>{
+ const f=await fixture('');let calls=0;f.deps.model=createResponsesModel({apiKey:'synthetic',model:'configured'},async()=>{calls++;return calls===1?Response.json({error:{code:'invalid_api_key'}},{status:401}):Response.json({status:'completed',output:[{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:calls===2?JSON.stringify({topic:'A concept for privacy preserving distributed event analysis'}):'Created the concept.'}]}],usage:{input_tokens:2,output_tokens:3}});});
+ await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('needs_attention');expect(f.job.stage).toBe('brief');f.job.providerRecovery={id:randomUUID(),checkpointId:f.job.checkpointId!,modelIdentity:f.deps.model.identity!};await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');expect(calls).toBe(3);
+});
+
+test('legacy checkpoint before its first provider call pins the new prompt version before saving continuation',async()=>{
+ const f=await fixture();f.deps.queue.shouldPause=async()=>true;await runJob(f.job,f.lease,f.deps,new AbortController().signal);delete f.snapshots.get(f.job.checkpointId!)!.state.promptVersion;f.deps.queue.shouldPause=async()=>false;
+ const abort=new AbortController(),checkpoint=f.deps.queue.checkpoint;let calls=0;f.deps.model=createResponsesModel({apiKey:'synthetic',model:'configured'},async()=>{calls++;return Response.json({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Preserved input facts.'}]}]});});
+ // Keep the same configured identity; only this legacy prompt marker predates the new version.
+ f.snapshots.get(f.job.checkpointId!)!.state.modelIdentity=f.deps.model.identity;
+ f.deps.queue.checkpoint=async(...args)=>{await checkpoint(...args);if((await f.deps.checkpoints.load(args[1].id)).state.continuation)abort.abort();};
+ await runJob(f.job,f.lease,f.deps,abort.signal);expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.promptVersion).toBe(2);f.deps.queue.checkpoint=checkpoint;await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');expect(calls).toBe(1);
 });

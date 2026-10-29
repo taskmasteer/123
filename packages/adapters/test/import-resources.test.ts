@@ -109,3 +109,21 @@ it('accepts legal Adam7 passes, RGBA16 scanlines and the maximum supported width
         expect(PNG.sync.read(bytes)).toMatchObject({ width, height });
     }
 });
+
+it('overlapping prepare cannot rewind a batch committed after the first preview', async () => {
+ const root = await mkdtemp(join(tmpdir(), 'sf-prepare-race-')), db = await openLocalDatabase(root), b = new LocalBatches(db), service = new LocalImportResources(b);
+ const bytes=Buffer.from('domain,about\na.test,First\n'), call=(m:string,p:unknown)=>service.request(owner,m,p) as Promise<any>;
+ let releaseA!:()=>void,releaseB!:()=>void,entered=0; const original=setImmediate;
+ try {
+  const {id}=await call('resource.begin',{name:'race.csv',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
+  await call('resource.chunk',{id,index:0,base64:bytes.toString('base64')});
+  const spy=vi.spyOn(globalThis,'setImmediate').mockImplementation(((callback:()=>void)=>{ entered++; if(entered===1)releaseA=callback;else releaseB=callback;return {} as any;}) as typeof setImmediate);
+  const a=call('import.prepare',{id}), c=call('import.prepare',{id});
+  while(entered<2)await new Promise<void>(r=>original(r));
+  spy.mockRestore(); releaseA(); const preview=await a;
+  await call('import.commit',{id,revision:preview.revision,requestKey:'race-commit'});
+  releaseB(); expect(await c).toMatchObject({state:'active'});
+  expect(await b.get(owner,id)).toMatchObject({state:'active'});
+  expect(db.sql.prepare('select count(*) n from sites').get()!.n).toBe(1);
+ } finally { vi.restoreAllMocks();await db.close();await rm(root,{recursive:true,force:true}); }
+});

@@ -144,7 +144,8 @@ test('real local queue, checkpoints and revision indirection resume after all ad
     expect(waiting.state).toBe('waiting_provider');
     const saved = await checkpoints.load(waiting.checkpointId!);
     expect(saved.state.selection).toEqual(planned.generation);
-    expect(await revisions.get(saved.state.revisionId as string)).toBeNull();
+    expect(await revisions.get(saved.state.revisionId as string)).toMatchObject({kind:'draft',manifestId:saved.state.manifestId});
+    expect((await sites.get(created.id))!.draftId).toBe(saved.state.revisionId);
     await queue.close();
     await sites.close();
     await db.close();

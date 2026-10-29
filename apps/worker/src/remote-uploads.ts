@@ -16,13 +16,32 @@ export async function uploadResources(options: {
     state?: ArtifactFile;
     stage?: string;
     fetch?: typeof fetch;
+    signal?: AbortSignal;
+    timeoutMs?: number;
 }) {
     const transport = options.fetch ?? fetch, base = new URL(options.controlOrigin);
     if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash)
         throw new AppError('INVALID_INPUT', 'Invalid control origin.');
+    const phase = async <T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+        const controller = new AbortController();
+        const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+        const timer = setTimeout(() => controller.abort(new AppError('UNAVAILABLE', 'Upload phase timed out; completion may require reconciliation.')), options.timeoutMs ?? 30000);
+        let abort!: () => void;
+        try {
+            signal.throwIfAborted();
+            return await Promise.race([work(signal), new Promise<never>((_, reject) => {
+                abort = () => reject(signal.reason);
+                signal.addEventListener('abort', abort, { once: true });
+                if (signal.aborted) abort();
+            })]);
+        } finally {
+            clearTimeout(timer);
+            if (abort) signal.removeEventListener('abort', abort);
+        }
+    };
     const files = [...options.files, ...(options.state ? [options.state] : [])];
-    const call = async (path: string, body: unknown) => { const response = await transport(base.origin + path, { method: 'POST', headers: { authorization: 'Bearer ' + options.workerToken, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'error' }); if (!response.ok)
-        throw new AppError(response.status === 409 ? 'STALE_LEASE' : 'UNAVAILABLE', 'Upload control request rejected.'); return response.json() as Promise<unknown>; };
+    const call = async (path: string, body: unknown) => phase(async signal => { const response = await transport(base.origin + path, { method: 'POST', headers: { authorization: 'Bearer ' + options.workerToken, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'error', signal }); if (!response.ok)
+        throw new AppError(response.status === 409 ? 'STALE_LEASE' : 'UNAVAILABLE', 'Upload control request rejected.'); return response.json() as Promise<unknown>; });
     const prepared = object(await call('/uploads/prepare', { lease: options.lease, purpose: options.purpose, templateVersion: options.templateVersion, expectedCheckpointId: options.expectedCheckpointId, files: options.files.map(metadata), ...(options.state ? { state: metadata(options.state), stage: options.stage } : {}) }), ['uploadId', 'expiresAt', 'files']);
     const uploadId = uuid(prepared.uploadId);
     if (integer(prepared.expiresAt) <= Date.now() || !Array.isArray(prepared.files) || prepared.files.length !== files.length)
@@ -32,7 +51,7 @@ export async function uploadResources(options: {
         if (grant.path !== file.path || headers['content-type'] !== file.mediaType || headers['if-none-match'] !== '*' || url.protocol !== 'https:' || !url.hostname.endsWith('.r2.cloudflarestorage.com') || url.username || url.password)
             throw new AppError('INVALID_INPUT', 'Invalid storage capability.');
         string(grant.objectKey, 1000);
-        const result = await transport(url, { method: 'PUT', headers: { 'content-type': file.mediaType, 'if-none-match': '*' }, body: Buffer.from(file.bytes), redirect: 'error' });
+        const result = await phase(signal => transport(url, { method: 'PUT', headers: { 'content-type': file.mediaType, 'if-none-match': '*' }, body: Buffer.from(file.bytes), redirect: 'error', signal }));
         if (!result.ok)
             throw new AppError('UNAVAILABLE', 'Immutable object upload rejected.');
     }

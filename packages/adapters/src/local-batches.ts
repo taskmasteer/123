@@ -1,3 +1,5 @@
+import {batchDirection} from '../../core/src/generation-direction.js';
+import type {LocalCatalog} from './local-catalog.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { AppError } from '../../contracts/src/model.js';
 import type { Principal, Site, Job } from '../../contracts/src/model.js';
@@ -14,7 +16,7 @@ export type LocalDraft = {
     committedRevision?: number;
 };
 export class LocalBatches {
-    constructor(readonly db: LocalDatabase) { }
+    constructor(readonly db: LocalDatabase, readonly catalog?: Pick<LocalCatalog,'list'>) { }
     async assign(actor: Principal, id: string, value: unknown) {
         this.db.transaction(() => {
             authorize(actor, 'admin:manage');
@@ -68,6 +70,7 @@ export class LocalBatches {
         return { batchId, siteIds: this.rows(batchId).flatMap(r => r.siteId ? [r.siteId] : []) };
     }
     async admit(actor: Principal, id: string, maximum = 5000) {
+        const styles=this.catalog?(await this.catalog.list()).styles:undefined;
         const pending = this.db.sql.prepare("select data from batch_rows where batch_id=? and site_id is null and json_array_length(json_extract(data,'$.issues'))=0 order by row_number limit ?").all(id, maximum).map(r => JSON.parse(String(r.data)) as ImportRowView);
         for (const row of pending) {
             const proceed = this.db.transaction(() => {
@@ -85,7 +88,7 @@ export class LocalBatches {
                     const ownerId = String(this.db.sql.prepare('select owner_id from batches where id=?').get(id)!.owner_id);
                     const site: Site = { id: siteId, domain: input.domain, ownerId, assignedUserIds: [], input, revision: 0, draftId: null, publishedId: null, generationStatus: 'queued', domainStatus: 'pending' };
                     insertLocalSite(this.db, site);
-                    insertLocalJob(this.db, { id: siteId, siteId, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0 }, id);
+                    insertLocalJob(this.db, { id: siteId, siteId, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(styles?{generation:batchDirection(styles,id,r.rowNumber,input.referenceId)}:{}) }, id);
                     r.siteId = siteId;
                 }
                 this.putRow(id, r);

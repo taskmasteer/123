@@ -108,7 +108,7 @@ export function createRemoteWorker(options: {
             return value.paused;
         },
     };
-    return { ...local, queue,health:{async claim(signal){const p=object(await call('/worker/health/claim',{},false,signal),['claim','nextWakeAt','serverNow']);return {claim:p.claim===null?null:healthClaim(p.claim),nextWakeAt:integer(p.nextWakeAt),...(p.serverNow===undefined?{}:{serverNow:integer(p.serverNow)})};},async complete(claim,code,signal){const p=object(await call('/worker/health/complete',{siteId:claim.siteId,token:claim.token,generation:claim.generation,code},false,signal),['accepted']);if(typeof p.accepted!=='boolean')throw new AppError('INVALID_INPUT','Некорректный ответ наблюдения.');return {accepted:p.accepted};}}, async bind(job, lease) {
+    return { ...local, queue,health:{async claim(signal){const p=object(await call('/worker/health/claim',{},false,signal),['claim','nextWakeAt','serverNow']);return {claim:p.claim===null?null:healthClaim(p.claim),nextWakeAt:integer(p.nextWakeAt),...(p.serverNow===undefined?{}:{serverNow:integer(p.serverNow)})};},async complete(claim,code,signal){const p=object(await call('/worker/health/complete',{siteId:claim.siteId,token:claim.token,generation:claim.generation,code},false,signal),['accepted']);if(typeof p.accepted!=='boolean')throw new AppError('INVALID_INPUT','Некорректный ответ наблюдения.');return {accepted:p.accepted};}}, async bind(job, lease, signal) {
             let publicationState: Record<string, unknown> | undefined;
             const scoped = (action: string, params: Record<string, unknown> = {}, binary = false) => call(endpoint(lease, action), { lease, ...params }, binary);
             async function loadCheckpoint(id: string) {
@@ -130,6 +130,7 @@ export function createRemoteWorker(options: {
                 return { checkpoint, state, files };
             }
             const bound: WorkerDeps = { ...local, queue,
+                async compareComposition(signature){const value=object(await scoped('composition',{signature}),['score','compared','repeated']);if(typeof value.score!=='number'||!Number.isFinite(value.score)||value.score<0||value.score>1||typeof value.repeated!=='boolean'||value.repeated!==(value.score>=0.9))throw new AppError('INVALID_INPUT','Некорректная оценка сходства.');return {score:value.score,compared:integer(value.compared,0,16),repeated:value.repeated};},
                 async readLogo(assetId, siteId) {
                     if (siteId !== job.siteId)
                         throw new AppError('FORBIDDEN', 'Чужой сайт.');
@@ -154,7 +155,7 @@ export function createRemoteWorker(options: {
                 artifacts: { async put(siteId, files, templateVersion) {
                         if (siteId !== job.siteId)
                             throw new AppError('FORBIDDEN', 'Чужой сайт.');
-                        const uploaded = await uploadResources({ ...options, lease, purpose: 'artifact', expectedCheckpointId: job.checkpointId, files, templateVersion });
+                        const uploaded = await uploadResources({ ...options, ...(signal ? { signal } : {}), lease, purpose: 'artifact', expectedCheckpointId: job.checkpointId, files, templateVersion });
                         return manifestDto(await scoped('artifact', { id: uuid(uploaded.manifestId) }));
                     }, async read(id) {
                         const manifest = manifestDto(await scoped('artifact', { id }));
@@ -182,10 +183,10 @@ export function createRemoteWorker(options: {
                     if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id) || !local.readValidationScreenshot)
                         throw new AppError('UNAVAILABLE', 'Чтение снимков проверки не подключено.');
                     const bytes = await local.readValidationScreenshot(id);
-                    await uploadResources({ ...options, lease, purpose: 'validation', expectedCheckpointId: job.checkpointId, files: [{ path: id, mediaType: 'image/png', bytes }], templateVersion: 'validation-v1' });
+                    await uploadResources({ ...options, ...(signal ? { signal } : {}), lease, purpose: 'validation', expectedCheckpointId: job.checkpointId, files: [{ path: id, mediaType: 'image/png', bytes }], templateVersion: 'validation-v1' });
                 } return report; },
                 checkpoints: { load: loadCheckpoint, async save(current, currentLease, state, files) {
-                        const uploaded = await uploadResources({ ...options, lease: currentLease, purpose: 'checkpoint', expectedCheckpointId: current.checkpointId, files, templateVersion: String((state.selection as any)?.templateVersion ?? 'unknown'), stage: current.stage, state: { path: 'state.json', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(state)) } });
+                        const uploaded = await uploadResources({ ...options, ...(signal ? { signal } : {}), lease: currentLease, purpose: 'checkpoint', expectedCheckpointId: current.checkpointId, files, templateVersion: String((state.selection as any)?.templateVersion ?? 'unknown'), stage: current.stage, state: { path: 'state.json', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(state)) } });
                         publicationState = state;
                         const s = object(await scoped('snapshot', { id: uuid(uploaded.checkpointId) }), ['checkpoint', 'files']);
                         return checkpointDto(s.checkpoint);

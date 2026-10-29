@@ -58,3 +58,19 @@ test('preserved emitted imports include actual modules and fail unresolved or no
   await writeFile(join(root, entry), 'export const run=p=>import(p);');
   await assert.rejects(workspaceClosure(root, entry), /nonliteral/i);
 }));
+
+test('provenance distinguishes an actual clean commit from changed or untracked source bytes',async()=>fixture(async root=>{
+ const {sourceIdentity}=await import('../lib/package-runtime.mjs'), {execFileSync}=await import('node:child_process');
+ const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
+ git('init','-q');await writeFile(join(root,'source.js'),'original');git('add','source.js');git('-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','fixture');
+ const clean=await sourceIdentity(root);assert.equal(clean.revision,git('rev-parse','HEAD'));assert.equal(clean.dirty,false);
+ await writeFile(join(root,'source.js'),'changed');const dirty=await sourceIdentity(root);assert.equal(dirty.dirty,true);assert.match(dirty.fingerprint,/^[a-f0-9]{64}$/);
+ await writeFile(join(root,'new.js'),'new source');assert.notEqual((await sourceIdentity(root)).fingerprint,dirty.fingerprint);
+}));
+test('reachable missing vendor fails inside staged root even with the dependency in an ancestor',async()=>fixture(async root=>{
+ const {verifyStagedDependencies}=await import('../lib/package-runtime.mjs');
+ const stage=join(root,'runtime');await mkdir(join(stage,'node_modules/a'),{recursive:true});await mkdir(join(root,'node_modules/b'),{recursive:true});
+ await writeFile(join(stage,'entry.js'),"import 'a';");await writeFile(join(stage,'node_modules/a/package.json'),JSON.stringify({name:'a',main:'index.js',dependencies:{b:'1.0.0'}}));await writeFile(join(stage,'node_modules/a/index.js'),"require('b')");await writeFile(join(root,'node_modules/b/package.json'),JSON.stringify({name:'b',main:'index.js'}));await writeFile(join(root,'node_modules/b/index.js'),'module.exports=1;');
+ await assert.rejects(verifyStagedDependencies(stage,'entry.js'),/staged|dependency|resolve/i);
+ await mkdir(join(stage,'node_modules/b'),{recursive:true});await writeFile(join(stage,'node_modules/b/package.json'),JSON.stringify({name:'b',main:'index.js'}));await writeFile(join(stage,'node_modules/b/index.js'),'module.exports=1;');await verifyStagedDependencies(stage,'entry.js');
+}));

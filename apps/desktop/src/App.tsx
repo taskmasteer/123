@@ -1,3 +1,4 @@
+import {pollLoop} from './lib/polling.js';
 import { siteCount } from './lib/labels.js';
 import type { SiteFilters } from '../../../packages/contracts/src/model.js';
 import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
@@ -79,21 +80,20 @@ export default function App() {
         }
         setLoading(true);
         let stopped = false;
-        let timer: ReturnType<typeof setTimeout>;
         async function poll() {
             try {
                 const [list, status, currentSession] = await Promise.all([
-                    desktopClient.request<{
+                    section==='Сайты'?desktopClient.request<{
                         items: DesktopSite[];
                         nextCursor?: string | null;
-                    }>('site.list', { ...filters, ...(cursor ? { cursor } : {}) }),
+                    }>('site.list', { ...filters, ...(cursor ? { cursor } : {}) }):Promise.resolve({items:[],nextCursor:null}),
                     desktopClient.request<Device>('device.status'),
                     managed ? desktopClient.request<SessionView>('session') : Promise.resolve(null),
                 ]);
                 if (!stopped) {
                     if (currentSession && session && (currentSession.principal.userId !== session.principal.userId || currentSession.principal.role !== session.principal.role))
                         changePage([null]);
-                    else {
+                    else if(section==='Сайты') {
                         setSites(list.items);
                         setNextCursor(list.nextCursor ?? null);
                         setLoaded(true);
@@ -108,6 +108,7 @@ export default function App() {
                     }
                     setPollError('');
                 }
+                return {active:list.items.some(s=>['queued','running'].includes(s.job?.state??'')),key:JSON.stringify(list.items.map(s=>[s.id,s.revision,s.job?.state,s.job?.stage,s.job?.checkpointId]))};
             }
             catch (error) {
                 if (!stopped) {
@@ -130,16 +131,16 @@ export default function App() {
             finally {
                 if (!stopped) {
                     setLoading(false);
-                    timer = setTimeout(() => void poll(), 600);
+
                 }
             }
         }
-        void poll();
-        return () => { stopped = true; clearTimeout(timer); };
-    }, [refresh, managed, session, cursor, filters]);
+        const stop=pollLoop(async()=>await poll()??{active:false,key:'error'},()=>document.visibilityState!=='hidden',document);
+        return () => { stopped = true; stop(); };
+    }, [refresh, managed, session, cursor, filters,section]);
     async function action(method: string, site: DesktopSite) {
         try {
-            await desktopClient.request(method, method === 'job.retry' ? { siteId: site.id } : { siteId: site.id, revisionId: site.publishedId });
+            await desktopClient.request(method, method.startsWith('job.') ? { siteId: site.id } : { siteId: site.id, revisionId: site.draftId??site.publishedId });
             setActionFailure(current => current?.method === method && current.site.id === site.id ? null : current);
             setRefresh(value => value + 1);
         }
@@ -155,12 +156,12 @@ export default function App() {
         </nav>
         <div className="sidebar-bottom">
           <span className={device?.available ? 'device-dot online' : 'device-dot'} aria-hidden="true"/>
-          <span>{device?.available ? 'Исполнитель доступен' : device ? 'Требуется настройка' : 'Нет связи'}</span>
+          <span>{managed?'Общая очередь':device?.available ? 'Исполнитель доступен' : device ? 'Требуется настройка' : 'Нет связи'}</span>
           <p>{managed ? 'Общий реестр · рабочие устройства' : device?.mode === 'live' ? 'OpenAI · локальное хранение' : device?.mode === 'demo' ? 'Демо — без внешних сервисов' : 'Вызовы модели остановлены'}</p>
         </div>
       </aside>
       <main className={editedSite && section === 'Сайты' ? 'editing-main' : undefined}>
-        <header className="topbar">
+        <header className="topbar"><button onClick={()=>setRefresh(v=>v+1)}>Обновить</button>
           <div>
             <h1>{section === 'Сайты' && editedSite ? editedSite.domain : section}</h1>
             {section === 'Сайты' ? <span className="muted">{managed ? `${siteCount(sites.length)} на странице · ${session?.principal.role ?? 'требуется вход'}` : editedSite ? `Правки сайта · ${device?.mode === 'live' ? 'OpenAI' : 'локальный режим'}` : loaded ? `${siteCount(sites.length)} на странице локального реестра` : 'Загрузка локального реестра'}</span> : null}
@@ -172,7 +173,7 @@ export default function App() {
           {pollError ? <div role="alert" className="error-banner"><strong>Не удалось обновить состояние</strong><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить состояние</button></div> : null}
           {catalogError ? <div role="alert" className="error-banner"><strong>Не удалось загрузить референсы</strong><span>{catalogError}</span><button onClick={() => void loadCatalog().catch(() => { })}>Загрузить референсы повторно</button></div> : null}
           {actionFailure ? <div role="alert" className="error-banner"><strong>Не удалось выполнить операцию</strong><span>{actionFailure.message}</span><button onClick={() => void action(actionFailure.method, actionFailure.site)}>Повторить операцию</button><button onClick={() => setActionFailure(null)}>Закрыть сообщение</button></div> : null}
-          {section === 'Расход ресурсов' && (!managed||session?.capabilities.admin)?<UsagePanel key={managed?session?.principal.userId:'local'}/>:section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Резервные копии' && (!managed || session?.capabilities.admin) ? <BackupSettings key={managed ? session?.principal.userId : 'local'} managed={managed} {...(session ? { principalId: session.principal.userId } : {})}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={device?.mode ?? 'blocked'} onChanged={next => {
+          {section === 'Расход ресурсов' && (!managed||session?.capabilities.admin)?<UsagePanel key={managed?session?.principal.userId:'local'}/>:section === 'Режим работы' ? <Login managed={managed} onStart={() => { setManaged(true); setSession(null); changePage([null]); setCatalog({ styles: [], references: [] }); setDevice(null); setLoaded(false); setPollError(''); setCatalogError(''); }} onConnected={value => { setSession(value); setSection('Сайты'); setRefresh(v => v + 1); }} onLocal={() => { setManaged(false); setSession(null); changePage([null]); setSection('Сайты'); setRefresh(v => v + 1); }}/> : section === 'Резервные копии' && (!managed || session?.capabilities.admin) ? <BackupSettings key={managed ? session?.principal.userId : 'local'} managed={managed} {...(session ? { principalId: session.principal.userId } : {})}/> : section === 'Пачки' ? <Batches key={`${managed ? 'managed' : 'local'}:${session?.principal.userId ?? ''}:${session?.principal.role ?? ''}`} admin={!!session?.capabilities.admin}/> : section === 'Пользователи' && session?.capabilities.admin ? <UsersSettings /> : section === 'Исполнители' && session?.capabilities.admin ? <WorkerList /> : section === 'Подключения' && session?.capabilities.admin ? <IntegrationsSettings /> : section === 'Сайты' ? editedSite ? (<SiteEditor key={editedSite.id} site={editedSite} managed={managed} canPublish={!managed || !!session?.capabilities.publish} {...(session ? { principal: session.principal } : {})} modelMode={managed&&session?.capabilities.edit?'managed':device?.mode ?? 'blocked'} onChanged={next => {
                 if (next)
                     setSites(current => current.map(site => site.id === next.id ? { ...site, ...next } : site));
                 setRefresh(value => value + 1);
@@ -180,7 +181,7 @@ export default function App() {
               <div className="context-line"><span>Реестр доменов</span><span className="muted">{managed ? 'Общие данные · задания выполняют подключённые устройства' : 'Создание → проверка → локальная версия'}</span></div>
               <form className="registry-filters" onSubmit={e => { e.preventDefault(); setFilters(filterDraft); changePage([null]); }}><label>Поиск домена<input value={filterDraft.domain ?? ''} onChange={e => setFilterDraft(p => ({ ...p, domain: e.target.value }))}/></label><label>Состояние сайта<select value={filterDraft.status ?? ''} onChange={e => setFilterDraft(p => ({ ...p, status: e.target.value }))}><option value="">Все состояния</option><option value="queued">В очереди</option><option value="completed">Завершён</option><option value="needs_attention">Нужна проверка</option></select></label><button>Применить фильтры</button></form>
  {usageSiteId?<><button onClick={()=>setUsageSiteId(null)}>Закрыть расход сайта</button><UsagePanel key={`${usageSiteId}:${session?.principal.userId??'local'}:${session?.principal.role??'admin'}`} siteId={usageSiteId}/></>:null}
- {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList onUsage={site=>setUsageSiteId(site.id)} {...(managed && session?.capabilities.publish ? { onPublication: (site: DesktopSite) => setPublicationId(site.id) } : {})} sites={sites} loading={loading} canEdit={!managed || !!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site => managed ? void action('preview.open', site) : setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)}/>}
+ {!loaded && pollError ? <section className="registry unavailable"><h2>Реестр недоступен</h2><p>Список сайтов появится после восстановления связи с исполнителем.</p></section> : <SiteList onUsage={site=>setUsageSiteId(site.id)} {...(managed && session?.capabilities.publish ? { onPublication: (site: DesktopSite) => setPublicationId(site.id) } : {})} sites={sites} loading={loading} onCancel={site=>void action('job.cancel',site)} {...(session?{principal:session.principal}:{})} canEdit={!managed || !!session?.capabilities.edit} canRetry={true} managed={managed} onEdit={site => setEditorId(site.id)} onPreview={site => managed ? void action('preview.open', site) : setPreview(site)} onOpen={site => void action('preview.open', site)} onRetry={site => void action('job.retry', site)}/>}
               {(!managed || session) ? <nav className="row-actions" aria-label={managed ? "Страницы общего реестра" : "Страницы локального реестра"}>
                 <button disabled={loading || pageCursors.length === 1} onClick={() => { setPollError(''); changePage(pageCursors.slice(0, -1)); }}>Предыдущая страница</button>
                 <span aria-live="polite">Страница {pageCursors.length}</span>
@@ -192,7 +193,7 @@ export default function App() {
                 }}>Следующая страница</button>
               </nav> : null}
               {managed && session && publicationSite ? <><button onClick={() => setPublicationId(null)}>Закрыть публикацию</button><PublicationPanel key={publicationSite.id} site={publicationSite} principal={session.principal} onChanged={() => setRefresh(v => v + 1)}/></> : null}
-              <p className="workspace-note">{managed ? (session?.capabilities.publish ? 'Управляемый режим. Генерация требует запущенного устройства. Первая публикация продолжается автоматически при запущенном устройстве; DNS настраивается вручную. Исходники и копии доступны администратору в настольном приложении.' : 'Управляемый режим. Генерация требует запущенного устройства. Внешняя публикация не настроена. Исходники и копии доступны администратору в настольном приложении.') : 'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
+              <p className="workspace-note">{managed ? (session?.capabilities.publish ? 'Управляемый режим. Генерация требует запущенного устройства. Первая публикация продолжается автоматически при запущенном устройстве; DNS настраивается вручную. Исходники и копии доступны администратору в настольном приложении.' : 'Управляемый режим. Генерация требует запущенного устройства. Публикация зависит от настроек и прав доступа. Исходники и копии доступны администратору в настольном приложении.') : 'Локальные версии доступны на этом устройстве. Домены и внешний хостинг в демо не подключены.'}</p>
             </>) : section === 'Референсы' ? <ReferenceLibrary catalog={catalog} onChange={loadCatalog} canManage={!managed || !!session?.capabilities.admin} managed={managed}/> : !managed ? (<><section className="device-panel">
               <h2>{device?.available ? 'Исполнитель доступен' : 'Исполнитель недоступен'}</h2>
               <p>Это устройство создаёт и проверяет локальные сайты.</p>
@@ -228,7 +229,7 @@ function Screenshot({ site, onClose }: {
         setError('');
         void desktopClient.request<{
             dataUrl: string;
-        }>('preview.screenshot', { siteId: site.id, revisionId: site.publishedId, width })
+        }>('preview.screenshot', { siteId: site.id, revisionId: site.draftId??site.publishedId, width })
             .then(result => {
             if (active)
                 setUrl(result.dataUrl);
@@ -238,7 +239,7 @@ function Screenshot({ site, onClose }: {
                 setError(error.message);
         });
         return () => { active = false; };
-    }, [site.id, site.publishedId, width]);
+    }, [site.id, site.draftId,site.publishedId, width]);
     return (<dialog ref={ref} className="screenshot-dialog" onCancel={onClose} aria-labelledby="screenshot-title">
       <div className="preview-header">
         <div><h2 id="screenshot-title">{site.domain}</h2><p className="muted">Проверенный снимок Chromium</p></div>

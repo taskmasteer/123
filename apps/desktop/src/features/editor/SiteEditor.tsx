@@ -1,3 +1,5 @@
+import {pollLoop} from '../../lib/polling.js';
+import {canCancelJob} from '../sites/SiteList.js';
 import React, { useEffect, useState } from 'react';
 import type { ChatMessage, Site, Principal } from '../../../../../packages/contracts/src/model.js';
 import type { Candidate, PublishIntent } from '../../../../../packages/contracts/src/editing.js';
@@ -18,7 +20,7 @@ const statuses: Record<Candidate['status'], string> = { queued: 'В очеред
 export function SiteEditor({ site, onChanged, modelMode, canPublish = true, managed = false, principal }: {
     site: DesktopSite;
     onChanged: (site?: Site) => void;
-    modelMode: 'demo' | 'live' | 'blocked';
+    modelMode: 'demo' | 'live' | 'blocked' | 'managed';
     canPublish?: boolean;
     managed?: boolean;
     principal?: Principal;
@@ -38,7 +40,8 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
     const [busy, setBusy] = useState(false);
     const [refresh, setRefresh] = useState(0);
     const selected = review.candidates.find(candidate => candidate.id === selectedId) ?? review.candidates.at(-1);
-    const active = review.candidates.some(candidate => ['queued', 'running', 'checking', 'failed'].includes(candidate.status)) || review.publication?.state === 'pending';
+    const active = review.candidates.some(candidate => ['queued', 'running', 'checking'].includes(candidate.status)) || review.publication?.state === 'pending'||!!site.operation||['queued','running','paused','waiting_provider'].includes(site.job?.state??'');
+    const cancellable={...site,job:review.candidates.find(c=>['queued','running','checking'].includes(c.status))?.job??site.job} as DesktopSite;
     const canReview = selected?.status === 'ready' && selected.baseRevision === site.revision;
     const hasDraft = !!site.draftId && site.draftId !== site.publishedId;
     const previewable = selected && ['ready', 'accepted', 'conflict'].includes(selected.status);
@@ -46,7 +49,6 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
     const parentIndex = selected ? review.candidates.findIndex(c => c.id === selected.parentRevisionId) : -1;
     useEffect(() => {
         let stopped = false;
-        let timer: ReturnType<typeof setTimeout>;
         async function poll() {
             try {
                 const [next, chat] = await Promise.all([
@@ -58,18 +60,15 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
                     setMessages(chat);
                     setPollError('');
                 }
+                return {active:next.candidates.some(c=>['queued','running','checking'].includes(c.status))||next.publication?.state==='pending',key:JSON.stringify(next)};
             }
             catch (error) {
                 if (!stopped)
                     setPollError((error as Error).message);
             }
-            finally {
-                if (!stopped)
-                    timer = setTimeout(() => void poll(), 700);
-            }
         }
-        void poll();
-        return () => { stopped = true; clearTimeout(timer); };
+        const stop=pollLoop(async()=>await poll()??{active:false,key:'error'},()=>document.visibilityState!=='hidden',document);
+        return () => { stopped = true; stop(); };
     }, [site.id, refresh]);
     async function act(method: string, params: Record<string, unknown>) {
         setBusy(true);
@@ -91,6 +90,7 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
         }
         catch (error) {
             setActionError({ message: (error as Error).message, method });
+            if(['FORBIDDEN','UNAUTHENTICATED'].includes(String((error as {code?:string}).code)))onChanged();
         }
         finally {
             setBusy(false);
@@ -109,7 +109,10 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
         {!managed ? <button className={hasDraft ? 'primary' : ''} disabled={!canPublish || !hasDraft || busy || (active && review.publication?.state !== 'pending')} onClick={() => void act('site.publish', { expectedRevision: review.publication?.state === 'pending' ? review.publication.expectedRevision : site.revision })}>Опубликовать</button> : null}
       </div>
       {managed && canPublish && principal ? <PublicationPanel site={site} principal={principal} onChanged={() => onChanged()}/> : null}
-      {pollError ? <div className="error-banner" role="alert"><span>{pollError}</span><button onClick={() => setRefresh(value => value + 1)}>Обновить чат</button></div> : null}
+      <button onClick={()=>setRefresh(value=>value+1)}>Обновить чат</button>
+      {site.operation==='publication'?<p role="status">Ожидается подтверждение публикации. Черновик доступен для просмотра.</p>:null}
+      {canCancelJob(cancellable,principal,managed)?<button disabled={busy} onClick={()=>void act('job.cancel',{})}>Отменить текущее задание</button>:null}
+      {pollError ? <div className="error-banner" role="alert"><span>{pollError}</span></div> : null}
       {actionError ? <div className="error-banner" role="alert"><span>{actionError.message}</span><button onClick={() => setActionError(null)}>Закрыть сообщение</button></div> : null}
       <VisualEditor key={`${site.id}:${principal?.userId ?? 'demo'}:${managed}`} site={site} {...(principal ? { principal } : {})} {...(pendingVisual ? { pendingSaveId: pendingVisual.id } : {})} blocked={active && !pendingVisual} onChanged={() => onChanged()}/>
       <div className="editor-layout">

@@ -124,3 +124,31 @@ it('projects current registry status across failures, running and pause/resume w
         await rm(root, { recursive: true, force: true });
     }
 });
+
+it('freezes adjacent batch directions before competing workers claim and preserves them on retry',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-directions-')),db=await openLocalDatabase(root),styles=['a','b','c'].map(id=>({id,name:id,version:'1.0.0',enabled:true,referenceIds:[]}));
+ const b=new LocalBatches(db,{list:async()=>({styles,references:[]})}),q=await createLocalQueue(root,{now:()=>1000},db);
+ try{const result=await b.submitBatch(owner,Array.from({length:6},(_,i)=>({rowNumber:i+2,domain:'direction-'+i+'.test'})),'directions');
+ const jobs=result.siteIds.map(id=>JSON.parse(String(db.sql.prepare('select data from jobs where id=?').get(id)!.data)));
+ expect(jobs.every(j=>j.generation)).toBe(true);for(let i=1;i<jobs.length;i++)expect(jobs[i].generation.styleId).not.toBe(jobs[i-1].generation.styleId);
+ const a=(await q.claim('worker-a'))!,c=(await q.claim('worker-b'))!;expect(a.job.generation).not.toEqual(c.job.generation);const pinned=a.job.generation;
+ await q.finish(a.lease,'needs_attention');styles[0]!.enabled=false;await q.retry(a.job.id);expect((await q.claim('worker-a'))!.job.generation).toEqual(pinned);
+ }finally{await q.close();await db.close();await rm(root,{recursive:true,force:true});}
+});
+it('individual running cancellation revokes stale execution while retaining published content',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sf-cancel-')),db=await openLocalDatabase(root),b=new LocalBatches(db),q=await createLocalQueue(root,{now:()=>1000},db),sites=await createLocalState(root,{now:()=>1000},db);
+ try{const result=await b.submitBatch(owner,[{rowNumber:2,domain:'cancel.test'}],'cancel'),id=result.siteIds[0]!,claim=(await q.claim('worker'))!;
+ await q.cancel(claim.job.id);expect((await q.get(id))!.state).toBe('cancelled');await expect(q.heartbeat(claim.lease)).rejects.toMatchObject({code:'STALE_LEASE'});await expect(sites.workerCompareAndSet(id,0,{publishedId:'stale'},claim.lease)).rejects.toMatchObject({code:'STALE_LEASE'});expect((await sites.get(id))!.publishedId).toBeNull();
+ }finally{await q.close();await sites.close();await db.close();await rm(root,{recursive:true,force:true});}
+});
+
+it('checked first draft commits with its checkpoint, survives safe cancellation and fences different same-revision pointers',async()=>{
+ const {runJob}=await import('../../../apps/worker/src/pipeline.js'),{createCheckpointStore}=await import('../../../apps/worker/src/checkpoints.js'),{createLocalArtifacts}=await import('../src/local-artifacts.js'),{createLocalRevisions}=await import('../src/local-revisions.js'),{FakeModel}=await import('../src/fake-model.js');
+ const root=await mkdtemp(join(tmpdir(),'sf-first-draft-')),clock={now:()=>1000},db=await openLocalDatabase(root),sites=await createLocalState(root,clock,db),q=await createLocalQueue(root,clock,db),b=new LocalBatches(db),revisions=await createLocalRevisions(root,db),artifacts=await createLocalArtifacts(join(root,'artifacts'),clock),checkpoints=await createCheckpointStore(join(root,'checkpoints'),clock);
+ try {const batch=await b.submitBatch(owner,[{rowNumber:2,domain:'first-draft.test',about:'A supplied concept for event tracing'}],'first-draft'),claim=(await q.claim('worker'))!;let replayed=false,earlyReplayed=false,earlyReplayError:unknown;
+ const checkpoint=q.checkpoint.bind(q);q.checkpoint=async(...args)=>{await checkpoint(...args);if(!earlyReplayed){earlyReplayed=true;try{await checkpoint(...args);}catch(error){earlyReplayError=error;}}if(args[1].stage==='publication'){if((await sites.get(claim.job.siteId))!.draftId){await checkpoint(...args);replayed=true;}}};
+ await runJob(claim.job,claim.lease,{sites,queue:q,revisions,artifacts,checkpoints,clock,workspace:join(root,'work'),model:new FakeModel(),publication:{advance:async()=> 'waiting_quota'},templates:{load:async()=>[{path:'index.html',mediaType:'text/html',bytes:Buffer.from('<h1 data-topic>Topic</h1>')}]},validate:async()=>({ok:true,issues:[],screenshotIds:[]})},new AbortController().signal);
+ const site=(await sites.get(claim.job.siteId))!;expect(earlyReplayError).toBeUndefined();expect(replayed).toBe(true);expect(site.draftId).toBeTruthy();expect(site.publishedId).toBeNull();expect(site.revision).toBe(0);expect((await revisions.get(site.draftId!))!.kind).toBe('draft');
+ await q.cancel(claim.job.id);expect((await sites.get(site.id))!.draftId).toBe(site.draftId);expect(db.sql.prepare('select 1 from operations where site_id=?').get(site.id)).toBeUndefined();await expect(q.heartbeat(claim.lease)).rejects.toMatchObject({code:'STALE_LEASE'});
+ } finally {await q.close();await sites.close();await db.close();await rm(root,{recursive:true,force:true});}
+});

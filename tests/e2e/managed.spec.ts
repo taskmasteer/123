@@ -52,7 +52,7 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await expect(page.getByRole('button', { name: 'Устройство', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Расход ресурсов', exact: true })).toHaveCount(0);
     const nativeRequests = workerBridge.requests.length;
-    offline = true;
+    offline = true;await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(page.getByText('Нет связи с общим API.', { exact: true })).toBeVisible();
     expect(workerBridge.requests.length).toBe(nativeRequests);
     await page.screenshot({ path: '.local-state/managed-offline-harness.png', fullPage: true });
@@ -91,11 +91,11 @@ test('managed browser harness respects server capabilities and keeps remote fail
     await expect(page.getByText(workerName + ' · пауза', { exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1040, height: 680 });
     await page.screenshot({ path: '.local-state/managed-workers-harness.png', fullPage: true });
-    role = 'user';
+    role = 'user';await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(page.getByRole('button', { name: 'Пользователи', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Расход ресурсов', exact: true })).toHaveCount(0);
     await expect(page.getByLabel('API-ключ OpenAI')).toHaveCount(0);
-    revoked = true;
+    revoked = true;await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(page.getByRole('heading', { name: 'Подключение к общему API' })).toBeVisible();
     await expect(page.getByText('managed.example', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Устройство', exact: true })).toHaveCount(0);
@@ -173,12 +173,12 @@ test('managed registry navigates beyond50, retries a page and resets cursors on 
     await expect(page.getByText('managed-1.example', { exact: true })).toBeVisible();
     await next.click();
     await expect(page.getByText('managed-51.example', { exact: true })).toBeVisible();
-    role = 'user';
+    role = 'user';await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(pager).toContainText('Страница 1');
     await expect(page.getByRole('button', { name: 'Правки managed-1.example', exact: true })).toBeDisabled();
     await next.click();
     await expect(page.getByText('managed-51.example', { exact: true })).toBeVisible();
-    revoked = true;
+    revoked = true;await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(page.getByRole('heading', { name: 'Подключение к общему API' })).toBeVisible();
     revoked = false;
     await login();

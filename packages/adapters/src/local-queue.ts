@@ -25,7 +25,7 @@ export function validJob(value: unknown): value is Job {
         nonemptyString(value.stage) && states.includes(String(value.state)) && Number.isSafeInteger(value.baseRevision) && (value.baseRevision as number) >= 0 &&
         (value.edit === undefined || validEditRequest(value.edit)) &&
         (value.providerRecovery === undefined || validRecovery(value.providerRecovery)) &&
-        (value.checkpointId === null || nonemptyString(value.checkpointId)) && (value.generation === undefined || (record(value.generation) &&
+        (value.checkpointId === null || nonemptyString(value.checkpointId)) && (value.generation === undefined || (record(value.generation) && (value.generation.topic===undefined||typeof value.generation.topic==='string'&&value.generation.topic.length<=300) &&
         Number.isSafeInteger(value.generation.seed) && (value.generation.seed as number) >= 0 && nonemptyString(value.generation.styleId) && nonemptyString(value.generation.templateVersion)));
 }
 export function parseQueueState(value: unknown): State {

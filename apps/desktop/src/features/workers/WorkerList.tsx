@@ -89,7 +89,7 @@ export function WorkerList() {
   <table><thead><tr><th>Устройство</th><th>Последний сигнал</th><th>Сохранённый этап</th><th>Действия</th></tr></thead><tbody>
    {workers.map(w => <tr key={w.id}><td>{w.name}{w.revoked ? ' · отозвано' : w.paused ? ' · пауза' : ''}</td><td>{w.lastHeartbeat === null ? 'Ещё не подключалось' : new Date(w.lastHeartbeat).toLocaleString('ru-RU')}</td><td>{w.jobs.length ? w.jobs.map(j => <p key={j.id}><span>{jobStageLabel(j.stage)} · {jobStateLabel(j.state)}</span> {!['completed', 'cancelled'].includes(j.state) ? <button disabled={busy} onClick={() => void action('job.cancel', { siteId: j.siteId })}>Отменить задание</button> : null}</p>) : 'Нет активных заданий'}</td><td><button disabled={busy || w.revoked} onClick={() => void action(w.paused ? 'worker.resume' : 'worker.pause', { id: w.id })}>{w.paused ? 'Продолжить выдачу' : 'Пауза'}</button><button disabled={busy || w.revoked} onClick={() => void action('worker.revoke', { id: w.id })}>Отозвать</button></td></tr>)}
   </tbody></table>
-  <p>Генерация сохраняет результаты в общем хранилище. Внешняя публикация пока не подключена.</p>
+  <p>Генерация сохраняет результаты в общем хранилище. Внешняя публикация зависит от подключений и настроек установки.</p>
   <p>После сбоя запрос модели может повториться. Расход запросов с неизвестным ответом сохраняется отдельно и не считается нулевым.</p>
   {device ? <ModelSettings device={device} managed onChanged={setDevice}/> : null}
  </section>;

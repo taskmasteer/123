@@ -66,7 +66,7 @@ export async function checkRuntime(root, expected, options = {}) {
     const styles = JSON.parse(await readFile(join(root, 'templates/catalog.json'))), references = JSON.parse(await readFile(join(root, 'references/catalog.json')));
     if (styles.length !== 5 || references.length !== 14) throw new Error('Incomplete pinned catalog');
     for (const style of styles) for (const file of style.files) if (!actual.some(f => f.path === `templates/${style.id}/${file}`)) throw new Error('Missing pinned template');
-    await workspaceClosure(root, 'apps/worker/src/stdio.js');
+    await verifyStagedDependencies(root, 'apps/worker/src/stdio.js');
     for (const file of actual) {
       if (file.type !== 'file') continue;
       const path = join(root, file.path), header = await binaryHeader(path);
@@ -99,4 +99,33 @@ export async function workspaceClosure(root, entry = 'apps/worker/src/stdio.js')
     }
   }
   await visit(entry); return { files: [...files].sort(), packages: [...packages].sort() };
+}
+
+export async function sourceIdentity(root) {
+ const {execFileSync}=await import('node:child_process');
+ const revision=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8',windowsHide:true}).trim();
+ const dirty=!!execFileSync('git',['status','--porcelain','--untracked-files=normal'],{cwd:root,encoding:'utf8',windowsHide:true}).trim();
+ const paths=[...new Set(execFileSync('git',['ls-files','-z','--cached','--others','--exclude-standard'],{cwd:root,encoding:'utf8',windowsHide:true}).split('\0').filter(Boolean))].sort();
+ const hash=createHash('sha256');
+ for(const path of paths){safeRelative(path);hash.update(path+'\0');try{hash.update(sha256(await readFile(join(root,path))));}catch(error){if(error.code!=='ENOENT')throw error;hash.update('<deleted>');}hash.update('\0');}
+ return {revision,dirty,fingerprint:hash.digest('hex')};
+}
+export async function verifyStagedDependencies(root, entry='apps/worker/src/stdio.js') {
+ const closure=await workspaceClosure(root,entry), visited=new Set();root=await realpath(root);
+ async function locate(name,from){
+  if(!/^(@[a-zA-Z0-9._-]+\/)?[a-zA-Z0-9._-]+$/.test(name))throw Error('Invalid staged dependency');
+  let at=from;
+  for(;;){const candidate=join(at,'node_modules',name,'package.json');
+   try{const actual=await realpath(candidate);contained(root,actual);return actual;}catch(error){if(error.code!=='ENOENT')throw error;}
+   if(at===root)break;const next=dirname(at);if(next===at)break;if(next!==root)contained(root,next);at=next;
+  }throw Error('Missing staged dependency: '+name);
+ }
+ async function visit(name,from,optional=false){
+  let file;try{file=await locate(name,from);}catch(error){if(optional&&/Missing staged dependency/.test(error.message))return;throw error;}
+  if(visited.has(file))return;visited.add(file);const pkg=JSON.parse(await readFile(file,'utf8'));
+  for(const dep of Object.keys(pkg.dependencies??{}))await visit(dep,dirname(file),Object.hasOwn(pkg.optionalDependencies??{},dep));
+  for(const dep of Object.keys(pkg.optionalDependencies??{}))if(!Object.hasOwn(pkg.dependencies??{},dep))await visit(dep,dirname(file),true);
+ }
+ for(const name of closure.packages)await visit(name,root);
+ return {modules:closure.files.length,packages:visited.size};
 }

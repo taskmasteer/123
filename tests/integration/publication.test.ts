@@ -668,7 +668,7 @@ it('actual remote runWorker automatically publishes multiple generated sites, re
         };
         await runWorker(remote, worker, AbortSignal.any([abort.signal, AbortSignal.timeout(10000)]));
         expect((await Promise.all(sites.map(s => repo.get(s.id)))).every(s => s!.publishedId), JSON.stringify((await pool.query('select phase,data,settlement from private.provider_publications')).rows)).toBe(true);
-        expect({ creates, promotes, models, lost }).toEqual({ creates: 2, promotes: 2, models: 2, lost: true });
+        expect({ creates, promotes, models, lost }).toEqual({ creates: 2, promotes: 2, models: 4, lost: true });
         for (const site of sites) {
             const job = (await repo.current(site.id))!, lease = leases.get(job.id);
             expect(job.state).toBe('completed');

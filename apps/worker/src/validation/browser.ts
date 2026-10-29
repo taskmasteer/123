@@ -119,7 +119,7 @@ export async function validateSite(files: ArtifactFile[], options: { screenshotR
               const large = Number.parseFloat(style.fontSize) >= 24 || (Number.parseFloat(style.fontSize) >= 18.66 && Number.parseInt(style.fontWeight) >= 700);
               return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) < (large ? 3 : 4.5);
             };
-            const textElements = Array.from(document.querySelectorAll('body *')).filter((element) => visible(element) && Array.from(element.childNodes).some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()));
+            const textElements = [document.body, ...Array.from(document.querySelectorAll('body *'))].filter((element) => visible(element) && Array.from(element.childNodes).some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim()));
             return {
               overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
               unreadable: textElements.some((element) => Number.parseFloat(getComputedStyle(element).fontSize) < 12 || lowContrast(element)),

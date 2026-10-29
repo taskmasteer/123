@@ -16,7 +16,7 @@ it.each(['auth','quota','model'])('explicit Retry recovers %s for the same gener
  }) as typeof fetch;
  const runtime=await createDesktopRuntime(await directory(),resolve('.'),{native:true,transport});const request=(method:string,params:unknown={}):Promise<any>=>runtime.request({id:'recover',version:1,method,params});
  try{
-  await runtime.configure({mode:'live',apiKey:'old-key',model:'configured'});const created=await request('site.create',{domain:failure+'-recovery.test'});
+  await runtime.configure({mode:'live',apiKey:'old-key',model:'configured'});const created=await request('site.create',{domain:failure+'-recovery.test',about:'A supplied research concept for preserved event notes'});
   await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state).toBe('needs_attention');expect(bodies).toHaveLength(2);
   if(failure!=='quota')await runtime.configure({mode:'live',apiKey:'corrected-key',model:failure==='model'?'replacement':'configured'});expect(bodies).toHaveLength(2);
   await request('job.retry',{siteId:created.site.id});await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('completed');
@@ -179,3 +179,10 @@ it.each(['edit.accept', 'site.publish'])('does not close persistence before dela
         spy.mockRestore();
     }
 });
+
+it('contextual running edit cancellation aborts the local model and preserves published content',async()=>{
+ let entered=false,aborted=false;const runtime=await createDesktopRuntime(await directory(),resolve('.'),{transport:async(_url,init)=>{entered=true;return new Promise<Response>((_,reject)=>init!.signal!.addEventListener('abort',()=>{aborted=true;reject(new Error('cancelled synthetic transport'));},{once:true}));}}),request=(method:string,params:unknown={}):Promise<any>=>runtime.request({id:randomUUID(),version:1,method,params});
+ try{const created=await request('site.create',{domain:'cancel-active.test',about:'A supplied concept for preserving published event notes'});await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('completed');const before=(await request('site.list')).items[0];await expect(request('job.cancel',{siteId:before.id})).rejects.toMatchObject({code:'CONFLICT'});
+ await runtime.configure({mode:'live',apiKey:'synthetic',model:'configured'});await request('edit.request',{siteId:before.id,expectedRevision:before.revision,instruction:'Refine current text'});await expect.poll(()=>entered).toBe(true);await request('job.cancel',{siteId:before.id});await expect.poll(()=>aborted).toBe(true);expect((await request('job.status',{siteId:before.id})).state).toBe('cancelled');expect((await request('site.list')).items[0]).toMatchObject({publishedId:before.publishedId,draftId:before.draftId,revision:before.revision});
+ }finally{await runtime.close();}
+},30000);

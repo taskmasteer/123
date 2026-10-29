@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, copyFile, cp, readdir, lstat, readlink, sym
 import { resolve, join, dirname, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { targetInfo, targets, nodeVersion, playwrightVersion, chromiumVersion, chromiumRevision, workspaceClosure, contained, hashFile, sha256, binaryHeader, checkArchitecture, inventoryRuntime } from './package-runtime.mjs';
+import { targetInfo, targets, nodeVersion, playwrightVersion, chromiumVersion, chromiumRevision, workspaceClosure, verifyStagedDependencies, contained, hashFile, sha256, binaryHeader, checkArchitecture, inventoryRuntime } from './package-runtime.mjs';
 import { officialResponse, verifiedArchive, extractZip, extractTarGz, requireSpace } from './package-download.mjs';
 
 export function argumentsFor(argv = process.argv.slice(2)) {
@@ -96,6 +96,7 @@ export async function prepareRuntime(options) {
   await writeFile(join(runtime, 'package.json'), JSON.stringify({ name: 'site-factory-runtime', private: true, type: 'module', version: '0.1.0', engines: { node: '=' + nodeVersion } }, null, 2));
   await writeFile(join(runtime, 'licenses/runtime-dependencies.json'), JSON.stringify(dependencies, null, 2));
   await copyTree(resolve('templates'), join(runtime, 'templates')); await copyTree(resolve('references'), join(runtime, 'references'));
+  await verifyStagedDependencies(runtime);
   await save();
   return { target: options.target, runtime, nodeSha256: node.sha256, modules: closure.files.length, packages: dependencies.packages.length };
 }

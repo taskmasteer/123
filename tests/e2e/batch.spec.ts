@@ -102,7 +102,18 @@ test('managed batch browser keeps action failures visible across successful poll
     await page.getByRole('button', { name: 'Пауза пачки', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Продолжить пачку' })).toBeVisible();
     expect(workerBridge.requests.some(r => r.method === 'resource.begin')).toBe(false);
-    identity = other;
+    identity = other;await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await expect(page.getByText('managed-row.test', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Пачек пока нет.', { exact: true })).toBeVisible();
+});
+
+test('pasted domains and manual rows share staged correction and selective commit',async({page})=>{
+ await page.goto('/');await page.getByRole('button',{name:'Пачки',exact:true}).click();
+ await page.getByLabel('Список доменов').fill('paste-a.test\nBAD DOMAIN\npaste-a.test');await page.getByRole('button',{name:'Проверить список',exact:true}).click();
+ await expect(page.getByText('Корректных строк: 1. С ошибками: 2.')).toBeVisible();
+ await page.getByRole('button',{name:'Изменить строку 3'}).click();await page.getByLabel('Домен в строке 3').fill('paste-b.test');await page.getByRole('button',{name:'Сохранить строку'}).click();
+ await page.getByRole('button',{name:'Запустить корректные строки'}).click();await expect(page.getByText(/Корректных строк: 2/)).toBeVisible();
+ await page.getByRole('button',{name:'Все пачки',exact:true}).click();
+ await page.getByLabel('Домен новой строки').fill('manual-a.test');await page.getByLabel('О сайте новой строки').fill('A concept for secure event tracing');await page.getByRole('button',{name:'Добавить строку',exact:true}).click();await page.getByRole('button',{name:'Проверить строки',exact:true}).click();
+ await expect(page.getByText('A concept for secure event tracing',{exact:true})).toBeVisible();await page.getByRole('button',{name:'Запустить корректные строки'}).click();
 });

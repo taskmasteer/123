@@ -1,3 +1,4 @@
+import {initialDraft,sameRevision} from '../../core/src/initial-draft.js';
 import { AppError } from '../../contracts/src/model.js';
 import {nextActivity} from '../../core/src/activity.js';
 import { commitPostgresProjection, retainedPublicationRevision } from './postgres-retention.js';
@@ -251,16 +252,26 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
     async checkpoint(lease: Lease, checkpoint: Checkpoint, expectedCheckpointId?: string | null, projection?: import('../../contracts/src/recovery.js').CheckpointProjection): Promise<void> {
         await this.repository.transaction(async (tx) => {
             await this.assertCurrent(tx, lease.workerId, lease);
-            const job = (await tx.query('select checkpoint_id from private.jobs where id=$1', [lease.jobId])).rows[0];
+            const job = (await tx.query('select checkpoint_id,data from private.jobs where id=$1', [lease.jobId])).rows[0];
             const saved = (await tx.query("select *,metadata->'checkpoint'=$3::jsonb identical from private.checkpoints where id=$1 and job_id=$2", [checkpoint.id, lease.jobId, checkpoint])).rows[0];
             if (!saved || !saved.identical)
                 throw new AppError('CONFLICT', 'Контрольная точка не совпадает с сохранённой.');
             const predecessor = expectedCheckpointId === undefined ? saved.expected_checkpoint_id : expectedCheckpointId;
             if (saved.expected_checkpoint_id !== predecessor)
                 throw new AppError('CONFLICT', 'Предыдущая контрольная точка не совпадает.');
+            const installDraft=async()=>{
+            if(projection){
+                const site=(await this.repository.get(job.data.siteId,tx))!,revision=initialDraft(job.data,site,projection.evidence);
+                if(revision){const old=await this.repository.revision(revision.id,tx);if(old&&!sameRevision(old,revision))throw new AppError('CONFLICT','Неизменяемый черновик изменился.');
+                    if(!old)await tx.query('insert into public.revisions values($1,$2,$3,$4,$5,$6)',[revision.id,revision.siteId,revision.parentId,revision.manifestId,revision.kind,revision.createdAt]);
+                    if(!site.draftId)await tx.query('update public.sites set draft_id=$2 where id=$1',[site.id,revision.id]);
+                }
+            }
+            };
             if (job.checkpoint_id === checkpoint.id) {
                 if (projection)
                     await commitPostgresProjection(tx, projection, true, lease);
+                await installDraft();
                 return;
             }
             if (job.checkpoint_id !== predecessor || saved.worker_id !== lease.workerId || Number(saved.generation) !== lease.generation)
@@ -270,6 +281,7 @@ export class PostgresQueue implements Queue, LeaseAuthority, WorkerSiteMutation 
                     throw new AppError('CONFLICT', 'Проекция контрольной точки устарела.');
                 await commitPostgresProjection(tx, projection, true, lease);
             }
+            await installDraft();
             await tx.query("update private.payload_inventory set data=data||jsonb_build_object('accepted',true) where kind='checkpoint' and id=$1", [checkpoint.id]);
             await tx.query("update private.jobs set checkpoint_id=$2,data=data||jsonb_build_object('checkpointId',($2::uuid)::text,'stage',$3::text) where id=$1", [lease.jobId, checkpoint.id, checkpoint.stage]);
         });

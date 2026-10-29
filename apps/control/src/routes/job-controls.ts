@@ -34,7 +34,7 @@ export async function retryControlledJob(queue: PostgresQueue, store: R2Store | 
         if (!/^openai:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(modelIdentity))
             throw new AppError('INVALID_INPUT', 'Требуется настроенная модель.');
         const saved = await store.load(job.checkpointId), s = saved.state;
-        if (saved.checkpoint.jobId !== job.id || s.jobId !== job.id || s.siteId !== siteId || s.baseRevision !== job.baseRevision || !['generate', 'validate'].includes(saved.checkpoint.stage) || (record(s.imageRun) && s.imageRun.status === 'pending') || !canRecover(s.continuation, typeof s.error === 'string' ? s.error : undefined))
+        if (saved.checkpoint.jobId !== job.id || s.jobId !== job.id || s.siteId !== siteId || s.baseRevision !== job.baseRevision || !['brief','generate', 'validate'].includes(saved.checkpoint.stage) || (record(s.imageRun) && s.imageRun.status === 'pending') || !canRecover(saved.checkpoint.stage==='brief'?s.planningContinuation:s.continuation, typeof s.error === 'string' ? s.error : undefined))
             throw new AppError('CONFLICT', 'Ошибка не допускает восстановления учётных данных.');
         recovery = { id: randomUUID(), checkpointId: job.checkpointId, modelIdentity };
     }

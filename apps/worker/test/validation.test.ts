@@ -94,6 +94,22 @@ describe('capability preview', () => {
 });
 
 describe('real sandboxed Chromium', () => {
+  // Body-owned text must be checked just like nested text at both viewport widths.
+  it('checks direct body text for readable size and contrast', async () => {
+    for (const css of ['body{font-size:7px}', 'body{color:white;background:white}']) {
+      const report = await validateSite(site('Direct body text', css));
+      expect(report.issues.filter(issue => issue.code === 'readability').map(issue => issue.message)).toEqual([
+        expect.stringContaining('375px'), expect.stringContaining('1440px')
+      ]);
+    }
+    const readable = await validateSite(site('Direct body text'));
+    expect(readable).toMatchObject({ ok: true, issues: [] });
+    expect(readable.screenshotIds).toHaveLength(2);
+    const overridden = await validateSite(site('<p style="font-size:18px;color:#111">Readable child text only</p>', 'body{font-size:7px}'));
+    expect(overridden).toMatchObject({ok:true,issues:[]});expect(overridden.screenshotIds).toHaveLength(2);
+    const nested = await validateSite(site('<p style="font-size:7px">Nested text</p>'));
+    expect(nested.issues.filter(issue => issue.code === 'readability')).toHaveLength(2);
+  }, 30000);
   // Catches browser checks being skipped and responsive regressions at either required width.
   it('accepts a readable responsive site and captures both viewports', async () => {
     const result = await validateSite(site('<h1 id="top">Clear product information</h1><p>Useful tools for growing teams.</p><a href="#top">Back to top</a>'));

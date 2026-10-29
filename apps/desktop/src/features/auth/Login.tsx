@@ -44,7 +44,7 @@ export function Login({managed,onStart,onConnected,onLocal}:{managed:boolean;onS
    else setError((e as Error).message);
   }finally{setBusy(false);}
  }
- return <section className="device-panel"><h2>Подключение к общему API</h2><p>Вход по приглашению. Роль и доступные сайты определяет сервер. Генерация и публикация в управляемом режиме пока недоступны.</p>{error?<p role="alert">{error}</p>:null}
+ return <section className="device-panel"><h2>Подключение к общему API</h2><p>Вход по приглашению. Роль и доступные сайты определяет сервер. Доступные операции зависят от роли и настроек установки. Новые задания могут ожидать включения рабочего устройства.</p>{error?<p role="alert">{error}</p>:null}
  <form onSubmit={e=>void login(e)} className="managed-form">
   <label>Адрес общего API<input name="apiUrl" type="url" placeholder="https://control.example.com" disabled={busy||stage==='password'} required/></label>
   <label>Адрес проекта Supabase<input name="authUrl" type="url" placeholder="https://project.supabase.co" disabled={busy||stage==='password'} required/></label>

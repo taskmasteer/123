@@ -1,3 +1,4 @@
+import {safeTopic} from '../../contracts/src/registry.js';
 import type { ArtifactFile, Checkpoint } from '../../contracts/src/model.js';
 import type { CheckpointProjection, CheckpointEvidence } from '../../contracts/src/recovery.js';
 import { createHash } from 'node:crypto';
@@ -34,13 +35,15 @@ export function projectCheckpointFromFileDigests(checkpoint:Checkpoint,state:Rec
     if (state.jobId !== checkpoint.jobId || typeof state.siteId !== 'string')
         throw new AppError('INVALID_INPUT', 'Контрольная точка принадлежит другому заданию.');
     const safe: Record<string, unknown> = {};
-    for (const key of ['schema', 'jobId', 'siteId', 'baseRevision', 'parentRevisionId', 'revisionId', 'manifestId', 'revisionCreatedAt', 'selection', 'validation', 'visualMap', 'visualProducer'])
+    for (const key of ['schema', 'jobId', 'siteId', 'baseRevision', 'parentRevisionId', 'revisionId', 'manifestId', 'revisionCreatedAt', 'selection', 'validation', 'visualMap', 'visualProducer', 'composition', 'similarity'])
         if (state[key] !== undefined)
             safe[key] = structuredClone(state[key]);
+    safe.topic=safeTopic(state.brief);
+    if(typeof state.error==='string')safe.diagnostic=checkpoint.stage==='publication'?'publication_failed':checkpoint.stage==='validate'?'validation_failed':'generation_failed';
     const sourceDigest = createHash('sha256').update(JSON.stringify(state)).digest('hex'), filesDigest = recoveryDigest(files.map(f => [f.path, f.mediaType, f.size, f.sha256]));
     const semanticCheckpoint = { id: checkpoint.id, jobId: checkpoint.jobId, stage: checkpoint.stage, manifestId: checkpoint.manifestId, createdAt: checkpoint.createdAt };
     const evidence = { version: 1 as const, checkpoint: structuredClone(checkpoint), state: safe, sourceDigest, filesDigest, digest: recoveryDigest([semanticCheckpoint, safe, sourceDigest, filesDigest]) };
-    const visual = record(state.visualProducer), records = [...(Array.isArray(state.transcript) ? state.transcript : []), ...(record(state.continuation) ? [state.continuation] : [])];
+    const visual = record(state.visualProducer), records = [...(Array.isArray(state.transcript) ? state.transcript : []), ...(record(state.continuation) ? [state.continuation] : []),...(record(state.planningContinuation)?[state.planningContinuation]:[])];
     let inputTokens = 0, outputTokens = 0, uncertainRequests = 0, requestPending = false, known = visual;
     for (const item of records)
         if (record(item)) {

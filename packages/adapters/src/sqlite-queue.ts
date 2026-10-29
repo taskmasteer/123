@@ -1,3 +1,5 @@
+import {initialDraft,sameRevision} from '../../core/src/initial-draft.js';
+import {parseRevision} from './local-revisions.js';
 import { AppError } from '../../contracts/src/model.js';
 import type { Clock, Job, Lease } from '../../contracts/src/model.js';
 import { nonemptyString } from '../../contracts/src/inputs.js';
@@ -100,12 +102,24 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
                 const r = owned(lease), j = job(r);
                 if (cp.jobId !== j.id || !nonemptyString(cp.id) || !nonemptyString(cp.stage))
                     throw new AppError('INVALID_INPUT', 'Checkpoint belongs to another job.');
-                if (expected !== undefined && j.checkpointId !== expected)
+                if (expected !== undefined && j.checkpointId !== expected && j.checkpointId !== cp.id)
                     throw new AppError('CONFLICT', 'Checkpoint changed.');
                 if (projection) {
-                    if (projection.evidence.checkpoint.id !== cp.id || projection.usage.predecessor !== (expected ?? j.checkpointId))
+                    if (projection.evidence.checkpoint.id !== cp.id || projection.usage.predecessor !== (expected === undefined ? j.checkpointId : expected))
                         throw new AppError('CONFLICT', 'Проекция не соответствует контрольной точке.');
                     commitLocalProjection(db.sql, projection, true, lease);
+                    if(j.kind==='generate'&&cp.stage==='publication'){
+                    const raw=db.sql.prepare('select data from sites where id=?').get(j.siteId);
+                    const site=raw?JSON.parse(String(raw.data)):null;
+                    if(!site)throw new AppError('NOT_FOUND','Сайт не найден.');
+                    const revision=initialDraft(j,site,projection.evidence);
+                    if(revision){
+                        const old=db.sql.prepare("select data from records where kind='revisions' and id=?").get(revision.id);
+                        if(old&&!sameRevision(parseRevision(JSON.parse(String(old.data))),revision))throw new AppError('CONFLICT','Неизменяемый черновик изменился.');
+                        if(!old)db.sql.prepare('insert into records values(?,?,?,?)').run('revisions',revision.id,site.id,JSON.stringify(revision));
+                        if(!site.draftId)db.sql.prepare('update sites set data=? where id=?').run(JSON.stringify({...site,draftId:revision.id}),site.id);
+                    }
+                    }
                 }
                 db.sql.prepare("update payload_inventory set data=json_set(data,'$.accepted',json('true')) where kind='checkpoint' and id=?").run(cp.id);
                 save(r, { ...j, checkpointId: cp.id, stage: cp.stage });
@@ -140,8 +154,8 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
                 const r = entry(id);
                 if (!r)
                     throw new AppError('NOT_FOUND', 'Job does not exist.');
-                if (job(r).state === 'running')
-                    throw new AppError('CONFLICT', 'Дождитесь завершения текущей правки.');
+                if (job(r).state === 'completed' && job(r).kind === 'generate')
+                    throw new AppError('CONFLICT', 'Задание уже завершено.');
                 r.generation++;
                 save(r, { ...job(r), state: 'cancelled' }, null);
             });

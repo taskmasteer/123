@@ -129,7 +129,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 if (remaining > 0)
                     await timing.delay(remaining, signal);
                 signal.throwIfAborted();
-                const body = { model: config.model, store: false, instructions: request.instructions ?? 'Modify local static website files using the tools. Keep website content in English. Preserve unrelated manual edits. No external requests, frameworks, forms or secrets.', input: state.items, tools: toolsSchema, parallel_tool_calls: false };
+                const body = { model: config.model, store: false, instructions: request.instructions ?? 'Modify local static website files using the tools. Keep website content in English. Preserve unrelated manual edits. No external requests, frameworks, forms or secrets.', input: state.items, tools: request.mode === 'plan' ? [] : toolsSchema, ...(request.mode === 'plan' ? {text:{format:{type:'json_schema',name:'site_brief',strict:true,schema:{type:'object',properties:{topic:{type:'string'}},required:['topic'],additionalProperties:false}}}} : {}), parallel_tool_calls: false };
                 safe(body);
                 state.requestPending = true;
                 await checkpoint();

@@ -25,7 +25,7 @@ export async function runWorker(deps: WorkerDeps, workerId: string, signal: Abor
                 return;
             }
             try {
-                await runJob(claimed.job, claimed.lease, deps.bind ? await deps.bind(claimed.job, claimed.lease) : deps, signal);
+                await runJob(claimed.job, claimed.lease, deps.bind ? await deps.bind(claimed.job, claimed.lease, signal) : deps, signal);
             }
             catch (error) {
                 if (!(error instanceof AppError && error.code === 'STALE_LEASE'))
