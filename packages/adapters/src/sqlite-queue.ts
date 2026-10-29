@@ -5,6 +5,7 @@ import { openLocalDatabase, insertLocalJob, type LocalDatabase } from './local-d
 import { validJob, type LocalQueue } from './local-queue.js';
 import { commitLocalProjection } from './retention-schema.js';
 import {nextActivity} from '../../core/src/activity.js';
+import type { ActivitySegment } from '../../contracts/src/monitoring.js';
 export async function createSqliteQueue(directory: string, clock: Clock, database?: LocalDatabase): Promise<LocalQueue> {
     const db = database ?? await openLocalDatabase(directory);
     let closed = false;
@@ -46,8 +47,21 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
             db.sql.prepare('delete from operations where site_id=? and operation_id=?').run(j.siteId, j.id);
     };
     const batchActive = (r: Stored) => !r.batch_id || db.sql.prepare('select state from batches where id=?').get(r.batch_id)?.state === 'active';
+    /** Caller has checked authority inside its existing synchronous transaction. */
+    const activityInTransaction = (lease: Lease, segment: ActivitySegment): void => {
+        const old = db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);
+        const next = nextActivity(old ? JSON.parse(String(old.data)) : null, lease.jobId, lease.generation, segment);
+        db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId, JSON.stringify(next));
+    };
     return {
-        recordActivity(lease,segment){return run(()=>{owned(lease);if(db.sql.prepare("select 1 from recovery_state where key='quarantine'").get())throw new AppError('CONFLICT','Установка ожидает проверки.');const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,segment);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));});},
+        recordActivity(lease, segment) {
+            return run(() => {
+                owned(lease);
+                if (db.sql.prepare("select 1 from recovery_state where key='quarantine'").get())
+                    throw new AppError('CONFLICT', 'Установка ожидает проверки.');
+                activityInTransaction(lease, segment);
+            });
+        },
         enqueue(j) {
             return run(() => {
                 if (!validJob(j) || j.state !== 'queued' || j.checkpointId !== null)
@@ -103,7 +117,8 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
                 const r = owned(lease);
                 if (!r.pause && batchActive(r))
                     return false;
-                if(activity){const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,activity);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));}
+                if (activity)
+                    activityInTransaction(lease, activity);
                 save(r, { ...job(r), state: 'paused' }, null);
                 return true;
             });
@@ -113,7 +128,8 @@ export async function createSqliteQueue(directory: string, clock: Clock, databas
                 if (!['paused', 'waiting_provider', 'needs_attention', 'completed', 'cancelled'].includes(status))
                     throw new AppError('INVALID_INPUT', 'Invalid final state.');
                 const r = owned(lease);
-                if(activity){const old=db.sql.prepare('select data from job_activity where job_id=?').get(lease.jobId);const next=nextActivity(old?JSON.parse(String(old.data)):null,lease.jobId,lease.generation,activity);db.sql.prepare('insert into job_activity values(?,?) on conflict(job_id) do update set data=excluded.data').run(lease.jobId,JSON.stringify(next));}
+                if (activity)
+                    activityInTransaction(lease, activity);
                 save(r, { ...job(r), state: status }, null);
             });
         },
