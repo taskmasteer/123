@@ -1,26 +1,26 @@
 :root {
   color-scheme:dark;
   --canvas:#000000;
-  --surface:#000000;
-  --surface-alt:#000000;
+  --surface:#0a0a0a;
+  --surface-alt:#171717;
   --code-surface:#000000;
-  --text:#ffdf43;
-  --muted:#ffdf43;
-  --border:#ffdf43;
-  --border-strong:#ffdf43;
-  --border-subtle:#ffdf43;
+  --text:#fafafa;
+  --muted:#a1a1a1;
+  --border:#262626;
+  --border-strong:#404040;
+  --border-subtle:#202020;
   --accent:#ffdf43;
-  --accent-hover:#ffdf43;
+  --accent-hover:#ffe66d;
   --on-accent:#000000;
-  --accent-soft:#000000;
+  --accent-soft:#171717;
   --accent-border:#ffdf43;
-  --success:#ffdf43;
-  --success-soft:#000000;
+  --success:#fafafa;
+  --success-soft:#171717;
   --warning:#ffdf43;
-  --warning-soft:#000000;
-  --danger:#ffdf43;
-  --danger-soft:#000000;
-  --danger-border:#ffdf43
+  --warning-soft:#0a0a0a;
+  --danger:#fafafa;
+  --danger-soft:#171717;
+  --danger-border:#525252
 }
 html { background:var(--canvas) }
 a { color:var(--accent); text-underline-offset:3px }
@@ -55,8 +55,7 @@ button:hover {
   background:var(--canvas)
 }
 button:disabled {
-  opacity:1;
-  border-style:dashed;
+  opacity:.45;
   cursor:wait
 }
 button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible {
@@ -300,7 +299,7 @@ dialog {
   box-shadow:0 16px 64px #00000066
 }
 dialog::backdrop {
-  background:#000000
+  background:#000000b3
 }
 label {
   display:block;
@@ -823,21 +822,22 @@ dialog h2 { font-size:22px; line-height:1.3; letter-spacing:-.35px }
   .registry-filters { padding:14px }
 }
 
-/* Strict two-color application chrome: no gray surfaces or tinted selections. */
-:root { scrollbar-color:var(--accent) var(--canvas) }
-input::placeholder,textarea::placeholder { color:var(--accent); opacity:1; font-style:italic }
-button:not(:disabled):hover { background:var(--accent); color:var(--on-accent) }
+/* Neutral dark surfaces and white typography; yellow is reserved for emphasis. */
+:root { scrollbar-color:var(--border-strong) var(--canvas) }
+input::placeholder,textarea::placeholder { color:var(--muted); opacity:1; font-style:normal }
+button:not(:disabled):not(.primary):not([aria-current]):not([aria-pressed=true]):hover { background:var(--surface-alt); color:var(--text) }
 button[aria-pressed=true],.source-tree button[aria-current=true] { background:var(--accent); color:var(--on-accent) }
-.badge { border:1px solid var(--accent) }
+.source-tree button[aria-current=true] small { color:inherit }
+.badge { border:1px solid var(--border) }
 .error-banner strong { text-decoration:underline; text-underline-offset:3px }
 .chat-message.user { border-left:3px solid var(--accent) }
-input[type=file]::file-selector-button { background:var(--canvas); color:var(--accent); border:1px solid var(--accent); border-radius:4px; padding:6px 10px; margin-right:10px; font:inherit }
-input[type=checkbox],input[type=radio] { appearance:none; width:16px; height:16px; flex:none; display:inline-grid; place-content:center; border:1px solid var(--accent); background:var(--canvas); vertical-align:middle; padding:0 }
+input[type=file]::file-selector-button { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; margin-right:10px; font:inherit }
+input[type=checkbox],input[type=radio] { appearance:none; width:16px; height:16px; flex:none; display:inline-grid; place-content:center; border:1px solid var(--border-strong); background:var(--canvas); vertical-align:middle; padding:0 }
 input[type=radio] { border-radius:50% }
-input[type=checkbox]:checked,input[type=radio]:checked { background:var(--accent) }
+input[type=checkbox]:checked,input[type=radio]:checked { background:var(--accent); border-color:var(--accent) }
 input[type=checkbox]:checked::after { content:''; width:8px; height:5px; border-left:2px solid var(--on-accent); border-bottom:2px solid var(--on-accent); transform:translateY(-1px) rotate(-45deg) }
 input[type=radio]:checked::after { content:''; width:6px; height:6px; border-radius:50%; background:var(--on-accent) }
-progress { appearance:none; background:var(--canvas); border:1px solid var(--accent) }
-progress::-webkit-progress-bar { background:var(--canvas) }
+progress { appearance:none; background:var(--surface-alt); border:0; border-radius:4px; overflow:hidden }
+progress::-webkit-progress-bar { background:var(--surface-alt) }
 progress::-webkit-progress-value { background:var(--accent) }
 progress::-moz-progress-bar { background:var(--accent) }
