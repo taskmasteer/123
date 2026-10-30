@@ -163,12 +163,15 @@ export default function App() {
         </div>
       </aside>
       <main className={editedSite && section === 'Сайты' ? 'editing-main' : undefined}>
-        <header className="topbar"><button onClick={()=>setRefresh(v=>v+1)}>Обновить</button>
+        <header className="topbar">
           <div>
             <h1>{section === 'Сайты' && editedSite ? editedSite.domain : section}</h1>
             {section === 'Сайты' ? <span className="muted">{managed ? `${siteCount(sites.length)} на странице · ${session?.principal.role ?? 'требуется вход'}` : editedSite ? `Правки сайта · ${device?.mode === 'live' ? 'OpenAI' : 'локальный режим'}` : loaded ? `${siteCount(sites.length)} на странице локального реестра` : 'Загрузка локального реестра'}</span> : null}
           </div>
+          <div className="topbar-actions">
+          <button onClick={()=>setRefresh(v=>v+1)}>Обновить</button>
           {section === 'Сайты' ? editedSite ? <button onClick={() => setEditorId(null)}>← Сайты</button> : <button className="primary" disabled={managed && !session} onClick={() => setCreating(true)}>Создать сайт</button> : null}
+          </div>
         </header>
         <div className={editedSite && section === 'Сайты' ? 'workspace editor-workspace' : 'workspace'}>
           <Suspense fallback={<p role="status">Загрузка раздела…</p>}>

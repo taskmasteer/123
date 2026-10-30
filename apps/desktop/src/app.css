@@ -6,8 +6,8 @@
   --code-surface:#111419;
   --text:#f1f3f5;
   --muted:#aeb7c4;
-  --border:#363d48;
-  --border-strong:#505a68;
+  --border:#303640;
+  --border-strong:#48515e;
   --border-subtle:#2b313a;
   --accent:#ffdf43;
   --accent-hover:#ffea80;
@@ -100,19 +100,19 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   flex:none;
   border-radius:9px
 }
-nav {
+.sidebar nav {
   padding:12px 8px;
   display:grid;
   gap:4px
 }
-nav button {
+.sidebar nav button {
   border:0;
   background:transparent;
   text-align:left;
   padding-left:16px;
   height:40px
 }
-nav button[aria-current] {
+.sidebar nav button[aria-current] {
   background:var(--accent-soft);
   color:var(--accent);
   box-shadow:inset 3px 0 var(--accent)
@@ -144,8 +144,9 @@ main {
   width:calc(100% - 184px)
 }
 h1 {
-  font-size:22px;
-  line-height:28px;
+  font-size:26px;
+  line-height:32px;
+  letter-spacing:-.5px;
   font-weight:600;
   margin:0
 }
@@ -187,7 +188,7 @@ p {
 .registry {
   background:var(--surface);
   border:1px solid var(--border);
-  border-radius:4px;
+  border-radius:8px;
   overflow:auto
 }
 table {
@@ -290,8 +291,8 @@ tr:last-child td {
 dialog {
   background:var(--surface);
   border:1px solid var(--border);
-  border-radius:8px;
-  padding:24px;
+  border-radius:12px;
+  padding:28px;
   width:560px;
   max-width:calc(100vw - 48px);
   color:var(--text);
@@ -313,7 +314,7 @@ input:not([type=checkbox]),textarea,select {
   border-radius:4px;
   padding:8px 10px;
   color:var(--text);
-  background:var(--surface);
+  background:var(--code-surface);
   font-weight:400
 }
 textarea {
@@ -790,3 +791,33 @@ button[aria-pressed=true] {
 
 /* Health observations and resource actions stay readable in the existing registry. */
 .site-registry table{table-layout:fixed;white-space:normal}.site-registry th,.site-registry td{padding:12px 10px;overflow-wrap:anywhere;vertical-align:top}.site-registry th:nth-child(1){width:19%}.site-registry th:nth-child(2){width:12%}.site-registry th:nth-child(3){width:18%}.site-registry th:nth-child(4){width:25%}.site-registry th:nth-child(5){width:26%}.site-registry td.row-actions{display:table-cell}.site-registry .row-actions button{margin:2px;white-space:normal}.health-refresh{margin-left:5px;padding:2px 6px}.site-registry small{display:block}
+
+/* Workspace hierarchy: one title, one primary action, quiet supporting controls. */
+.topbar > div:first-child { min-width:0 }
+.topbar h1 { overflow-wrap:anywhere }
+.topbar .muted { display:block; margin-top:4px }
+.topbar-actions { display:flex; align-items:center; gap:10px; flex-shrink:0 }
+.sidebar nav button { color:var(--muted); font-weight:500; border-radius:6px }
+.sidebar nav button:hover { background:var(--surface-alt); color:var(--text) }
+.sidebar nav button[aria-current] { color:var(--accent); font-weight:650; background:var(--accent-soft) }
+.brand { letter-spacing:-.35px }
+.registry-filters { gap:14px; padding:18px; background:var(--surface); border:1px solid var(--border); border-radius:8px }
+.registry-filters label { margin:0; font-size:12px; font-weight:500; color:var(--muted) }
+.registry-filters input,.registry-filters select { min-height:40px; margin:0 }
+.registry-filters > button { min-height:40px }
+.site-registry tbody tr:hover { background:var(--surface-alt) }
+.site-registry .domain { letter-spacing:-.15px }
+.site-registry td small { margin-top:8px; color:var(--muted); line-height:1.55; font-weight:400 }
+.site-registry th { height:44px; font-weight:500 }
+.workspace > nav.row-actions { display:flex; flex-wrap:wrap; gap:10px; padding:16px 0; font-size:12px }
+.workspace > nav.row-actions button { font-weight:500 }
+button:disabled { cursor:default }
+.workspace-note { max-width:78ch; line-height:1.65 }
+dialog h2 { font-size:22px; line-height:1.3; letter-spacing:-.35px }
+.device-panel { border-radius:8px }
+@media(max-width:800px) {
+  h1 { font-size:22px; line-height:28px }
+  .topbar { gap:12px }
+  .topbar-actions { gap:6px }
+  .registry-filters { padding:14px }
+}
