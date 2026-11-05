@@ -92,7 +92,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         workspace: join(root, 'attempts'), validate: async (files, context) => {
             if (!context)
                 throw new AppError('INVALID_INPUT', 'Нет привязки проверки к заданию.');
-            const report = await validateSite(files, { screenshotRoot: validationRoot });
+            const report = await validateSite(files, { screenshotRoot: validationRoot, mentionedUrl:context?.siteInput.mentionedUrl });
             for (const id of report.screenshotIds) {
                 const bytes = await readRegular(await safeFile(root, id), 8000000), payload = { kind: 'screenshot' as const, id, siteId: context.job.siteId, producer: { jobId: context.job.id, workerId: context.lease.workerId, generation: context.lease.generation }, objects: [{ key: id.slice('validation/'.length), size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'image/png' }], createdAt: clock.now(), protectUntil: clock.now() + 600000, state: 'available' as const, firstOrphanAt: null, claimToken: null };
                 database.transaction(() => registerLocalPayload(database.sql, payload));
@@ -109,7 +109,7 @@ export async function createDesktopRuntime(root: string, sourceRoot: string, opt
         }, store: await createLocalEditingStore(root, database), ids: { next: randomUUID } });
     const selectionRuntime = createSelectionRuntime();
     const managedValidationRoot = await privateDirectory(join(root, '.managed-validation'));
-    const managedRuntime = createManagedRuntime(() => ({ ...deps, validate: files => validateSite(files, { screenshotRoot: managedValidationRoot }), readValidationScreenshot: async (id) => {
+    const managedRuntime = createManagedRuntime(() => ({ ...deps, validate: (files,context) => validateSite(files, { screenshotRoot: managedValidationRoot, mentionedUrl:context?.siteInput.mentionedUrl }), readValidationScreenshot: async (id) => {
             if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id))
                 throw new AppError('INVALID_INPUT', 'Неверный снимок проверки.');
             const file = await safeFile(managedValidationRoot, id.slice(11)), bytes = await readRegular(file, 8000000);

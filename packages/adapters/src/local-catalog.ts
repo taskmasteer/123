@@ -46,7 +46,7 @@ export async function createLocalCatalog(sourceRoot: string, privateRoot: string
     async prepare(job, batchIndex, seed, referenceId) {
       if (job.generation) return structuredClone(job);
       if (!Number.isSafeInteger(batchIndex) || batchIndex < 0 || !Number.isSafeInteger(seed) || seed < 0) throw new AppError('INVALID_INPUT', 'Batch position and seed must be nonnegative integers.');
-      const available = (await list()).styles.filter((style) => style.enabled && (referenceId === undefined || style.id === referenceId || style.referenceIds.includes(referenceId)));
+      const available = (await list()).styles.filter((style) => style.enabled && !style.id.startsWith('reference-') && (referenceId === undefined || style.id === referenceId || style.referenceIds.includes(referenceId)));
       if (!available.length) throw new AppError('NOT_FOUND', 'No enabled style matches the selected reference.');
       const selected = available[(batchIndex + seed % available.length) % available.length]!;
       return { ...structuredClone(job), generation: { seed: (seed + batchIndex) >>> 0, styleId: selected.id, templateVersion: selected.version } };

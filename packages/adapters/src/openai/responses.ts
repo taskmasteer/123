@@ -2,11 +2,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { AppError } from '../../../contracts/src/model.js';
 import type { ModelContinuation, ModelPort, ModelRequest } from '../../../contracts/src/model.js';
 import { record } from '../../../contracts/src/inputs.js';
-import { digest, executeCall, toolsSchema, validateContinuation } from './tool-loop.js';
+import { compactReadHistory, digest, executeCall, toolsSchema, validateContinuation } from './tool-loop.js';
 export interface ResponsesConfig {
     apiKey: string;
     model: string;
     imageModel?: string;
+    provider?: 'openai' | 'deepseek';
 }
 export function validateModelConfig(config: ResponsesConfig) {
     if (typeof config.apiKey !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(config.apiKey) || !validModel(config.model) || (config.imageModel !== undefined && !validModel(config.imageModel)))
@@ -49,9 +50,15 @@ export async function readProviderJson(response: Response, maxBytes = 1000000): 
 }
 export function canRecover(value:unknown,diagnostic?:string):boolean {
         if(!record(value)||typeof value.binding!=='string')return false;
-        let state:ModelContinuation;try{state=validateContinuation(value,value.binding);}catch{return false;}
-        if(state.terminal!=='failed'||state.requestPending||state.transportExhausted)return false;
+        let state:ModelContinuation;try{state=validateContinuation(value,value.binding,value.provider === 'deepseek-responses' ? 'deepseek-responses' : 'openai-responses');}catch{return false;}
+          if(state.requestPending||state.transportExhausted)return false;
         const finished=new Set(state.items.filter(item=>item.type==='function_call_output').map(item=>item.call_id));
+          if(diagnostic==='Provider replay exceeded its private storage limit.'&&state.terminal===null){const before=JSON.stringify(state).length;compactReadHistory(state);return JSON.stringify(state).length<before;}
+          if(diagnostic==='Invalid model tool arguments.'&&state.terminal===null&&state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return true;
+          if(diagnostic==='Model response incomplete.'&&state.terminal==='incomplete'&&(state.outputRepairs??0)<3&&state.items.some(item=>item.type==='function_call'&&item.status==='incomplete'&&!finished.has(item.call_id)))return true;
+          if(diagnostic==='Only static site files are allowed.'&&state.terminal===null&&state.items.some(item=>item.type==='function_call'&&item.name==='write'&&!finished.has(item.call_id)))return true;
+          if(diagnostic==='Model response stalled.'&&state.terminal==='stalled'&&state.turns>=48&&!state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return true;
+          if(state.terminal!=='failed')return false;
         if(state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return false;
         // Exact legacy diagnostics allow existing a4af9de checkpoints to recover without reclassifying arbitrary failures.
         return state.recoverable==='account'||state.recoverable==='configuration'||diagnostic==='Provider quota requires account attention.'||
@@ -60,13 +67,20 @@ export function canRecover(value:unknown,diagnostic?:string):boolean {
 
 export function createResponsesModel(config: ResponsesConfig, transport: typeof fetch = fetch, timing = { now: Date.now, delay: (ms: number, signal: AbortSignal) => sleep(ms, undefined, { signal }) }): ModelPort {
     validateModelConfig(config);
-    const bindingFor=(request:ModelRequest,model:string)=>digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, model]);
-    const initialItems=(request:ModelRequest)=>[{type:'message',role:'user',content:JSON.stringify({domain:request.site.domain,about:request.site.input.about,conversation:request.conversation,instruction:request.instruction})}];
-    return { retryOwner: 'adapter', identity: `openai:${config.model}`, canRecover,
+    const provider = config.provider ?? 'openai', continuationProvider = provider === 'deepseek' ? 'deepseek-responses' : 'openai-responses';
+    const bindingFor=(request:ModelRequest,model:string)=>digest([request.operationId ?? request.site.id, request.mode, request.site.id, request.site.revision, request.baseManifestId, request.instruction, request.instructions, request.conversation, request.styleId, model,...(provider==='deepseek'?[provider,request.site.input]:[])]);
+    const initialItems=(request:ModelRequest)=>[{type:'message',role:'user',content:JSON.stringify({...request.site.input,domain:request.site.domain,conversation:request.conversation,instruction:request.instruction})}];
+    return { retryOwner: 'adapter', identity: `${provider}:${config.model}`, canRecover,
         recover(request,previous,context){
-            const previousModel=context.previousIdentity.startsWith('openai:')?context.previousIdentity.slice(7):'';
+            const previousModel=context.previousIdentity.startsWith(provider+':')?context.previousIdentity.slice(provider.length+1):'';
             if(!validModel(previousModel)||!canRecover(previous,context.diagnostic))throw new AppError('NEEDS_ATTENTION','This provider outcome cannot be restarted by account recovery.');
-            const next=validateContinuation(previous,bindingFor(request,previousModel));
+            const next=validateContinuation(previous,bindingFor(request,previousModel),continuationProvider);
+            if(next.terminal==='incomplete'){
+                const finished=new Set(next.items.filter(item=>item.type==='function_call_output').map(item=>item.call_id));
+                next.items=next.items.filter(item=>item.type!=='function_call'||finished.has(item.call_id));
+                next.items.push({type:'message',role:'user',content:'Your last output was truncated and its pending edits were NOT applied. Continue from existing files. Use small replace calls under 6000 characters, one section at a time. Do not rewrite an entire large HTML/CSS file.'});
+                next.outputRepairs=(next.outputRepairs??0)+1;
+            }
             next.binding=bindingFor({...request,operationId:context.operationId},config.model);next.terminal=null;delete next.recoverable;
             if(previousModel!==config.model){
                 next.items=[...initialItems(request),{type:'message',role:'user',content:'Continue from the saved current files. Completed changes are already present. Inspect those files and preserve completed work; do not replay earlier mutations.'}];
@@ -75,12 +89,12 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
             return next;
         }, async run(request, tools, signal, hooks) {
             const binding = bindingFor(request,config.model);
-            let state: ModelContinuation = request.continuation ? validateContinuation(request.continuation, binding) : {
-                provider: 'openai-responses', version: 1, binding, items: [{ type: 'message', role: 'user', content: JSON.stringify({ domain: request.site.domain, about: request.site.input.about, conversation: request.conversation, instruction: request.instruction }) }], turns: 0, retries: 0, retryAt: 0, transportExhausted: false, requestPending: false, inputTokens: 0, outputTokens: 0, responseId: null, terminal: null, summary: '', seen: {}
+            let state: ModelContinuation = request.continuation ? validateContinuation(request.continuation, binding,continuationProvider) : {
+                provider: continuationProvider, version: 1, binding, items: initialItems(request), turns: 0, retries: 0, retryAt: 0, transportExhausted: false, requestPending: false, inputTokens: 0, outputTokens: 0, responseId: null, terminal: null, summary: '', seen: {}
             };
             function safe(value: unknown) { if (JSON.stringify(value).includes(config.apiKey))
                 throw new AppError('NEEDS_ATTENTION', 'Sensitive provider content was blocked.'); }
-            async function checkpoint() { safe(state); if (JSON.stringify(state).length > 1000000)
+            async function checkpoint() { safe(state);compactReadHistory(state); if (JSON.stringify(state).length > 1000000)
                 throw new AppError('NEEDS_ATTENTION', 'Provider replay exceeded its private storage limit.'); await hooks?.checkpoint(structuredClone(state)); }
             async function terminal(kind: NonNullable<ModelContinuation['terminal']>): Promise<never> { state.terminal = kind; await checkpoint(); throw new AppError('NEEDS_ATTENTION', `Model response ${kind}.`); }
             async function retry(response?: Response) {
@@ -121,8 +135,14 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                     state.items.push(output);
                     await checkpoint();
                 }
-                if (state.turns >= 48)
+                if (state.turns >= 48) {
+                    // Budget exhaustion hands files to validation, never directly to publication.
+                    if(request.mode==='generate'){
+                        state.terminal='final';state.summary='Editing budget reached; generated files require validation.';
+                        await checkpoint();continue;
+                    }
                     await terminal('stalled');
+                }
                 const remaining = state.retryAt - timing.now();
                 if (remaining > 30000)
                     throw new AppError('PROVIDER_WAIT', 'Provider requested a longer wait. Retry later.');
@@ -136,7 +156,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 signal.throwIfAborted();
                 let response: Response;
                 try {
-                    response = await transport('https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]) });
+                    response = await transport(provider==='deepseek'?'https://api.deepseek.com/responses':'https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({...body,...(provider==='deepseek'?{reasoning:{effort:'none'},max_output_tokens:16000}:{})}), redirect:'error', signal: AbortSignal.any([signal, AbortSignal.timeout(provider==='deepseek'?120000:60000)]) });
                 }
                 catch {
                     signal.throwIfAborted();
@@ -176,6 +196,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 state.turns++;
                 state.retryAt = 0;
                 state.requestPending = false;
+                const outputStart=state.items.length;
                 state.items.push(...data.output);
                 state.responseId = typeof data.id === 'string' ? data.id : null;
                 if (record(data.usage))
@@ -190,6 +211,15 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 if(data.error!==undefined&&data.error!==null)await terminal('failed');
                 if (content.some(item => record(item) && item.type === 'refusal'))
                     await terminal('refused');
+                const incompleteReason=record(data.incomplete_details)?data.incomplete_details.reason:undefined;
+                if(data.status==='incomplete'&&request.mode==='generate'&&(incompleteReason==='max_output_tokens'||incompleteReason===undefined&&data.output.some(item=>item.type==='function_call'&&item.status==='incomplete'))&&(state.outputRepairs??0)<3){
+                    // No calls from an incomplete response have executed. Keep
+                    // prior successful work and ask for smaller independent edits.
+                    state.items=state.items.slice(0,outputStart);
+                    state.outputRepairs=(state.outputRepairs??0)+1;
+                    state.items.push({type:'message',role:'user',content:'Your response exceeded the output limit. None of its edits were applied. Continue from the current files using small replace calls (under 6000 characters), one section at a time. Preserve existing layout; do not rewrite a whole large file. Always include path, oldText and newText.'});
+                    await checkpoint();continue;
+                }
                 if (data.status !== 'completed')
                     await terminal(data.status === 'incomplete' ? 'incomplete' : data.status === 'cancelled' ? 'cancelled' : 'failed');
                 if (!data.output.some(item => item.type === 'function_call')) {
@@ -199,7 +229,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                         state.terminal = 'final';
                 }
                 await checkpoint();
-                state = validateContinuation(state, binding);
+                state = validateContinuation(state, binding,continuationProvider);
             }
         } };
 }

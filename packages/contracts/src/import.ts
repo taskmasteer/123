@@ -37,7 +37,7 @@ export interface ImportPage {
     items: ImportRowView[];
     nextCursor: string | null;
 }
-export function rowFingerprint(row: ImportRowView) { const r = row.input; return JSON.stringify([row.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.logo ?? '', r.logoAssetId ?? '', row.issues.map(i => [i.rowNumber, i.column, i.code, i.message]), row.siteId]); }
+export function rowFingerprint(row: ImportRowView) { const r = row.input; return JSON.stringify([row.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.layoutReferenceId ?? '', r.logo ?? '', r.logoAssetId ?? '', r.mentionedUrl ?? '', r.mentionedDescription ?? '', row.issues.map(i => [i.rowNumber, i.column, i.code, i.message]), row.siteId]); }
 export interface BatchService {
     submitBatch(actor: Principal, validRows: ImportRow[], requestKey: string): Promise<{
         batchId: string;
@@ -51,8 +51,8 @@ export const importLimits = { sourceBytes: 16 * 1024 * 1024, expandedBytes: 64 *
 export const importMethods: Record<string, string[]> = {
     'resource.begin': ['name', 'size', 'sha256', 'draftId', 'rowNumber', 'revision'],
     'resource.chunk': ['id', 'index', 'base64'], 'import.prepare': ['id'],
-    'import.update': ['id', 'revision', 'rowNumber', 'domain', 'about', 'referenceId'],
+    'import.update': ['id', 'revision', 'rowNumber', 'domain', 'about', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription'],
     'import.commit': ['id', 'revision', 'requestKey'], 'logo.complete': ['id'],
     'batch.retry': ['id', 'rowNumber', 'modelIdentity'], 'batch.assign': ['id', 'userIds'], 'batch.list': ['cursor'], 'batch.get': ['id'], 'batch.rows': ['id', 'cursor', 'status'],
-    'batch.pause': ['id'], 'batch.resume': ['id'], 'batch.cancel': ['id'],
+    'batch.delete':['id','revision'], 'batch.pause': ['id'], 'batch.resume': ['id'], 'batch.cancel': ['id'],
 };

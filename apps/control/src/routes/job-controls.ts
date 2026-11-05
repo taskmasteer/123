@@ -31,7 +31,7 @@ export async function retryControlledJob(queue: PostgresQueue, store: R2Store | 
         if (!store || !job.checkpointId || job.kind !== 'generate')
             throw new AppError('CONFLICT', 'Это задание нельзя возобновить.');
         const modelIdentity = string(p.modelIdentity, 160);
-        if (!/^openai:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(modelIdentity))
+        if (!/^(?:openai|deepseek):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(modelIdentity))
             throw new AppError('INVALID_INPUT', 'Требуется настроенная модель.');
         const saved = await store.load(job.checkpointId), s = saved.state;
         if (saved.checkpoint.jobId !== job.id || s.jobId !== job.id || s.siteId !== siteId || s.baseRevision !== job.baseRevision || !['brief','generate', 'validate'].includes(saved.checkpoint.stage) || (record(s.imageRun) && s.imageRun.status === 'pending') || !canRecover(saved.checkpoint.stage==='brief'?s.planningContinuation:s.continuation, typeof s.error === 'string' ? s.error : undefined))

@@ -8,7 +8,10 @@ export interface SiteInput {
     domain: string;
     about?: string;
     referenceId?: string;
+    layoutReferenceId?: string;
     logoAssetId?: string;
+    mentionedUrl?: string;
+    mentionedDescription?: string;
 }
 export interface Site {
     id: string;
@@ -189,7 +192,7 @@ export interface ModelRequest {
 }
 /** Private, serializable provider replay. Never place this in public chat DTOs. */
 export interface ModelContinuation {
-    provider: 'openai-responses';
+    provider: 'openai-responses' | 'deepseek-responses';
     version: 1;
     binding: string;
     items: Record<string, unknown>[];
@@ -203,6 +206,8 @@ export interface ModelContinuation {
     responseId: string | null;
     /** Prior attempts with unknown token/billing usage; never an estimate of charges. */
     uncertainRequests?: number;
+    /** Bounded recovery of truncated provider outputs, persisted across restarts. */
+    outputRepairs?: number;
     terminal: 'final' | 'refused' | 'incomplete' | 'failed' | 'cancelled' | 'stalled' | null;
     summary: string;
     seen: Record<string, number>;

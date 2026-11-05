@@ -116,7 +116,7 @@ export class PostgresImportResources {
             return this.batches.get(actor, id);
         }
         if (method === 'import.update' || method === 'logo.complete') {
-            const p = object(value, method === 'import.update' ? ['id', 'revision', 'rowNumber', 'domain', 'about', 'referenceId'] : ['id']);
+            const p = object(value, method === 'import.update' ? ['id', 'revision', 'rowNumber', 'domain', 'about', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription'] : ['id']);
             let resource: Resource | undefined;
             if (method === 'logo.complete') {
                 resource = await this.resource(repo.pool, actor, uuid(p.id));
@@ -143,7 +143,7 @@ export class PostgresImportResources {
                     await tx.query('update private.import_resources set data=$2 where id=$1', [resource.id, resource]);
                 }
                 else
-                    for (const field of ['about', 'domain', 'referenceId'] as const)
+                    for (const field of ['about', 'domain', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription'] as const)
                         if (p[field] !== undefined) {
                             if (typeof p[field] !== 'string' || p[field].length > (field === 'domain' ? 253 : field === 'referenceId' ? 100 : 8000))
                                 throw new AppError('INVALID_INPUT', 'Некорректное значение.');
@@ -167,7 +167,7 @@ export class PostgresImportResources {
             const p = object(value, ['id', 'revision', 'requestKey']), id = uuid(p.id), revision = integer(p.revision), key = string(p.requestKey, 100);
             await repo.transaction(async (tx) => {
                 actor = await repo.fresh(tx, actor);
-                const d = await this.batches.read(tx, actor, id, true, true), frozen = hash(Buffer.from(JSON.stringify((await this.batches.rows(id, tx)).map(r => [r.rowNumber, r.input.domain, r.input.about ?? '', r.input.referenceId ?? '', r.input.logo ?? '', r.input.logoAssetId ?? '']))));
+                const d = await this.batches.read(tx, actor, id, true, true), frozen = hash(Buffer.from(JSON.stringify((await this.batches.rows(id, tx)).map(r => [r.rowNumber, r.input.domain, r.input.about ?? '', r.input.referenceId ?? '', r.input.layoutReferenceId ?? '', r.input.logo ?? '', r.input.logoAssetId ?? '', r.input.mentionedUrl ?? '', r.input.mentionedDescription ?? '']))));
                 const old = (await tx.query('select id,payload_hash from private.batches where owner_id=$1 and request_key=$2', [actor.userId, key])).rows[0];
                 if (old) {
                     if (old.id !== id || old.payload_hash !== frozen || d.committedRevision !== revision)
@@ -176,6 +176,7 @@ export class PostgresImportResources {
                 }
                 if (d.summary.state !== 'preview' || d.summary.revision !== revision || !d.summary.validCount)
                     throw new AppError('CONFLICT', 'Нет корректных строк или версия изменилась.');
+                await repo.beforeBatchCommit?.(tx,(await this.batches.rows(id,tx)).filter(r=>!r.issues.length).map(r=>r.input));
                 d.committedRevision = revision;
                 d.summary.state = 'active';
                 await this.batches.save(tx, d);

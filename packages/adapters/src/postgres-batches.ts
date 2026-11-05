@@ -40,7 +40,7 @@ export class PostgresBatches {
         if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestKey) || inputs.length > 5000 || new Set(inputs.map(r => r.rowNumber)).size !== inputs.length)
             throw new AppError('INVALID_INPUT', 'Некорректная пачка.');
         const parsed = validateRows(structuredClone(inputs));
-        const hash = createHash('sha256').update(JSON.stringify(parsed.rows.map(r => [r.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.logo ?? '', r.logoAssetId ?? '']))).digest('hex');
+        const hash = createHash('sha256').update(JSON.stringify(parsed.rows.map(r => [r.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.layoutReferenceId ?? '', r.logo ?? '', r.logoAssetId ?? '', r.mentionedUrl ?? '', r.mentionedDescription ?? '']))).digest('hex');
         const batchId = await this.repository.transaction(async (tx) => {
             actor = await this.repository.fresh(tx, actor);
             authorize(actor, 'site:create');
@@ -76,11 +76,14 @@ export class PostgresBatches {
                 if ((await tx.query('select id from public.sites where domain=$1', [r.input.domain])).rowCount)
                     r.issues = [{ rowNumber: r.rowNumber, column: 'domain', code: 'DUPLICATE_DOMAIN', message: 'Домен уже существует в реестре.' }];
                 else {
+                    // A hosting controller can defer admission until an IPv4 is
+                    // available. No site, model job or partial allocation exists yet.
+                    if(this.repository.canAdmitBatchSite&&!await this.repository.canAdmitBatchSite(tx))return false;
                     // The domain reservation, job, operation and row association commit together.
                     try {
-                        const input = { domain: r.input.domain, ...(r.input.about ? { about: r.input.about } : {}), ...(r.input.referenceId ? { referenceId: r.input.referenceId } : {}), ...(r.input.logoAssetId ? { logoAssetId: r.input.logoAssetId } : {}) };
+                        const input = { domain: r.input.domain, ...(r.input.about ? { about: r.input.about } : {}), ...(r.input.referenceId ? { referenceId: r.input.referenceId } : {}), ...(r.input.layoutReferenceId ? {layoutReferenceId:r.input.layoutReferenceId} : {}), ...(r.input.logoAssetId ? { logoAssetId: r.input.logoAssetId } : {}), ...(r.input.mentionedUrl ? {mentionedUrl:r.input.mentionedUrl,mentionedDescription:r.input.mentionedDescription??''}:{}) };
                         const styles=(await tx.query("select data from private.catalog where kind='style' order by id")).rows.map(r=>r.data);
-                        const generation=styles.length?batchDirection(styles,id,r.rowNumber,input.referenceId):undefined;
+                        const generation=styles.length?batchDirection(styles,id,r.rowNumber,input.layoutReferenceId?'reference-'+input.layoutReferenceId:input.referenceId):undefined;
                         const site = await this.repository.insertSiteInTransaction(tx, input, { ...actor, userId: owner }, randomUUID(), id,generation);
                         r.siteId = site.id;
                     }
@@ -98,6 +101,18 @@ export class PostgresBatches {
         }
     }
     async request(actor: Principal, method: string, value: unknown): Promise<unknown> {
+        if(method==='batch.delete'){
+            const p=object(value,['id','revision']),id=uuid(p.id);
+            await this.repository.transaction(async tx=>{
+                actor=await this.repository.fresh(tx,actor);
+                const draft=await this.read(tx,actor,id,true,true);
+                if(draft.summary.state!=='preview'||draft.summary.revision!==integer(p.revision))throw new AppError('CONFLICT','Удалить можно только незапущенную пачку. Обновите список.');
+                if((await tx.query('select 1 from private.batch_rows where batch_id=$1 and site_id is not null',[id])).rowCount)throw new AppError('CONFLICT','В пачке уже есть созданные сайты.');
+                await tx.query('delete from private.batch_assignments where batch_id=$1',[id]);
+                await tx.query('delete from private.batch_rows where batch_id=$1',[id]);
+                await tx.query('delete from private.batches where id=$1',[id]);
+            });return {ok:true};
+        }
         if (method === 'batch.list') {
             const p = object(value, ['cursor']);
             const cursor = p.cursor === undefined ? null : uuid(p.cursor);

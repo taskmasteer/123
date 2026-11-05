@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { AppError } from '../../../packages/contracts/src/model.js';
 import { projectCheckpoint } from '../../../packages/core/src/usage.js';
 import {ActivityTimer} from './activity.js';
-import type { ArtifactFile, ArtifactStore, ChatMessage, CheckpointStore, Clock, FileTools, Job, Lease, ModelContinuation, ModelPort, ModelRequest, ModelResult, PublicationPort, Queue, RevisionRepository, SiteRepository, ValidationReport } from '../../../packages/contracts/src/model.js';
+import type { ArtifactFile, ArtifactStore, ChatMessage, CheckpointStore, Clock, FileTools, Job, Lease, ModelContinuation, ModelPort, ModelRequest, ModelResult, PublicationPort, Queue, RevisionRepository, SiteRepository, SiteInput, ValidationReport } from '../../../packages/contracts/src/model.js';
 import type { ImageHooks, ImageState } from '../../../packages/adapters/src/openai/images.js';
 import { generatePrompt } from './prompts/generate.js';
 import { editPrompt } from './prompts/edit.js';
@@ -14,8 +14,13 @@ import { artifactMediaType, checkArtifacts } from '../../../packages/core/src/ar
 import { createFileTools } from './files/tools.js';
 import { validateSite } from './validation/browser.js';
 import { createEditableMap } from '../../../packages/core/src/visual/editable-map.js';
+import { validateMentionedLink } from './validation/mentioned-link.js';
 import { patchFiles } from '../../../packages/core/src/visual/html-patch.js';
 export interface WorkerDeps {
+    /** Trusted installation policy, never a model/request-controlled publication toggle. */
+    autoPublish?: boolean;
+    /** Server-owned policy: skip browser quality gates for generated sites. */
+    generationChecks?: 'technical-only';
     compareComposition?:(signature:string[],job:Job)=>Promise<{score:number;compared:number;repeated:boolean}>;
     health?:import('../../../packages/contracts/src/monitoring.js').HealthPort;
     /** Remote ports bind protected reads/writes to this claim, never shared mutable current-job state. */
@@ -42,6 +47,7 @@ export interface WorkerDeps {
     validate?: (files: ArtifactFile[], context?: {
         job: Job;
         lease: Lease;
+        siteInput: SiteInput;
     }) => Promise<ValidationReport>;
     readValidationScreenshot?: (id: string) => Promise<Uint8Array>;
     delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
@@ -422,6 +428,15 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             await save('validate');
         }
         if (stage === 'validate') {
+            if(job.kind==='generate'&&deps.generationChecks==='technical-only'){
+                await check();checkArtifacts(files);
+                if(!files.some(f=>f.path==='index.html'&&f.bytes.length>0))throw new AppError('NEEDS_ATTENTION','Generated site has no index.html.');
+                delete state.pendingRepairInstruction;
+                state.validationPolicy='technical-only';
+                state.validation={ok:true,issues:[],screenshotIds:[]};
+                await save('archive');
+            }
+            else {
             while (true) {
                 // The attempt is charged when scheduled, not again when a provider wait or abort resumes it.
                 if (state.pendingRepairInstruction !== undefined) {
@@ -430,10 +445,13 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                     await save('validate');
                 }
                 await check();
-                const report = deps.validate ? await deps.validate(files, { job, lease }) : await validateSite(files);
+                const report = deps.validate ? await deps.validate(files, { job, lease,siteInput:site.input }) : await validateSite(files,{mentionedUrl:site.input.mentionedUrl});
                 activeSignal.throwIfAborted();
                 if (!validReport(report))
                     throw new AppError('INVALID_INPUT', 'Invalid validation report.');
+                report.issues.push(...validateMentionedLink(files,site.input));
+                if(site.input.layoutReferenceId && files.some(f=>f.mediaType==='text/html' && /\bContent \d+\b/.test(new TextDecoder().decode(f.bytes)))) report.issues.push({code:'reference-placeholder',path:'index.html',message:'Replace all Content-number reference placeholders with topic-specific text.'});
+                report.ok = report.ok && report.issues.length === 0;
                 state.validation = report;
                 if(report.ok&&job.kind==='generate'){
                     state.composition=compositionSignature(files);
@@ -448,8 +466,9 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
                 if (state.repairAttempts >= 2)
                     throw new AppError('NEEDS_ATTENTION', 'Validation failed after two repairs.');
                 state.repairAttempts++;
-                state.pendingRepairInstruction = `${state.instruction}\nValidation issues:\n${JSON.stringify(report.issues)}`;
+                state.pendingRepairInstruction = `Repair the existing site, do not regenerate it. Read only files relevant to the reported issues. Make the smallest targeted HTML/CSS/text changes that fix them. Preserve the layout, topic, working content and required mentioned link. Do not create helper scripts or run tests: validation runs automatically after you finish. Finish immediately after the fixes.\nValidation issues:\n${JSON.stringify(report.issues)}`;
                 await save('validate');
+            }
             }
         }
         if (stage === 'archive') {
@@ -468,7 +487,7 @@ export async function runJob(job: Job, initialLease: Lease, deps: WorkerDeps, si
             if (!current || (job.kind === 'generate' && current.revision !== job.baseRevision))
                 throw new AppError('CONFLICT', 'Site changed before publication.');
             // Edits produce a validated candidate only. The editor's explicit accept/reject flow owns draft CAS.
-            if (job.kind === 'generate') {
+            if (job.kind === 'generate' && deps.autoPublish !== false) {
                 await check();
                 const publication = await deps.publication.advance(state.intentId!);
                 if (await serverSettled())

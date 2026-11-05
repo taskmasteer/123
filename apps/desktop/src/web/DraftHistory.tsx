@@ -1,0 +1,10 @@
+import {StatusBadge} from '../components/ui/status-badge.js';
+import React,{useEffect,useState} from 'react';
+import {Button} from '../components/ui/button.js';
+import {api} from './client.js';
+import type {Site} from '../../../../packages/contracts/src/model.js';
+export function DraftHistory({site,onPreview}:{site:Site;onPreview:(revisionId:string)=>void}){
+  const [offset,setOffset]=useState(0),[items,setItems]=useState<{id:string;createdAt:number;current:boolean}[]>([]),[next,setNext]=useState<number|null>(null),[error,setError]=useState('');
+  useEffect(()=>{let active=true;void api<{items:typeof items;nextOffset:number|null}>(`/api/sites/${site.id}/draft-history?offset=${offset}`).then(page=>{if(active){setItems(page.items);setNext(page.nextOffset);setError('');}}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[site.id,site.revision,offset]);
+  return <section className="version-history"><h2>Версии сайта</h2><p>Сохранённые версии для просмотра и скачивания.</p>{error?<p role="alert">{error}</p>:null}<ol className="history-list">{items.map(item=><li key={item.id}><div><StatusBadge state={item.current?'ready':'previous'}>{item.current?'Текущая версия':'Предыдущая версия'}</StatusBadge><p>{new Date(item.createdAt).toLocaleString('ru-RU')} · {item.id.slice(0,8)}</p></div><div className="history-actions"><Button variant="outline" onClick={()=>onPreview(item.id)}>Посмотреть</Button><Button variant="outline" asChild><a href={`/api/sites/${site.id}/download?revisionId=${item.id}`} download onClick={e=>{if(window.factoryDesktop){e.preventDefault();void window.factoryDesktop.download(site.id,item.id).catch(error=>setError(error.message));}}}>Скачать ZIP</a></Button></div></li>)}</ol>{!items.length&&!error?<p>Готовых версий пока нет.</p>:null}<div className="pagination"><Button variant="ghost" disabled={!offset} onClick={()=>setOffset(Math.max(0,offset-20))}>Назад</Button><Button variant="ghost" disabled={next===null} onClick={()=>setOffset(next!)}>Следующие</Button></div></section>;
+}

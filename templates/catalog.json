@@ -1,7 +1,259 @@
 [
-  {"id":"light-product","name":"Светлый продуктовый","version":"1.0.0","enabled":true,"referenceIds":["northstar","waymark","startix"],"files":["index.html","styles.css"]},
-  {"id":"dark-tech","name":"Тёмный технологичный","version":"1.0.0","enabled":true,"referenceIds":["evolv-ai","agent-ai","dasne-ai","upstart","folio"],"files":["index.html","styles.css"]},
-  {"id":"editorial","name":"Типографический агентский","version":"1.0.0","enabled":true,"referenceIds":["vorix","startix"],"files":["index.html","styles.css"]},
-  {"id":"corporate","name":"Классический корпоративный","version":"1.0.0","enabled":true,"referenceIds":["taxo","techlo","techbyte"],"files":["index.html","styles.css"]},
-  {"id":"diagram","name":"Информационный со схемой","version":"1.0.0","enabled":true,"referenceIds":["rayz-ai","next-elite"],"files":["index.html","styles.css"]}
+  {
+    "id": "light-product",
+    "name": "Светлый продуктовый",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "northstar",
+      "waymark",
+      "startix"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "dark-tech",
+    "name": "Тёмный технологичный",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "evolv-ai",
+      "agent-ai",
+      "dasne-ai",
+      "upstart",
+      "folio"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "editorial",
+    "name": "Типографический агентский",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "vorix",
+      "startix"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "corporate",
+    "name": "Классический корпоративный",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "taxo",
+      "techlo",
+      "techbyte"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "diagram",
+    "name": "Информационный со схемой",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "rayz-ai",
+      "next-elite"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-folio",
+    "name": "Folio · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "folio"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-northstar",
+    "name": "Northstar · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "northstar"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-waymark",
+    "name": "Waymark · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "waymark"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-evolv-ai",
+    "name": "Evolv AI · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "evolv-ai"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-agent-ai",
+    "name": "Agent AI · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "agent-ai"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-dasne-ai",
+    "name": "Dasne AI · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "dasne-ai"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-vorix",
+    "name": "Vorix · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "vorix"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-taxo",
+    "name": "Taxo · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "taxo"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-techlo",
+    "name": "Techlo · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "techlo"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-techbyte",
+    "name": "Techbyte · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "techbyte"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-upstart",
+    "name": "Upstart · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "upstart"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-startix",
+    "name": "Startix · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "startix"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-next-elite",
+    "name": "Next Elite · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "next-elite"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  },
+  {
+    "id": "reference-rayz-ai",
+    "name": "Rayz AI · композиция",
+    "version": "1.0.0",
+    "enabled": true,
+    "referenceIds": [
+      "rayz-ai"
+    ],
+    "files": [
+      "index.html",
+      "styles.css"
+    ]
+  }
 ]

@@ -227,7 +227,7 @@ export class RemoteClient {
     private archiveToken:string|null=null;
     constructor(readonly base: string, private token: () => Promise<string | null>, private transport: typeof fetch = fetch, private onDispose?: () => void) {
         const u = new URL(base);
-        if (u.protocol !== 'https:' || u.pathname !== '/' || u.search || u.hash || u.username || u.password)
+        if ((u.protocol !== 'https:' && !(u.protocol === 'http:' && u.hostname === '127.0.0.1')) || u.pathname !== '/' || u.search || u.hash || u.username || u.password)
             throw new AppError('INVALID_INPUT', 'Требуется HTTPS-адрес API без пути.');
         this.base = u.origin;
     }
@@ -275,7 +275,7 @@ export class RemoteClient {
                 return bad();
             return value as T;
         }
-        const p = Object.hasOwn(recoveryMethods, method) ? recoveryParams(method, params) : Object.hasOwn(visualMethods, method) ? visualParams(method, params) : Object.hasOwn(importMethods, method) ? importParams(method, params) : object(params, ['siteId', 'revisionId', 'instruction', 'expectedRevision', 'candidateId', 'domain', 'about', 'referenceId', 'logoAssetId', 'id', 'enabled', 'description', 'email', 'role', 'active', 'userIds', 'cursor', 'requestKey', 'domainFilter', 'status', 'batchId', 'limit']);
+        const p = Object.hasOwn(recoveryMethods, method) ? recoveryParams(method, params) : Object.hasOwn(visualMethods, method) ? visualParams(method, params) : Object.hasOwn(importMethods, method) ? importParams(method, params) : object(params, ['siteId', 'revisionId', 'instruction', 'expectedRevision', 'candidateId', 'domain', 'about', 'referenceId', 'layoutReferenceId', 'logoAssetId', 'mentionedUrl', 'mentionedDescription', 'path', 'offset', 'id', 'enabled', 'description', 'email', 'role', 'active', 'userIds', 'cursor', 'requestKey', 'domainFilter', 'status', 'batchId', 'limit']);
         if (method === 'device.status')
             return { mode: 'blocked', available: false, activeJobs: 0, maxJobs: 2, model: null, images: 'disabled', storage: 'managed', publication: 'unavailable' } as T;
         if (method === 'batch.retry' && isTauri()) {
@@ -291,6 +291,7 @@ export class RemoteClient {
             case 'site.health':path=`/sites/${uuid(p.siteId)}/health`;break;
             case 'site.usage':path=`/sites/${uuid(p.siteId)}/usage`;break;
             case 'usage.summary':object(params,[]);path='/usage';break;
+            case 'batch.delete':
             case 'batch.retry':
             case 'resource.begin':
             case 'resource.chunk':
@@ -516,6 +517,7 @@ export class RemoteClient {
                 return bad();
             if (isTauri())
                 await invoke('open_remote_preview', { url: url.href });
+            else if(window.factoryDesktop)await window.factoryDesktop.preview(url.href);
             else
                 window.open(url.href, '_blank', 'noopener,noreferrer');
         }

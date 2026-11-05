@@ -35,6 +35,7 @@ export function createRemoteWorker(options: {
     workerId: string;
     workerToken: string;
     claimMode?: 'all' | 'visual';
+    storageOrigin?: string;
     fetch?: typeof fetch;
 }, local: WorkerDeps): WorkerDeps {
     const origin = controlOrigin(options.controlOrigin), transport = options.fetch ?? fetch;
@@ -179,7 +180,7 @@ export function createRemoteWorker(options: {
                             throw new AppError('INVALID_INPUT', 'Закреплённый шаблон повреждён.');
                         files.push({ path, bytes, mediaType: string(f.mediaType, 100) });
                     } checkArtifacts(files); return files; } },
-                validate: async (files) => { const report = await (local.validate ?? validateSite)(files); for (const id of report.screenshotIds) {
+                validate: async (files,context) => { const report = await (local.validate ? local.validate(files,context) : validateSite(files,{mentionedUrl:context?.siteInput.mentionedUrl})); for (const id of report.screenshotIds) {
                     if (!/^validation\/[a-f0-9-]{36}\.png$/.test(id) || !local.readValidationScreenshot)
                         throw new AppError('UNAVAILABLE', 'Чтение снимков проверки не подключено.');
                     const bytes = await local.readValidationScreenshot(id);
@@ -200,7 +201,7 @@ export function createRemoteWorker(options: {
                     for (const char of job.id)
                         seed = Math.imul(seed ^ char.charCodeAt(0), 16777619);
                     seed >>>= 0;
-                    const available = styles.filter(s => s.enabled === true && (!site?.input.referenceId || s.id === site.input.referenceId || Array.isArray(s.referenceIds) && s.referenceIds.includes(site.input.referenceId)));
+                    const available = styles.filter(s => s.enabled === true && (site?.input.layoutReferenceId ? s.id === 'reference-'+site.input.layoutReferenceId : !String(s.id).startsWith('reference-') && (!site?.input.referenceId || s.id === site.input.referenceId || Array.isArray(s.referenceIds) && s.referenceIds.includes(site.input.referenceId))));
                     if (!available.length)
                         throw new AppError('NOT_FOUND', 'Нет доступного шаблона.');
                     const selected = available[seed % available.length];

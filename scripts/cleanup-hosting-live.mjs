@@ -1,0 +1,12 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {resolve,basename,sep} from 'node:path';
+import {sshExecute} from '../dist/apps/server/src/linux-publisher.js';
+const root=resolve('.local-state/server/hosting-live'),path=resolve(process.argv[2]??'');
+if(!path.startsWith(root+sep)||!/^sf_live_hosting_[a-f0-9]{32}$/.test(basename(path)))throw Error('Not an isolated hosting evidence directory');
+const result=JSON.parse(await readFile(resolve(path,'result.json'),'utf8')),test=JSON.parse(await readFile(resolve(path,'remote-test.json'),'utf8'));
+if(!result.dnsRestored||!/^[-a-f0-9]{36}$/.test(test.siteId)||test.domain!=='chinazes.space')throw Error('Cleanup requires a verified DNS restoration and exact test identity');
+const host=JSON.parse(await readFile('.local-state/server/ssh/ovh-pilot.json','utf8'));
+const script=`import json,pathlib,shutil,subprocess,sys\np=json.load(sys.stdin)\nbase=pathlib.Path('/srv/site-factory/sites').resolve()\nroot=(base/p['siteId']).resolve()\nassert root.parent==base and root.name==p['siteId']\nif root.exists():\n state=json.loads((root/'state.json').read_text())\n assert state['siteId']==p['siteId'] and state['domain']==p['domain']\n conf=pathlib.Path('/etc/nginx/conf.d')/('sf-'+p['siteId']+'.conf')\n conf.unlink(missing_ok=True)\n subprocess.run(['nginx','-t'],check=True)\n subprocess.run(['systemctl','reload','nginx'],check=True)\n cert=pathlib.Path('/etc/letsencrypt/live')/('sf-'+p['siteId'])\n if cert.exists(): subprocess.run(['certbot','delete','--non-interactive','--cert-name','sf-'+p['siteId']],check=True)\n shutil.rmtree(root)\nprint('Temporary test deployment removed')\n`;
+const encoded=Buffer.from(script).toString('base64');
+console.log(await sshExecute(host,`sudo -n python3 -c 'import base64;exec(base64.b64decode("${encoded}"))'`,JSON.stringify(test)));
+result.remoteCleaned=true;await writeFile(resolve(path,'result.json'),JSON.stringify(result,null,2));

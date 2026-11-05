@@ -1,4 +1,9 @@
-import React, { useState } from 'react';
+import {Button} from '../../components/ui/button.js';
+import {Input} from '../../components/ui/input.js';
+import {Textarea} from '../../components/ui/textarea.js';
+import {Label} from '../../components/ui/label.js';
+import type {Catalog} from '../references/ReferenceLibrary.js';
+import React, { useState, useRef } from 'react';
 import { desktopClient } from '../../lib/desktop-client.js';
 import type { ImportSummary } from '../../../../../packages/contracts/src/import.js';
 import { importLimits } from '../../../../../packages/contracts/src/import.js';
@@ -20,38 +25,18 @@ export async function uploadImportFile(file: File, extra: Record<string, unknown
     }
     return id;
 }
-export function BatchImport({ onPrepared }: {
-    onPrepared: (summary: ImportSummary) => void;
-}) {
-    const [paste,setPaste]=useState(''),[domain,setDomain]=useState(''),[about,setAbout]=useState(''),[rows,setRows]=useState<{domain:string;about:string}[]>([]);
-    const [busy, setBusy] = useState(false), [error, setError] = useState(''), [progress, setProgress] = useState('');
-    async function choose(file: File) {
-        setBusy(true);
-        setError('');
-        try {
-            const id = await uploadImportFile(file, {}, setProgress);
-            setProgress('Проверка строк…');
-            onPrepared(await desktopClient.request<ImportSummary>('import.prepare', { id }));
-        }
-        catch (e) {
-            setError((e as Error).message);
-        }
-        finally {
-            setBusy(false);
-            setProgress('');
-        }
-    }
-    function stage(values: {domain:string;about:string}[], name:string) {
-        if (!values.length || values.length > importLimits.rows) { setError('Введите от 1 до 5000 строк.'); return; }
-        const quote=(value:string)=>'"'+value.replaceAll('"','""')+'"';
-        void choose(new File(['domain,about\n'+values.map(row=>quote(row.domain)+','+quote(row.about)).join('\n')],name,{type:'text/csv'}));
-    }
-    return <section className="device-panel batch-import"><h2>Импорт сайтов</h2><p>CSV или один лист XLSX, до 5000 строк. Столбцы: domain, about, referenceId, logo. Для каждого сайта можно отдельно изменить «О сайте».</p><label>Файл CSV или XLSX<input type="file" accept=".csv,.xlsx" disabled={busy} onChange={e => {
-            const file = e.target.files?.[0];
-            if (file)
-                void choose(file);
-            e.target.value = '';
-        }}/></label><label>Список доменов<textarea value={paste} maxLength={1500000} disabled={busy} onChange={e=>setPaste(e.target.value)} placeholder="Один домен в строке"/></label><button disabled={busy||!paste.trim()} onClick={()=>stage(paste.split(/\r?\n/).filter(line=>line.trim()).map(line=>({domain:line.trim(),about:''})),'pasted.csv')}>Проверить список</button>
-        <fieldset disabled={busy}><legend>Добавить сайты вручную</legend><label>Домен новой строки<input value={domain} maxLength={253} onChange={e=>setDomain(e.target.value)}/></label><label>О сайте новой строки<textarea value={about} maxLength={8000} onChange={e=>setAbout(e.target.value)}/></label><button disabled={!domain.trim()||rows.length>=importLimits.rows} onClick={()=>{setRows(current=>[...current,{domain,about}]);setDomain('');setAbout('');}}>Добавить строку</button><ol>{rows.map((row,index)=><li key={index}>{row.domain}<button onClick={()=>setRows(current=>current.filter((_,i)=>i!==index))}>Удалить строку {index+1}</button></li>)}</ol><button disabled={!rows.length} onClick={()=>stage(rows,'manual.csv')}>Проверить строки</button></fieldset>
-        <p className="hint">В logo укажите имя локального PNG. Выбор файла выполняется отдельно для каждой строки. Формулы и внешние связи не принимаются.</p>{progress ? <p role="status">{progress}</p> : null}{error ? <p role="alert">{error}</p> : null}</section>;
+export function BatchImport({onPrepared}:{onPrepared:(summary:ImportSummary)=>void}){
+ const fileInput=useRef<HTMLInputElement>(null);
+ const [domains,setDomains]=useState(''),[link,setLink]=useState(''),[description,setDescription]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ async function prepare(file:File){const id=await uploadImportFile(file);onPrepared(await desktopClient.request<ImportSummary>('import.prepare',{id}));}
+ async function submit(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{
+  const list=domains.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);if(!list.length||list.length>importLimits.rows)throw Error('Введите от 1 до 5000 доменов, каждый с новой строки.');
+  const catalog=await desktopClient.request<Catalog>('catalog.list',{}),styles=catalog.styles.filter(s=>s.enabled&&!s.id.startsWith('reference-')),refs=catalog.references.filter(r=>catalog.styles.some(s=>s.enabled&&s.id==='reference-'+r.id));
+  if(!styles.length||!refs.length)throw Error('В библиотеке должны быть доступны оформление и референсы.');
+  const pick=<T,>(items:T[])=>items[crypto.getRandomValues(new Uint32Array(1))[0]!%items.length]!;
+  const quote=(v:string)=>'"'+v.replaceAll('"','""')+'"';
+  const csv=['domain,referenceId,layoutReferenceId,mentionedUrl,mentionedDescription',...list.map(domain=>[domain,pick(styles).id,pick(refs).id,link.trim(),description.trim()].map(quote).join(','))].join('\n');
+  await prepare(new File([csv],'Список доменов.csv',{type:'text/csv'}));
+ }catch(e){setError((e as Error).message);}finally{setBusy(false);}}
+ return <section className="settings-card batch-import"><div className="batch-import-heading"><h2>Создать пачку сайтов</h2><Button variant="outline" disabled={busy} onClick={()=>fileInput.current?.click()}>Импорт CSV / XLSX</Button><input ref={fileInput} hidden aria-label="Файл CSV или XLSX" type="file" accept=".csv,.xlsx" disabled={busy} onChange={e=>{const file=e.target.files?.[0];if(file){setBusy(true);setError('');void prepare(file).catch(e=>setError(e.message)).finally(()=>setBusy(false));}e.target.value='';}}/></div><p>Введите домены по одному в строке. Для каждого случайно выберем оформление и референс из библиотеки. Перед запуском любые данные можно изменить.</p><form onSubmit={e=>void submit(e)}><div className="field"><Label htmlFor="batch-domains">Список доменов</Label><Textarea id="batch-domains" value={domains} onChange={e=>setDomains(e.target.value)} rows={7} required disabled={busy} placeholder={'first.example\nsecond.example'}/></div><div className="field"><Label htmlFor="batch-link">Общая упоминаемая ссылка *</Label><Input id="batch-link" type="url" value={link} onChange={e=>setLink(e.target.value)} required maxLength={2048} disabled={busy}/></div><Button disabled={busy}>{busy?'Готовим пачку…':'Подготовить сайты'}</Button></form>{error?<p role="alert">{error}</p>:null}</section>;
 }

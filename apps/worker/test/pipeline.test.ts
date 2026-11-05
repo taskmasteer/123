@@ -593,3 +593,5 @@ test('legacy checkpoint before its first provider call pins the new prompt versi
  f.deps.queue.checkpoint=async(...args)=>{await checkpoint(...args);if((await f.deps.checkpoints.load(args[1].id)).state.continuation)abort.abort();};
  await runJob(f.job,f.lease,f.deps,abort.signal);expect((await f.deps.checkpoints.load(f.job.checkpointId!)).state.promptVersion).toBe(2);f.deps.queue.checkpoint=checkpoint;await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');expect(calls).toBe(1);
 });
+
+test('technical-only generation skips browser quality gates and repair passes',async()=>{const f=await fixture();f.deps.generationChecks='technical-only';f.deps.validate=async()=>{throw Error('Quality gate must not run');};await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');});

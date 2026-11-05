@@ -1,0 +1,58 @@
+[
+  {
+    "id": "folio",
+    "ready": true
+  },
+  {
+    "id": "northstar",
+    "ready": true
+  },
+  {
+    "id": "waymark",
+    "ready": true
+  },
+  {
+    "id": "evolv-ai",
+    "ready": true
+  },
+  {
+    "id": "agent-ai",
+    "ready": true
+  },
+  {
+    "id": "dasne-ai",
+    "ready": true
+  },
+  {
+    "id": "vorix",
+    "ready": true
+  },
+  {
+    "id": "taxo",
+    "ready": true
+  },
+  {
+    "id": "techlo",
+    "ready": true
+  },
+  {
+    "id": "techbyte",
+    "ready": true
+  },
+  {
+    "id": "upstart",
+    "ready": true
+  },
+  {
+    "id": "startix",
+    "ready": true
+  },
+  {
+    "id": "next-elite",
+    "ready": true
+  },
+  {
+    "id": "rayz-ai",
+    "ready": true
+  }
+]

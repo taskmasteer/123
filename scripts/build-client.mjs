@@ -1,0 +1,12 @@
+import {mkdir,cp,readFile,writeFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {packager} from '@electron/packager';
+const root=resolve(import.meta.dirname,'..'),stage=resolve(root,'.local-state/client-stage');
+await mkdir(stage,{recursive:true});
+for(const file of ['main.mjs','preload.cjs','connection.mjs','connection-file.mjs','package.json'])await cp(resolve(root,'apps/client',file),resolve(stage,file));
+await cp(resolve(root,'apps/desktop/dist-web'),resolve(stage,'ui'),{recursive:true});
+await cp(resolve(root,'.local-state/client-connection.json'),resolve(stage,'connection.json'));
+const metadata=JSON.parse(await readFile(resolve(root,'node_modules/electron/package.json'),'utf8'));
+const outputs=await packager({dir:stage,out:resolve(root,'.local-state/releases'),name:'Site Factory',platform:'win32',arch:'x64',electronVersion:metadata.version,asar:true,overwrite:true,prune:false,win32metadata:{CompanyName:'Site Factory',FileDescription:'Site Factory desktop client',ProductName:'Site Factory'}});
+await writeFile(resolve(root,'.local-state/client-build.json'),JSON.stringify({outputs,electron:metadata.version},null,2));
+console.log('Desktop client built: '+outputs.join(', '));

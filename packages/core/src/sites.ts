@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { AppError } from '../../contracts/src/model.js';
+import { assertAllowedHost } from '../../contracts/src/domain-policy.js';
 
 export function normalizeDomain(value: string): string {
   const invalid = () => new AppError('INVALID_INPUT', 'Enter a public domain without credentials, port, path, query or fragment.');
@@ -11,6 +12,7 @@ export function normalizeDomain(value: string): string {
   const authority = match?.[1];
   if (!authority || /[:@%\s\u0000-\u001f\u007f]/u.test(authority)) throw invalid();
   const domain = domainToASCII(authority).toLowerCase();
+  assertAllowedHost(domain);
   const labels = domain.split('.');
   if (!domain || domain.length > 253 || isIP(domain) || labels.length < 2 ||
       domain === 'localhost.localdomain' || domain.endsWith('.localhost') || labels.some((label) =>

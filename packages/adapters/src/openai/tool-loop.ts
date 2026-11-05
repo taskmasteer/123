@@ -4,8 +4,27 @@ import type { FileTools, ModelContinuation } from '../../../contracts/src/model.
 import { record } from '../../../contracts/src/inputs.js';
 export const toolFields = { list: [], read: ['path'], write: ['path', 'text'], replace: ['path', 'oldText', 'newText'] } as const;
 export const toolsSchema = Object.entries(toolFields).map(([name, fields]) => ({ type: 'function', name, strict: true,
-    description: `${name} local static website files.`, parameters: { type: 'object', properties: Object.fromEntries(fields.map(field => [field, { type: 'string' }])), required: fields, additionalProperties: false } }));
+    description: `${name} local static website files. Always include every required field, including path. Prefer small replace edits (under 6000 characters each) to rewriting large files.`, parameters: { type: 'object', properties: Object.fromEntries(fields.map(field => [field, { type: 'string' }])), required: fields, additionalProperties: false } }));
+function callEnvelope(item:Record<string,unknown>){
+    if(typeof item.name!=='string'||!Object.hasOwn(toolFields,item.name)||typeof item.call_id!=='string'||!item.call_id||typeof item.arguments!=='string')throw new AppError('NEEDS_ATTENTION','Unsupported model tool call.');
+}
 export function digest(value: unknown) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+/** Old read snapshots are redundant: workspace files are the source of truth.
+ * Keep call/result identities and the newest read of each path for safe replay. */
+export function compactReadHistory(state:ModelContinuation){
+    if(JSON.stringify(state).length<700000)return;
+    const completed=new Set(state.items.filter(i=>i.type==='function_call_output').map(i=>i.call_id));
+    const latest=new Map<string,unknown>(),reads=new Map<unknown,string>();
+    for(const item of state.items){
+        if(item.type!=='function_call'||item.name!=='read'||!completed.has(item.call_id))continue;
+        try{const call=parseCall(item);reads.set(item.call_id,call.args.path!);latest.set(call.args.path!,item.call_id);}catch{}
+    }
+    for(const item of state.items){
+        const path=reads.get(item.call_id);
+        if(item.type==='function_call_output'&&path&&latest.get(path)!==item.call_id)
+            item.output=JSON.stringify({archived:true,message:'Older read snapshot omitted to keep context bounded. Current files and completed edits are preserved. Use the latest read result or read the current file if needed.'});
+    }
+}
 export function parseCall(item: Record<string, unknown>) {
     if (typeof item.name !== 'string' || !Object.hasOwn(toolFields, item.name) || typeof item.call_id !== 'string' || !item.call_id || typeof item.arguments !== 'string')
         throw new AppError('NEEDS_ATTENTION', 'Unsupported model tool call.');
@@ -23,7 +42,15 @@ export function parseCall(item: Record<string, unknown>) {
 }
 export async function executeCall(item: Record<string, unknown>, tools: FileTools, state: ModelContinuation, signal: AbortSignal) {
     signal.throwIfAborted();
-    const { name, args, callId } = parseCall(item);
+    callEnvelope(item);
+    let parsed:ReturnType<typeof parseCall>;
+    try{parsed=parseCall(item);}catch(error){
+        if(!(error instanceof AppError)||error.message!=='Invalid model tool arguments.')throw error;
+        const signature=digest(['invalid-arguments',item.name,item.arguments]);state.seen[signature]=(state.seen[signature]??0)+1;
+        if(state.seen[signature]!>3)throw new AppError('NEEDS_ATTENTION','Model repeatedly returned invalid tool arguments.');
+        return {type:'function_call_output',call_id:item.call_id,output:JSON.stringify({ok:false,error:`No operation was executed. Send valid JSON with ALL required string fields: ${toolFields[item.name as keyof typeof toolFields].join(', ')}. Include the file path in EVERY call. Do not omit fields or send a partial command. Keep edits small.`})};
+    }
+    const { name, args, callId } = parsed;
     const snapshot = [];
     for (const path of (await tools.list()).sort())
         snapshot.push([path, await tools.read(path)]);
@@ -42,30 +69,45 @@ export async function executeCall(item: Record<string, unknown>, tools: FileTool
             result = await tools.read(args.path!);
             break;
         case 'write':
-            await tools.write(args.path!, args.text!);
-            result = { ok: true };
+            try {
+                await tools.write(args.path!, args.text!);
+                result = { ok: true };
+            } catch(error) {
+                if (!(error instanceof AppError) || error.code !== 'INVALID_INPUT' || error.message !== 'Only static site files are allowed.') throw error;
+                result = {ok:false,error:'File rejected; nothing was written. Only static website files are allowed: HTML, CSS, JavaScript, SVG and local image/font assets. Do not create Python, shell, JSON, Markdown or other helper files. No command execution is available. Continue editing the website files directly.'};
+            }
             break;
         case 'replace':
-            await tools.replace(args.path!, args.oldText!, args.newText!);
-            result = { ok: true };
+            try {
+                await tools.replace(args.path!, args.oldText!, args.newText!);
+                result = { ok: true };
+            } catch (error) {
+                // A stale/ambiguous edit is recoverable: let the model reread the file.
+                // Filesystem, path-policy and other failures remain fatal.
+                if (!(error instanceof AppError) || error.code !== 'INVALID_INPUT' || error.message !== 'Replacement must match exactly once.') throw error;
+                result = { ok: false, error: 'Replacement must match exactly once. No changes were made. Read the file again and copy a unique exact substring without extra escaping.' };
+            }
             break;
     }
     return { type: 'function_call_output', call_id: callId, output: JSON.stringify(result) };
 }
-export function validateContinuation(value: unknown, binding: string): ModelContinuation {
-    if (!record(value) || value.provider !== 'openai-responses' || value.version !== 1 || value.binding !== binding ||
+export function validateContinuation(value: unknown, binding: string, provider: ModelContinuation['provider'] = 'openai-responses'): ModelContinuation {
+    if (!record(value) || value.provider !== provider || value.version !== 1 || value.binding !== binding ||
         !Array.isArray(value.items) || value.items.length > 500 || !value.items.every(item => record(item) && typeof item.type === 'string') ||
         !['turns', 'retries', 'retryAt', 'inputTokens', 'outputTokens'].every(key => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0) ||
         (value.turns as number) > 48 || (value.retries as number) > 3 || typeof value.transportExhausted !== 'boolean' || typeof value.requestPending !== 'boolean' || typeof value.summary !== 'string' ||
         (value.responseId !== null && typeof value.responseId !== 'string') || ![null, 'final', 'refused', 'incomplete', 'failed', 'cancelled', 'stalled'].includes(value.terminal as null) ||
         (value.recoverable!==undefined&&(!['account','configuration'].includes(String(value.recoverable))||value.terminal!=='failed'))||
         (value.uncertainRequests!==undefined&&(!Number.isSafeInteger(value.uncertainRequests)||(value.uncertainRequests as number)<0||(value.uncertainRequests as number)>1000))||
+        (value.outputRepairs!==undefined&&(!Number.isSafeInteger(value.outputRepairs)||(value.outputRepairs as number)<0||(value.outputRepairs as number)>3))||
         !record(value.seen) || !Object.entries(value.seen).every(([key, n]) => /^[0-9a-f]{64}$/.test(key) && Number.isSafeInteger(n) && (n as number) > 0) || JSON.stringify(value).length > 1000000)
         throw new AppError('INVALID_INPUT', 'Provider continuation does not match this operation or is corrupt.');
     const calls = new Set<string>(), outputs = new Set<string>();
     for (const item of value.items as Record<string, unknown>[]) {
         if (item.type === 'function_call') {
-            parseCall(item);
+            // Arguments are untrusted model output. Preserve malformed calls so
+            // executeCall can return a schema error without touching the files.
+            callEnvelope(item);
             if (calls.has(item.call_id as string))
                 throw new AppError('INVALID_INPUT', 'Duplicate tool call identity.');
             calls.add(item.call_id as string);

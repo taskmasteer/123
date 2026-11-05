@@ -1,0 +1,1 @@
+{"name":"@site-factory/server","private":true,"type":"module","scripts":{"start":"node ../../dist/apps/server/src/main.js"}}

@@ -2,15 +2,20 @@ import { AppError } from '../../../contracts/src/model.js';
 import { importLimits } from '../../../contracts/src/import.js';
 import type { ImportResult, ImportRow, RowIssue } from '../../../contracts/src/import.js';
 import { normalizeDomain } from '../sites.js';
+import { mentionedUrl } from '../../../contracts/src/domain-policy.js';
 import { csvRows } from './csv.js';
 import { xlsxRows } from './xlsx.js';
 export function validateRows(rows: ImportRow[], previous: RowIssue[] = []): ImportResult {
-    const issues = previous.filter(i => !['INVALID_DOMAIN', 'DUPLICATE_DOMAIN', 'LOGO_MAPPING_REQUIRED', 'INVALID_LOGO', 'INVALID_ABOUT', 'INVALID_REFERENCE'].includes(i.code));
+    const issues = previous.filter(i => !['INVALID_DOMAIN', 'DUPLICATE_DOMAIN', 'LOGO_MAPPING_REQUIRED', 'INVALID_LOGO', 'INVALID_ABOUT', 'INVALID_REFERENCE', 'INVALID_LINK', 'INVALID_LINK_DESCRIPTION'].includes(i.code));
     const seen = new Set<string>();
     for (const row of rows) {
         const issue = (column: string, code: string, message: string) => issues.push({ rowNumber: row.rowNumber, column, code, message });
+        if(!row.mentionedUrl?.trim())issue('mentionedUrl','INVALID_LINK','Упоминаемая ссылка обязательна.');
+        if(row.mentionedUrl){try{mentionedUrl(row.mentionedUrl);}catch{issue('mentionedUrl','INVALID_LINK','Укажите разрешённую публичную HTTP(S)-ссылку.');}}
+        if(row.mentionedDescription!==undefined&&row.mentionedDescription.length>8000)issue('mentionedDescription','INVALID_LINK_DESCRIPTION','Пояснение: не более 8000 символов.');
         if (row.about !== undefined && (typeof row.about !== 'string' || row.about.length > 8000))
             issue('about', 'INVALID_ABOUT', 'Описание должно содержать не более 8000 символов.');
+        if (row.layoutReferenceId !== undefined && (typeof row.layoutReferenceId !== 'string' || row.layoutReferenceId.length > 100))issue('layoutReferenceId','INVALID_REFERENCE','Некорректный референс.');
         if (row.referenceId !== undefined && (typeof row.referenceId !== 'string' || row.referenceId.length > 100))
             issue('referenceId', 'INVALID_REFERENCE', 'Идентификатор референса: не более 100 символов.');
         try {
@@ -37,10 +42,10 @@ export function tableRows(table: unknown[][], formulaCells: {
 }[] = []): ImportResult {
     if (table.length < 1 || table.length > importLimits.rows + 1)
         throw new AppError('INVALID_INPUT', 'Допускается заголовок и не более 5000 строк.');
-    const aliases: Record<string, string> = { domain: 'domain', 'домен': 'domain', about: 'about', 'о сайте': 'about', referenceid: 'referenceId', logo: 'logo', 'логотип': 'logo' };
+    const aliases: Record<string, string> = { domain: 'domain', 'домен': 'domain', about: 'about', 'о сайте': 'about', referenceid: 'referenceId', layoutreferenceid:'layoutReferenceId', logo: 'logo', 'логотип': 'logo', mentionedurl:'mentionedUrl', 'упоминаемая ссылка':'mentionedUrl', mentioneddescription:'mentionedDescription', 'пояснение ссылки':'mentionedDescription' };
     const headers = table[0]!.map(v => aliases[String(v ?? '').trim().toLowerCase()]);
     if (!headers.includes('domain') || headers.some(v => !v) || new Set(headers).size !== headers.length || headers.length > importLimits.columns)
-        throw new AppError('INVALID_INPUT', 'Заголовки: domain, about, referenceId, logo; без повторов.');
+        throw new AppError('INVALID_INPUT', 'Заголовки: domain, about, referenceId, logo, mentionedUrl, mentionedDescription; без повторов.');
     const rows: ImportRow[] = [], issues: RowIssue[] = [];
     const formulasByRow = new Map<number, Set<number>>();
     for (const formula of formulaCells) {

@@ -35,7 +35,7 @@ export function importParams(method: string, value: unknown) {
         integer(p.revision);
     if (method === 'import.commit')
         string(p.requestKey, 100);
-    for (const field of ['domain', 'about', 'referenceId'] as const)
+    for (const field of ['domain', 'about', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription'] as const)
         if (p[field] !== undefined && (typeof p[field] !== 'string' || p[field].length > (field === 'domain' ? 253 : field === 'referenceId' ? 100 : 8000)))
             throw new AppError('INVALID_INPUT', 'Некорректное значение строки.');
     if (p.cursor !== undefined)
@@ -97,7 +97,7 @@ export function importResponse(method: string, value: unknown): unknown {
         for (const raw of p.items) {
             const r = object(raw, ['rowNumber', 'input', 'issues', 'siteId', 'job']);
             integer(r.rowNumber, 2, 5001);
-            const input = object(r.input, ['rowNumber', 'domain', 'about', 'referenceId', 'logo', 'logoAssetId']);
+            const input = object(r.input, ['rowNumber', 'domain', 'about', 'referenceId', 'layoutReferenceId', 'logo', 'logoAssetId', 'mentionedUrl', 'mentionedDescription']);
             integer(input.rowNumber, 2, 5001);
             for (const [key, v] of Object.entries(input))
                 if (key !== 'rowNumber' && (typeof v !== 'string' || v.length > 8000))

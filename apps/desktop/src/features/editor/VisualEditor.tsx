@@ -1,3 +1,4 @@
+import {Button} from '../../components/ui/button.js';
 import React, { useEffect, useRef, useState } from 'react';
 import type { Site, Principal } from '../../../../../packages/contracts/src/model.js';
 import type { ElementPatch, Projection, Selection, SaveView } from '../../../../../packages/contracts/src/visual.js';
@@ -93,6 +94,10 @@ export function VisualEditor({ site, principal, pendingSaveId, blocked, onChange
         await close();
         setDocument(path);
         setSelected('');
+        if (!(window as unknown as {__TAURI_INTERNALS__?:unknown}).__TAURI_INTERNALS__) {
+            setStatus('Выберите документ и элемент из списка ниже.');
+            return;
+        }
         try {
             const opened = await openSelectionWindow(desktopClient, p, path);
             if (lifetime.current.signal.aborted) {
@@ -169,7 +174,7 @@ export function VisualEditor({ site, principal, pendingSaveId, blocked, onChange
         }
     }
     const element = projection?.elements.find(e => e.elementId === selected);
-    return <section className="visual-editor" aria-label="Визуальные правки"><div className="row-actions"><h3>Визуальные правки</h3><button disabled={busy || blocked || !(site.draftId ?? site.publishedId)} onClick={() => void open()}>Выбрать элемент</button>{driverReady ? <button onClick={() => void close()}>Закрыть выделение</button> : null}</div><p className="hint">Простые правки существующего текста и оформления. Выделение показывает исходный HTML без сценариев сайта. Сложные изменения отправьте через чат.</p>
+    return <section className="visual-editor" aria-label="Визуальные правки"><div className="row-actions"><h3>Визуальные правки</h3><Button disabled={busy || blocked || !(site.draftId ?? site.publishedId)} onClick={() => void open()}>Выбрать элемент</Button>{driverReady ? <Button onClick={() => void close()}>Закрыть выделение</Button> : null}</div><p className="hint">Простые правки существующего текста и оформления. Выделение показывает исходный HTML без сценариев сайта. Сложные изменения отправьте через чат.</p>
  {error ? <p role="alert">{error}</p> : null}{status ? <p role="status">{status}</p> : null}
  {projection ? <><label>Документ<select aria-label="Документ" disabled={busy} value={documentPath} onChange={e => void selectDocument(projection, e.target.value)}>{projection.documents.map(d => <option key={d.path}>{d.path}</option>)}</select></label><label>Элемент<select aria-label="Элемент" disabled={busy} value={selected} onChange={e => setSelected(e.target.value)}><option value="">Выберите элемент</option>{projection.elements.filter(e => e.documentPath === documentPath).map((e, i) => <option key={e.elementId} value={e.elementId}>{i + 1}. &lt;{e.tag}&gt; {(e.text ?? '').slice(0, 60)}</option>)}</select></label>{element ? <ElementInspector key={element.elementId} element={element} busy={busy || blocked} {...(site.input.logoAssetId ? { logoAssetId: site.input.logoAssetId } : {})} onSave={patch => void save(patch)}/> : <p>Этот элемент не выбран или не поддерживает простые правки.</p>}</> : null}</section>;
 }

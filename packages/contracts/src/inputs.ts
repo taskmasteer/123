@@ -1,5 +1,6 @@
 import { AppError } from './model.js';
 import type { SiteInput, SitePatch } from './model.js';
+import { mentionedUrl } from './domain-policy.js';
 
 export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -9,10 +10,12 @@ export function nonemptyString(value: unknown): value is string {
 }
 export function parseSiteInput(value: unknown): SiteInput {
   if (!record(value) || !nonemptyString(value.domain) ||
-      Object.keys(value).some((key) => !['domain', 'about', 'referenceId', 'logoAssetId'].includes(key)) ||
-      ['about', 'referenceId', 'logoAssetId'].some((key) => key in value && typeof value[key] !== 'string')) {
+      Object.keys(value).some((key) => !['domain', 'about', 'referenceId', 'layoutReferenceId', 'logoAssetId', 'mentionedUrl', 'mentionedDescription'].includes(key)) ||
+      ['about', 'referenceId', 'layoutReferenceId', 'logoAssetId', 'mentionedUrl', 'mentionedDescription'].some((key) => key in value && typeof value[key] !== 'string')) {
     throw new AppError('INVALID_INPUT', 'Invalid site input.');
   }
+  if (value.mentionedUrl) mentionedUrl(String(value.mentionedUrl));
+  if (String(value.mentionedDescription ?? '').length > 8000) throw new AppError('INVALID_INPUT', 'Пояснение слишком длинное.');
   return structuredClone(value) as unknown as SiteInput;
 }
 export function parseSitePatch(value: unknown): SitePatch {

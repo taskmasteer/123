@@ -46,6 +46,9 @@ const snapshotModes = new WeakMap<Pool, 'direct' | 'session' | 'transaction' | '
 /** Trusted deployment declaration, never inferred from URL/port or a lock probe. */
 export function configureSnapshotConnection(pool: Pool, mode: unknown) { snapshotModes.set(pool, mode === 'direct' || mode === 'session' || mode === 'transaction' ? mode : 'unknown'); return pool; }
 export class SupabaseRepository {
+    beforeBatchCommit?: (tx:SqlTransaction,inputs:SiteInput[])=>Promise<void>;
+    canAdmitBatchSite?: (tx:SqlTransaction)=>Promise<boolean>;
+    onBatchSiteCreated?: (tx:SqlTransaction,siteId:string,ownerId:string)=>Promise<void>;
     constructor(readonly pool: Pool) { }
     requireSnapshotConnection() { const mode = snapshotModes.get(this.pool); if (mode !== 'direct' && mode !== 'session')
         throw new AppError('UNAVAILABLE', 'Для согласованной копии DATABASE_CONNECTION_MODE должен явно указывать direct или session. Transaction pooler и неизвестный режим не поддерживают сессионную блокировку.'); }
@@ -159,9 +162,10 @@ export class SupabaseRepository {
         const job: Job = { id, siteId: id, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(generation?{generation}:{}) };
         await tx.query('insert into private.jobs(id,site_id,data,batch_id) values($1,$1,$2,$3)', [id, job, batchId ?? null]);
         await tx.query("insert into private.site_operations(site_id,operation_id,kind) values($1,$1,'job')", [id]);
+        if(batchId)await this.onBatchSiteCreated?.(tx,id,actor.userId);
         return (await this.get(id, tx))!;
     }
-    async create(input: SiteInput, actor: Principal): Promise<Site> { return this.transaction(async (tx) => { actor = await this.fresh(tx, actor); authorize(actor, 'site:create'); return this.insertSiteInTransaction(tx, input, actor); }); }
+    async create(input: SiteInput, actor: Principal, onCreate?: (tx: SqlTransaction, site: Site) => Promise<void>): Promise<Site> { return this.transaction(async (tx) => { actor = await this.fresh(tx, actor); authorize(actor, 'site:create'); const site=await this.insertSiteInTransaction(tx, input, actor);await onCreate?.(tx,site);return site; }); }
     async list(actor: Principal, cursor?: string, limit = 50, filters: SiteFilters = {}) {
         if (!Number.isInteger(limit) || limit < 1 || limit > 100)
             throw new AppError('INVALID_INPUT', 'Некорректный размер страницы.');

@@ -1,16 +1,20 @@
+import {Button} from '../../components/ui/button.js';
+import {StatusBadge} from '../../components/ui/status-badge.js';
+import {BatchSiteDialog} from './BatchSiteDialog.js';
 import {pollLoop} from '../../lib/polling.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { desktopClient } from '../../lib/desktop-client.js';
 import type { ImportSummary, ImportRowView, ImportPage } from '../../../../../packages/contracts/src/import.js';
 import { BatchImport, uploadImportFile } from './BatchImport.js';
 import { BatchTable } from './BatchTable.js';
-export function BatchDetail({ id, onBack, admin = false }: {
+export function BatchDetail({ id, onBack, onStarted, admin = false }: {
     id: string;
     onBack: () => void;
+    onStarted?: (id:string) => void;
     admin?: boolean;
 }) {
     const [summary, setSummary] = useState<ImportSummary | null>(null), [rows, setRows] = useState<ImportRowView[]>([]), [error, setError] = useState(''), [pollError, setPollError] = useState(''), [busy, setBusy] = useState(false), [version, setVersion] = useState(0);
-    const [cursors, setCursors] = useState<(string | null)[]>([null]), [next, setNext] = useState<string | null>(null), [status, setStatus] = useState('all'), [edit, setEdit] = useState<ImportRowView | null>(null), [about, setAbout] = useState(''), [domain, setDomain] = useState(''), [assignees, setAssignees] = useState<string[]>([]), [users, setUsers] = useState<{
+    const [cursors, setCursors] = useState<(string | null)[]>([null]), [next, setNext] = useState<string | null>(null), [status, setStatus] = useState('all'), [edit, setEdit] = useState<ImportRowView | null>(null), [mentionedUrl,setMentionedUrl]=useState(''),[mentionedDescription,setMentionedDescription]=useState(''),[about, setAbout] = useState(''), [domain, setDomain] = useState(''), [assignees, setAssignees] = useState<string[]>([]), [users, setUsers] = useState<{
         id: string;
         email: string;
         active: boolean;
@@ -70,9 +74,9 @@ export function BatchDetail({ id, onBack, admin = false }: {
     useEffect(() => { if (summary?.assignedUserIds)
         setAssignees(summary.assignedUserIds); }, [summary?.assignedUserIds?.join(',')]);
     const editable = summary?.state === 'preview' && summary.canControl;
-    return <section className="batch-detail"><button onClick={onBack}>Все пачки</button><button disabled={busy} onClick={()=>setVersion(v=>v+1)}>Обновить пачку</button><h2>{summary?.name ?? 'Загрузка пачки…'}</h2>{summary ? <><p>Корректных строк: {summary.validCount}. С ошибками: {summary.invalidCount}.</p><div className="row-actions">{editable ? <button className="primary" disabled={busy || !summary.validCount} onClick={() => void action('import.commit', { id, revision: summary.revision, requestKey: key.current })}>Запустить корректные строки</button> : summary.canControl ? <>{summary.state === 'active' ? <button disabled={busy} onClick={() => void action('batch.pause', { id })}>Пауза пачки</button> : summary.state === 'paused' ? <button disabled={busy} onClick={() => void action('batch.resume', { id })}>Продолжить пачку</button> : null}{!['cancelled', 'preview'].includes(summary.state) ? <button disabled={busy} onClick={() => void action('batch.cancel', { id })}>Отменить пачку</button> : null}</> : <span>Доступ к просмотру пачки</span>}</div><p className="hint">Корректные строки запускаются отдельно. Строки с ошибками остаются здесь. Пауза действует на границе сохранённого этапа; продолжение не повторяет завершённые или неудачные задания.</p></> : null}
+    return <section className="batch-detail"><button onClick={onBack}>Все пачки</button><button disabled={busy} onClick={()=>setVersion(v=>v+1)}>Обновить пачку</button><h2>{summary?.name ?? 'Загрузка пачки…'}</h2>{summary ? <><StatusBadge state={summary.state}>{{preview:'Готова к запуску',active:'Конвейер запущен',paused:'На паузе',cancelled:'Отменена',uploading:'Загрузка'}[summary.state]}</StatusBadge><p>Корректных строк: {summary.validCount}. С ошибками: {summary.invalidCount}.</p><div className="row-actions">{editable ? <><Button disabled={busy || !summary.validCount} onClick={() => void action('import.commit', { id, revision: summary.revision, requestKey: key.current }).then(ok=>{if(ok)onStarted?.(id);})}>{busy?'Запускаем…':'Начать конвейер'}</Button><Button variant="outline" disabled={busy} onClick={()=>void action('batch.delete',{id,revision:summary.revision}).then(ok=>{if(ok)onBack();})}>Удалить пачку</Button></> : summary.canControl ? <>{summary.state === 'active' ? <button disabled={busy} onClick={() => void action('batch.pause', { id })}>Пауза пачки</button> : summary.state === 'paused' ? <button disabled={busy} onClick={() => void action('batch.resume', { id })}>Продолжить пачку</button> : null}{!['cancelled', 'preview'].includes(summary.state) ? <button disabled={busy} onClick={() => void action('batch.cancel', { id })}>Отменить пачку</button> : null}</> : <span>Доступ к просмотру пачки</span>}</div><p className="hint">Корректные строки запускаются отдельно. Строки с ошибками остаются здесь. Пауза действует на границе сохранённого этапа; продолжение не повторяет завершённые или неудачные задания.</p></> : null}
  {pollError ? <p role="alert">Не удалось обновить пачку: {pollError}</p> : null}{error ? <p role="alert">{error}</p> : null}<label className="batch-filter">Показать строки<select value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); setRows([]); }}><option value="all">Все</option><option value="invalid">С ошибками</option><option value="valid">Без ошибок</option></select></label>
- <BatchTable rows={rows} editable={!!editable} busy={busy} {...(summary?.canControl && summary.state === 'active' ? { onRetry: (row: ImportRowView) => void action('batch.retry', { id, rowNumber: row.rowNumber }) } : {})} onEdit={row => { setEditRevision(summary?.revision ?? 0); setEdit(row); setAbout(row.input.about ?? ''); setDomain(row.input.domain); }} onLogo={(row, file) => {
+ <BatchTable rows={rows} editable={!!editable} busy={busy} {...(summary?.canControl && summary.state === 'active' ? { onRetry: (row: ImportRowView) => void action('batch.retry', { id, rowNumber: row.rowNumber }) } : {})} onEdit={row => { setEditRevision(summary?.revision ?? 0); setEdit(row); setAbout(row.input.about ?? ''); setDomain(row.input.domain);setMentionedUrl(row.input.mentionedUrl??'');setMentionedDescription(row.input.mentionedDescription??''); }} onLogo={(row, file) => {
             if (!summary)
                 return;
             setBusy(true);
@@ -92,13 +96,7 @@ export function BatchDetail({ id, onBack, admin = false }: {
             if (next)
                 setCursors(c => [...c, next]);
         }}>Следующие строки</button></nav>
- {edit && summary ? <form className="device-panel batch-row-edit" onSubmit={e => {
-                e.preventDefault();
-                void action('import.update', { id, revision: editRevision, rowNumber: edit.rowNumber, domain, about }).then(saved => {
-                    if (saved)
-                        setEdit(null);
-                });
-            }}><h3>Строка {edit.rowNumber}</h3><label>Домен в строке {edit.rowNumber}<input value={domain} maxLength={253} onChange={e => setDomain(e.target.value)}/></label><label>О сайте в строке {edit.rowNumber}<textarea value={about} maxLength={8000} onChange={e => setAbout(e.target.value)}/></label><div className="row-actions"><button disabled={busy}>Сохранить строку</button><button type="button" onClick={() => setEdit(null)}>Закрыть правку</button></div></form> : null}
+ {edit && summary ? <BatchSiteDialog key={edit.rowNumber} row={edit} busy={busy} onClose={()=>setEdit(null)} onSave={values=>action('import.update',{id,revision:editRevision,rowNumber:edit.rowNumber,...values})}/> : null}
  {admin ? <form className="device-panel" onSubmit={e => { e.preventDefault(); void action('batch.assign', { id, userIds: assignees }); }}><h3>Доступ к пачке</h3><p>Назначение пачки даёт доступ ко всем её текущим и будущим сайтам. Управление генерацией остаётся у владельца и администратора.</p><label>Пользователи с доступом<select multiple value={assignees} onChange={e => setAssignees(Array.from(e.target.selectedOptions, option => option.value))}>{users.map(user => <option key={user.id} value={user.id}>{user.email}</option>)}</select></label>{usersError ? <p role="alert">Не удалось загрузить пользователей: {usersError}</p> : null}<button disabled={busy || !!usersError}>Сохранить доступ к пачке</button></form> : null}
  </section>;
 }

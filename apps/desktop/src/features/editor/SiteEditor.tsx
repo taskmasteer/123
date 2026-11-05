@@ -1,3 +1,4 @@
+import {Button} from '../../components/ui/button.js';
 import {pollLoop} from '../../lib/polling.js';
 import {canCancelJob} from '../sites/SiteList.js';
 import React, { useEffect, useState } from 'react';
@@ -17,13 +18,14 @@ type Review = {
     publication: PublishIntent | null;
 };
 const statuses: Record<Candidate['status'], string> = { queued: 'В очереди', running: 'В работе', checking: 'Проверка', ready: 'Готов к проверке', accepted: 'Принят в черновик', rejected: 'Отклонён', conflict: 'Конфликт версий', failed: 'Правка не завершена' };
-export function SiteEditor({ site, onChanged, modelMode, canPublish = true, managed = false, principal }: {
+export function SiteEditor({ site, onChanged, modelMode, canPublish = true, managed = false, principal,showPublicationHistory=true }: {
     site: DesktopSite;
     onChanged: (site?: Site) => void;
     modelMode: 'demo' | 'live' | 'blocked' | 'managed';
     canPublish?: boolean;
     managed?: boolean;
     principal?: Principal;
+    showPublicationHistory?: boolean;
 }) {
     const admin = !managed || principal?.role === 'admin';
     const [sourceRevision, setSourceRevision] = useState<string | null>(null);
@@ -107,14 +109,14 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
     return (<section className="site-editor" aria-label={`Правки ${site.domain}`}>
       <div className="editor-statusbar">
         <div><strong>{hasDraft ? 'Есть принятый черновик' : review.publication?.state === 'completed' ? managed ? 'Черновик опубликован' : 'Черновик опубликован локально' : 'Опубликованная версия сохранена'}</strong><span className="muted">{hasDraft ? 'Опубликованный сайт не изменён. ' : ''}Версия {site.revision}{managed ? '' : ' · внешний хостинг не подключён'}</span></div>
-        {!managed ? <button className={hasDraft ? 'primary' : ''} disabled={!canPublish || !hasDraft || busy || (active && review.publication?.state !== 'pending')} onClick={() => void act('site.publish', { expectedRevision: review.publication?.state === 'pending' ? review.publication.expectedRevision : site.revision })}>Опубликовать</button> : null}
+        {!managed ? <Button className={hasDraft ? 'primary' : ''} disabled={!canPublish || !hasDraft || busy || (active && review.publication?.state !== 'pending')} onClick={() => void act('site.publish', { expectedRevision: review.publication?.state === 'pending' ? review.publication.expectedRevision : site.revision })}>Опубликовать</Button> : null}
       </div>
       {managed && canPublish && principal ? <PublicationPanel site={site} principal={principal} onChanged={() => onChanged()}/> : null}
-      <button onClick={()=>setRefresh(value=>value+1)}>Обновить чат</button>
+      <Button onClick={()=>setRefresh(value=>value+1)}>Обновить чат</Button>
       {site.operation==='publication'?<p role="status">Ожидается подтверждение публикации. Черновик доступен для просмотра.</p>:null}
-      {canCancelJob(cancellable,principal,managed)?<button disabled={busy} onClick={()=>void act('job.cancel',{})}>Отменить текущее задание</button>:null}
+      {canCancelJob(cancellable,principal,managed)?<Button disabled={busy} onClick={()=>void act('job.cancel',{})}>Отменить текущее задание</Button>:null}
       {pollError ? <div className="error-banner" role="alert"><span>{pollError}</span></div> : null}
-      {actionError ? <div className="error-banner" role="alert"><span>{actionError.message}</span><button onClick={() => setActionError(null)}>Закрыть сообщение</button></div> : null}
+      {actionError ? <div className="error-banner" role="alert"><span>{actionError.message}</span><Button onClick={() => setActionError(null)}>Закрыть сообщение</Button></div> : null}
       <VisualEditor key={`${site.id}:${principal?.userId ?? 'demo'}:${managed}`} site={site} {...(principal ? { principal } : {})} {...(pendingVisual ? { pendingSaveId: pendingVisual.id } : {})} blocked={active && !pendingVisual} onChanged={() => onChanged()}/>
       <div className="editor-layout">
         <div className="editor-review">
@@ -124,7 +126,7 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
               {!review.candidates.length ? <option value="">Пока нет правок</option> : review.candidates.map((candidate, index) => <option key={candidate.id} value={candidate.id}>{`Вариант ${index + 1} · ${statuses[candidate.status]}`}</option>)}
             </select>
           </div>
-          {managed ? <div className="row-actions"><button disabled={busy || !(site.draftId ?? site.publishedId)} onClick={() => void act('preview.open', { revisionId: previewable ? selected.parentRevisionId : site.draftId ?? site.publishedId })}>Открыть исходную версию</button><button disabled={busy || !previewable} onClick={() => void act('preview.open', { revisionId: selected?.id })}>Открыть вариант</button><p className="hint">Приватный предпросмотр проверенного варианта.</p></div> : <PreviewComparison siteId={site.id} domain={site.domain} beforeId={previewable ? selected.parentRevisionId : site.draftId ?? site.publishedId} afterId={previewable ? selected.id : null} {...(previewable ? { candidateId: selected.id } : {})}/>}
+          {managed ? <div className="row-actions"><Button disabled={busy || !(site.draftId ?? site.publishedId)} onClick={() => void act('preview.open', { revisionId: previewable ? selected.parentRevisionId : site.draftId ?? site.publishedId })}>Открыть исходную версию</Button><Button disabled={busy || !previewable} onClick={() => void act('preview.open', { revisionId: selected?.id })}>Открыть вариант</Button><p className="hint">Приватный предпросмотр проверенного варианта.</p></div> : <PreviewComparison siteId={site.id} domain={site.domain} beforeId={previewable ? selected.parentRevisionId : site.draftId ?? site.publishedId} afterId={previewable ? selected.id : null} {...(previewable ? { candidateId: selected.id } : {})}/>}
           <div className="candidate-decision">
             <strong>{selected ? `Вариант ${review.candidates.indexOf(selected) + 1} · ${statuses[selected.status]}` : 'Первая правка'}</strong>
             {parentIndex >= 0 ? <p className="hint">Уточнение варианта {parentIndex + 1}. Изменения построены на его файлах.</p> : null}
@@ -132,17 +134,17 @@ export function SiteEditor({ site, onChanged, modelMode, canPublish = true, mana
             {selected?.validation?.ok ? <span className="badge success">✓ Проверки пройдены · 375 и 1440 px</span> : null}
             {selected?.status === 'conflict' || (selected?.status === 'ready' && !canReview) ? <p className="conflict-note">Черновик изменился. Вариант сохранён отдельно.</p> : null}
             <div className="decision-actions">
-              <button disabled={!canReview || busy || active} onClick={() => { setRefinementId(selected!.id); document.getElementById('edit-instruction')?.focus(); }}>Уточнить</button>
-              <button className="primary" disabled={!canReview || busy || active} onClick={() => void act('edit.accept', { candidateId: selected!.id, expectedRevision: site.revision })}>Принять в черновик</button>
-              <button disabled={!selected || !['ready', 'conflict', 'failed'].includes(selected.status) || busy} onClick={() => { setRefinementId(null); void act('edit.reject', { candidateId: selected!.id }); }}>Отклонить</button>
+              <Button disabled={!canReview || busy || active} onClick={() => { setRefinementId(selected!.id); document.getElementById('edit-instruction')?.focus(); }}>Уточнить</Button>
+              <Button className="primary" disabled={!canReview || busy || active} onClick={() => void act('edit.accept', { candidateId: selected!.id, expectedRevision: site.revision })}>Принять в черновик</Button>
+              <Button disabled={!selected || !['ready', 'conflict', 'failed'].includes(selected.status) || busy} onClick={() => { setRefinementId(null); void act('edit.reject', { candidateId: selected!.id }); }}>Отклонить</Button>
             </div>
-            {selected?.status === 'conflict' || (selected?.status === 'ready' && !canReview) ? <button disabled={busy || active} onClick={retryCurrentBase}>Повторить на актуальном черновике</button> : null}
+            {selected?.status === 'conflict' || (selected?.status === 'ready' && !canReview) ? <Button disabled={busy || active} onClick={retryCurrentBase}>Повторить на актуальном черновике</Button> : null}
           </div>
         </div>
         <ChatPanel modelMode={modelMode} messages={messages} instruction={instruction} setInstruction={setInstruction} busy={busy || active} refinement={!!refinementId} onResetBase={() => setRefinementId(null)} onSend={() => void act('edit.request', { instruction, expectedRevision: site.revision, ...(refinementId ? { candidateId: refinementId } : {}) })}/>
       </div>
-      {admin && (site.draftId ?? site.publishedId) ? <button className="source-open" onClick={() => setSourceRevision(site.draftId ?? site.publishedId)}>Исходники текущей версии</button> : null}
-      <VersionHistory site={site} canPublish={canPublish} onChanged={() => onChanged()} {...(admin ? { onSource: (id: string) => setSourceRevision(id) } : {})}/>
+      {admin && (site.draftId ?? site.publishedId) ? <Button className="source-open" onClick={() => setSourceRevision(site.draftId ?? site.publishedId)}>Исходники текущей версии</Button> : null}
+      {showPublicationHistory?<VersionHistory site={site} canPublish={canPublish} onChanged={() => onChanged()} {...(admin ? { onSource: (id: string) => setSourceRevision(id) } : {})}/>:null}
       {admin && sourceRevision ? <SourceFiles key={site.id + sourceRevision} siteId={site.id} revisionId={sourceRevision}/> : null}
     </section>);
 }

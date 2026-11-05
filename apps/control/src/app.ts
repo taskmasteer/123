@@ -38,6 +38,7 @@ export interface AppDependencies {
     previewKey?: Uint8Array;
     publicOrigin?: string;
     allowedOrigins?: string[];
+    previewCookie?: boolean;
 }
 async function body(request: Request, maximum=64000) {
     if (request.method === 'GET' || request.method === 'HEAD')
@@ -111,7 +112,7 @@ export function createApp(deps: Partial<AppDependencies>) {
                 const revision = await deps.repository.revision(revisionId);
                 if (!revision || revision.siteId !== siteId)
                     throw new AppError('NOT_FOUND', 'Версия не найдена.');
-                if (url.searchParams.has('cap')) {
+                if (url.searchParams.has('cap') && deps.previewCookie !== false) {
                     url.searchParams.delete('cap');
                     return new Response(null, { status: 303, headers: { location: url.pathname, 'set-cookie': `sf_preview=${cap}; Path=/preview/${siteId}/${revisionId}/; HttpOnly; Secure; SameSite=None; Max-Age=600`, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
                 }

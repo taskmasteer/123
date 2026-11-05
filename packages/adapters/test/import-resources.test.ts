@@ -14,7 +14,7 @@ it('stages bounded hashed chunks, edits one about, maps a local logo, and keeps 
     const call = (m: string, p: any): Promise<any> => resources.request(owner, m, p);
     const upload = async (name: string, bytes: Buffer, extra: any = {}) => { const r = await call('resource.begin', { name, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), ...extra }); expect(r.id).toMatch(/^[a-f0-9-]{36}$/); await call('resource.chunk', { id: r.id, index: 0, base64: bytes.toString('base64') }); return r.id; };
     try {
-        const id = await upload('sites.csv', Buffer.from('domain,about,logo\na.test,First,logo.png\nb.test,Second,\n,Invalid,\n'));
+        const id = await upload('sites.csv', Buffer.from('domain,about,logo,mentionedUrl\na.test,First,logo.png,https://example.com\nb.test,Second,,https://example.com\n,Invalid,,https://example.com\n'));
         let summary = await call('import.prepare', { id });
         expect(summary).toMatchObject({ validCount: 1, invalidCount: 2, total: 3 });
         summary = await call('import.update', { id, revision: summary.revision, rowNumber: 3, about: 'Changed only second' });
@@ -112,7 +112,7 @@ it('accepts legal Adam7 passes, RGBA16 scanlines and the maximum supported width
 
 it('overlapping prepare cannot rewind a batch committed after the first preview', async () => {
  const root = await mkdtemp(join(tmpdir(), 'sf-prepare-race-')), db = await openLocalDatabase(root), b = new LocalBatches(db), service = new LocalImportResources(b);
- const bytes=Buffer.from('domain,about\na.test,First\n'), call=(m:string,p:unknown)=>service.request(owner,m,p) as Promise<any>;
+ const bytes=Buffer.from('domain,about,mentionedUrl\na.test,First,https://example.com\n'), call=(m:string,p:unknown)=>service.request(owner,m,p) as Promise<any>;
  let releaseA!:()=>void,releaseB!:()=>void,entered=0; const original=setImmediate;
  try {
   const {id}=await call('resource.begin',{name:'race.csv',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});

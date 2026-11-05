@@ -221,7 +221,7 @@ export class LocalImportResources {
             return this.batches.get(actor, id);
         }
         if (method === 'import.update') {
-            const p = object(value, ['id', 'revision', 'rowNumber', 'about', 'domain', 'referenceId']), id = uuid(p.id);
+            const p = object(value, ['id', 'revision', 'rowNumber', 'about', 'domain', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription']), id = uuid(p.id);
             db.transaction(() => {
                 const d = this.batches.read(actor, id, true);
                 if (d.summary.state !== 'preview' || d.summary.revision !== integer(p.revision))
@@ -229,7 +229,7 @@ export class LocalImportResources {
                 const rows = this.batches.rows(id), originals = new Map(rows.map(r => [r.rowNumber, rowFingerprint(r)])), row = rows.find(r => r.rowNumber === integer(p.rowNumber, 2, 5001));
                 if (!row)
                     throw new AppError('NOT_FOUND', 'Строка не найдена.');
-                for (const field of ['about', 'domain', 'referenceId'] as const)
+                for (const field of ['about', 'domain', 'referenceId', 'layoutReferenceId', 'mentionedUrl', 'mentionedDescription'] as const)
                     if (p[field] !== undefined) {
                         if (typeof p[field] !== 'string' || p[field].length > (field === 'domain' ? 253 : field === 'referenceId' ? 100 : 8000))
                             throw new AppError('INVALID_INPUT', 'Слишком длинное значение.');
@@ -264,7 +264,7 @@ export class LocalImportResources {
         if (method === 'import.commit') {
             const p = object(value, ['id', 'revision', 'requestKey']), id = uuid(p.id), requestKey = string(p.requestKey, 100), revision = integer(p.revision);
             db.transaction(() => {
-                const d = this.batches.read(actor, id, true), frozen = hash(Buffer.from(JSON.stringify(this.batches.rows(id).map(r => [r.rowNumber, r.input.domain, r.input.about ?? '', r.input.referenceId ?? '', r.input.logo ?? '', r.input.logoAssetId ?? '']))));
+                const d = this.batches.read(actor, id, true), frozen = hash(Buffer.from(JSON.stringify(this.batches.rows(id).map(r => [r.rowNumber, r.input.domain, r.input.about ?? '', r.input.referenceId ?? '', r.input.layoutReferenceId ?? '', r.input.logo ?? '', r.input.logoAssetId ?? '', r.input.mentionedUrl ?? '', r.input.mentionedDescription ?? '']))));
                 const old = db.sql.prepare('select id,hash from batches where owner_id=? and request_key=?').get(actor.userId, requestKey);
                 if (old) {
                     if (old.id !== id || old.hash !== frozen || d.committedRevision !== revision)

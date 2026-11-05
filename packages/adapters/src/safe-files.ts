@@ -39,7 +39,12 @@ export async function safeFile(root: string, path: string, createParents = false
       if (!missing(error)) throw error;
       if (!final) {
         if (!createParents) throw error;
-        await mkdir(cursor, { mode: 0o700 });
+        try { await mkdir(cursor, { mode: 0o700 }); }
+        catch (failure) { if (!(failure instanceof Error && 'code' in failure && failure.code === 'EEXIST')) throw failure; }
+        // Concurrent writers may create the same parent. Revalidate the winner;
+        // EEXIST must not admit a junction, symlink or regular file.
+        const created = await lstat(cursor);
+        if (created.isSymbolicLink() || !created.isDirectory()) throw new AppError('INVALID_INPUT', 'Non-regular artifact path.');
       }
     }
   }

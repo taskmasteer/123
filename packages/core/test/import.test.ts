@@ -7,13 +7,14 @@ function xlsx(cells: string, extra: Record<string, Uint8Array> = {}) {
 }
 const cell = (ref: string, text: string) => `<c r="${ref}" t="inlineStr"><is><t>${text}</t></is></c>`;
 describe('bounded import parsing', () => {
+    it('requires a mentioned link for every imported site', async () => { const r=await csv('domain\na.test\n'); expect(r.issues).toContainEqual(expect.objectContaining({rowNumber:2,code:'INVALID_LINK'})); });
     it('preserves BOM, quoted commas, embedded newlines and the exact about on one logical row', async () => {
         const result = await csv('\uFEFFdomain,about,logo\r\nEXAMPLE.COM,"One, two\nthree",brand.png\r\nsecond.test,,\r\n');
         expect(result.rows).toEqual([{ rowNumber: 2, domain: 'example.com', about: 'One, two\nthree', logo: 'brand.png' }, { rowNumber: 3, domain: 'second.test' }]);
         expect(result.issues).toContainEqual(expect.objectContaining({ rowNumber: 2, column: 'logo', code: 'LOGO_MAPPING_REQUIRED' }));
     });
     it('retains invalid rows and canonical IDN duplicates for correction', async () => {
-        const r = await csv('domain,about\nпример.рф,First\nxn--e1afmkfd.xn--p1ai,Second\n,Missing\n');
+        const r = await csv('domain,about,mentionedUrl\nпример.рф,First,https://example.com\nxn--e1afmkfd.xn--p1ai,Second,https://example.com\n,Missing,https://example.com\n');
         expect(r.rows).toHaveLength(3);
         expect(r.issues.map(i => [i.rowNumber, i.code])).toEqual([[3, 'DUPLICATE_DOMAIN'], [4, 'INVALID_DOMAIN']]);
     });
@@ -37,7 +38,7 @@ describe('bounded import parsing', () => {
         await expect(parseImport(xlsx('', { 'xl/_rels/sheet.xml.rels': strToU8('<Relationships><Relationship TargetMode="External" Target="https://bad.test"/></Relationships>') }))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     });
     it('never treats logo URLs or arbitrary asset IDs as authorized local mappings', async () => {
-        const r = await csv('domain,logo\na.test,https://bad.test/logo.png\nb.test,../secret.png');
+        const r = await csv('domain,logo,mentionedUrl\na.test,https://bad.test/logo.png,https://example.com\nb.test,../secret.png,https://example.com');
         expect(r.issues.every(i => i.code === 'INVALID_LOGO')).toBe(true);
         expect(r.issues).toHaveLength(2);
     });
@@ -48,3 +49,5 @@ describe('bounded import parsing', () => {
         await expect(parseImport(xlsx('<row r="1">' + cell('A1', 'domain') + '</row><row r="2">' + cell('A2', 'a.test') + '</row>', { 'xl/sharedStrings.xml': strToU8('<sst><si><t>' + 'x'.repeat(8001) + '</t></si></sst>') }))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     });
 });
+
+it('keeps formatting and layout reference independent in imported rows',async()=>{const result=await csv('domain,referenceId,layoutReferenceId,mentionedUrl\nfirst.example,corporate,folio,https://example.com\n');expect(result.issues).toEqual([]);expect(result.rows[0]).toMatchObject({referenceId:'corporate',layoutReferenceId:'folio'});});

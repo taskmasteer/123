@@ -19,15 +19,25 @@
     "build": "tsc -p tsconfig.build.json && npm run build --workspace @site-factory/desktop",
     "test:e2e": "node scripts/test-e2e.mjs",
     "tauri:dev": "npm run build && node scripts/desktop-dev.mjs",
-    "test:integration": "node scripts/test-integration.mjs"
+    "test:integration": "node scripts/test-integration.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "start:server": "node dist/apps/server/src/main.js",
+    "test:server": "node scripts/test-server.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "test:client": "node scripts/client-smoke.mjs",
+    "test:references": "node scripts/reference-template-smoke.mjs",
+    "test:references:live": "node scripts/reference-live-matrix.mjs"
   },
   "devDependencies": {
+    "@electron/packager": "20.3.0",
     "@playwright/test": "1.64.1",
     "@types/css-tree": "3.2.0",
     "@types/node": "24.10.0",
     "@types/pg": "8.23.1",
     "@types/pngjs": "6.0.5",
+    "@types/ssh2": "1.15.5",
     "@types/yauzl": "2.10.3",
+    "electron": "45.2.2",
     "typescript": "5.9.3",
     "vitest": "4.1.12"
   },
@@ -40,6 +50,7 @@
     "pngjs": "7.0.0",
     "read-excel-file": "9.3.13",
     "saxen": "11.1.0",
+    "ssh2": "1.17.0",
     "yauzl": "3.4.0"
   }
 }

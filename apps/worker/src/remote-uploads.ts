@@ -18,6 +18,8 @@ export async function uploadResources(options: {
     fetch?: typeof fetch;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Trusted host configuration for an internal object transport; never request input. */
+    storageOrigin?: string;
 }) {
     const transport = options.fetch ?? fetch, base = new URL(options.controlOrigin);
     if (base.protocol !== 'https:' || base.pathname !== '/' || base.search || base.hash)
@@ -48,7 +50,7 @@ export async function uploadResources(options: {
         throw new AppError('INVALID_INPUT', 'Invalid upload preparation.');
     for (let i = 0; i < files.length; i++) {
         const grant = object(prepared.files[i], ['path', 'objectKey', 'url', 'headers']), file = files[i]!, headers = object(grant.headers, ['content-type', 'if-none-match']), url = new URL(string(grant.url, 16000));
-        if (grant.path !== file.path || headers['content-type'] !== file.mediaType || headers['if-none-match'] !== '*' || url.protocol !== 'https:' || !url.hostname.endsWith('.r2.cloudflarestorage.com') || url.username || url.password)
+        if (grant.path !== file.path || headers['content-type'] !== file.mediaType || headers['if-none-match'] !== '*' || url.protocol !== 'https:' || !(options.storageOrigin ? url.origin === options.storageOrigin : url.hostname.endsWith('.r2.cloudflarestorage.com')) || url.username || url.password)
             throw new AppError('INVALID_INPUT', 'Invalid storage capability.');
         string(grant.objectKey, 1000);
         const result = await phase(signal => transport(url, { method: 'PUT', headers: { 'content-type': file.mediaType, 'if-none-match': '*' }, body: Buffer.from(file.bytes), redirect: 'error', signal }));

@@ -1,16 +1,233 @@
 [
-  {"id":"folio","name":"Folio","url":"https://folio-topaz-delta.vercel.app/","viewedAt":"2026-10-26","description":"Тёмная композиция, крупный заголовок с засечками, спокойная палитра.","palette":["тёмный фон","спокойные акценты"],"typography":"Крупный заголовок с засечками","density":"Низкая","adaptations":["Контраст масштаба заголовка и пояснения","Свои цвета и тексты"]},
-  {"id":"northstar","name":"Northstar","url":"https://northstar-template-demo.vercel.app/","viewedAt":"2026-10-26","description":"Светлый минимализм, крупная типографика, синий акцент.","palette":["светлый фон","синий"],"typography":"Крупная и лаконичная","density":"Низкая","adaptations":["Воздух вокруг заголовка","Своя продуктовая композиция"]},
-  {"id":"waymark","name":"Waymark","url":"https://waymark-template.vercel.app/","viewedAt":"2026-10-26","description":"Мягкий светлый фон, округлая навигация, аккуратная продуктовая подача.","palette":["мягкий светлый фон"],"typography":"Спокойная продуктовая","density":"Средняя","adaptations":["Форма навигации","Свои HTML и CSS"]},
-  {"id":"evolv-ai","name":"Evolv AI","url":"https://evolv-ai-v1.21st.app/","viewedAt":"2026-10-26","description":"Тёмный фон, тонкая сетка, просторный центрированный первый экран.","palette":["тёмный фон"],"typography":"Центрированный крупный заголовок","density":"Низкая","adaptations":["Центрированная иерархия","Собственные схемы вместо чужих ассетов"]},
-  {"id":"agent-ai","name":"Agent AI","url":"https://agent-ai-v1.21st.app/","viewedAt":"2026-10-26","description":"Тёмный первый экран с заголовком и пояснением в разных колонках.","palette":["тёмный фон"],"typography":"Контраст заголовка и пояснения","density":"Средняя","adaptations":["Разделение пояснения и заголовка","Оригинальные тексты"]},
-  {"id":"dasne-ai","name":"Dasne AI","url":"https://dasneai-ai-search-visibility-landing-template-v1.21st.app/","viewedAt":"2026-10-26","description":"Плотный технологичный стиль, крупный центрированный заголовок.","palette":["тёмная технологичная палитра"],"typography":"Крупная центрированная","density":"Высокая","adaptations":["Плотность технической информации","Своя типографическая шкала"]},
-  {"id":"vorix","name":"Vorix","url":"https://vorix-creative-digital-agency-react-template-v2.21st.app/","viewedAt":"2026-10-26","description":"Очень крупная типографика, асимметричная композиция, жёлтый акцент.","palette":["жёлтый","контрастный тёмный"],"typography":"Очень крупная","density":"Средняя","adaptations":["Асимметрия и масштаб","Своя композиция без React"]},
-  {"id":"taxo","name":"Taxo","url":"https://taxo-astro.pages.dev/","viewedAt":"2026-10-26","description":"Тёплый кремовый фон, зелёные и охристые акценты, деловая подача.","palette":["кремовый","зелёный","охра"],"typography":"Деловая","density":"Средняя","adaptations":["Спокойная деловая иерархия","Оригинальные материалы"]},
-  {"id":"techlo","name":"Techlo","url":"https://techlo-astro.pages.dev/","viewedAt":"2026-10-26","description":"Насыщенная синяя палитра, технологичная сервисная подача.","palette":["насыщенный синий"],"typography":"Сервисная деловая","density":"Средняя","adaptations":["Синяя сервисная палитра","Своя навигация по разделам"]},
-  {"id":"techbyte","name":"Techbyte","url":"https://techbyte-astro.pages.dev/","viewedAt":"2026-10-26","description":"Корпоративная композиция с оранжевым акцентом; фотозависимый вариант.","palette":["оранжевый","нейтральный"],"typography":"Корпоративная","density":"Средняя","adaptations":["Корпоративная структура","Заменять фотографии собственными схемами"]},
-  {"id":"upstart","name":"Upstart","url":"https://upstart-astro.pages.dev/","viewedAt":"2026-10-26","description":"Тёмная продуктовая страница с фиолетовым акцентом и сочетанием шрифтов.","palette":["тёмный фон","фиолетовый"],"typography":"Контрастная пара шрифтов","density":"Средняя","adaptations":["Сочетание начертаний","Свои продуктовые тексты"]},
-  {"id":"startix","name":"Startix","url":"https://startix-reactjs-nu.vercel.app/","viewedAt":"2026-10-26","description":"Каталог вариантов лендингов; сетка, контрастные акценты и крупные заголовки.","palette":["контрастные акценты"],"typography":"Крупные заголовки","density":"Переменная","adaptations":["Вариативность секций","Собственные статические шаблоны"]},
-  {"id":"next-elite","name":"Next Elite","url":"https://next-elite-boilerplate.vercel.app/","viewedAt":"2026-10-26","description":"Чистые карточки и элементы управления; дополнительный ориентир для панели.","palette":["светлые нейтральные цвета"],"typography":"Интерфейсная","density":"Средняя","adaptations":["Читаемость информационных блоков","Без переноса функций регистрации"]},
-  {"id":"rayz-ai","name":"Rayz AI","url":"https://rayz-ai.nextjsshop-preview.workers.dev/","viewedAt":"2026-10-26","description":"Светлая композиция с большим графическим полем и модульной сеткой.","palette":["светлый фон"],"typography":"Модульная информационная","density":"Средняя","adaptations":["Большое поле для собственной схемы","Без переноса чужих изображений"]}
+  {
+    "id": "folio",
+    "name": "Folio",
+    "url": "https://folio-topaz-delta.vercel.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Центрированный первый экран, крупный заголовок с засечками и широкая панель данных.",
+    "palette": [
+      "тёмный фон",
+      "спокойные акценты"
+    ],
+    "typography": "Крупный заголовок с засечками",
+    "density": "Низкая",
+    "adaptations": [
+      "Контраст масштаба заголовка и пояснения",
+      "Свои цвета и тексты"
+    ]
+  },
+  {
+    "id": "northstar",
+    "name": "Northstar",
+    "url": "https://northstar-template-demo.vercel.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Светлый минимализм, крупная типографика, синий акцент.",
+    "palette": [
+      "светлый фон",
+      "синий"
+    ],
+    "typography": "Крупная и лаконичная",
+    "density": "Низкая",
+    "adaptations": [
+      "Воздух вокруг заголовка",
+      "Своя продуктовая композиция"
+    ]
+  },
+  {
+    "id": "waymark",
+    "name": "Waymark",
+    "url": "https://waymark-template.vercel.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Мягкий светлый фон, округлая навигация, аккуратная продуктовая подача.",
+    "palette": [
+      "мягкий светлый фон"
+    ],
+    "typography": "Спокойная продуктовая",
+    "density": "Средняя",
+    "adaptations": [
+      "Форма навигации",
+      "Свои HTML и CSS"
+    ]
+  },
+  {
+    "id": "evolv-ai",
+    "name": "Evolv AI",
+    "url": "https://evolv-ai-v1.21st.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Тёмный фон, тонкая сетка, просторный центрированный первый экран.",
+    "palette": [
+      "тёмный фон"
+    ],
+    "typography": "Центрированный крупный заголовок",
+    "density": "Низкая",
+    "adaptations": [
+      "Центрированная иерархия",
+      "Собственные схемы вместо чужих ассетов"
+    ]
+  },
+  {
+    "id": "agent-ai",
+    "name": "Agent AI",
+    "url": "https://agent-ai-v1.21st.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Тёмный первый экран с заголовком и пояснением в разных колонках.",
+    "palette": [
+      "тёмный фон"
+    ],
+    "typography": "Контраст заголовка и пояснения",
+    "density": "Средняя",
+    "adaptations": [
+      "Разделение пояснения и заголовка",
+      "Оригинальные тексты"
+    ]
+  },
+  {
+    "id": "dasne-ai",
+    "name": "Dasne AI",
+    "url": "https://dasneai-ai-search-visibility-landing-template-v1.21st.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Плотный технологичный стиль, крупный центрированный заголовок.",
+    "palette": [
+      "тёмная технологичная палитра"
+    ],
+    "typography": "Крупная центрированная",
+    "density": "Высокая",
+    "adaptations": [
+      "Плотность технической информации",
+      "Своя типографическая шкала"
+    ]
+  },
+  {
+    "id": "vorix",
+    "name": "Vorix",
+    "url": "https://vorix-creative-digital-agency-react-template-v2.21st.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Очень крупная типографика, асимметричная композиция, жёлтый акцент.",
+    "palette": [
+      "жёлтый",
+      "контрастный тёмный"
+    ],
+    "typography": "Очень крупная",
+    "density": "Средняя",
+    "adaptations": [
+      "Асимметрия и масштаб",
+      "Своя композиция без React"
+    ]
+  },
+  {
+    "id": "taxo",
+    "name": "Taxo",
+    "url": "https://taxo-astro.pages.dev/",
+    "viewedAt": "2026-10-26",
+    "description": "Тёплый кремовый фон, зелёные и охристые акценты, деловая подача.",
+    "palette": [
+      "кремовый",
+      "зелёный",
+      "охра"
+    ],
+    "typography": "Деловая",
+    "density": "Средняя",
+    "adaptations": [
+      "Спокойная деловая иерархия",
+      "Оригинальные материалы"
+    ]
+  },
+  {
+    "id": "techlo",
+    "name": "Techlo",
+    "url": "https://techlo-astro.pages.dev/",
+    "viewedAt": "2026-10-26",
+    "description": "Насыщенная синяя палитра, технологичная сервисная подача.",
+    "palette": [
+      "насыщенный синий"
+    ],
+    "typography": "Сервисная деловая",
+    "density": "Средняя",
+    "adaptations": [
+      "Синяя сервисная палитра",
+      "Своя навигация по разделам"
+    ]
+  },
+  {
+    "id": "techbyte",
+    "name": "Techbyte",
+    "url": "https://techbyte-astro.pages.dev/",
+    "viewedAt": "2026-10-26",
+    "description": "Корпоративная композиция с оранжевым акцентом; фотозависимый вариант.",
+    "palette": [
+      "оранжевый",
+      "нейтральный"
+    ],
+    "typography": "Корпоративная",
+    "density": "Средняя",
+    "adaptations": [
+      "Корпоративная структура",
+      "Заменять фотографии собственными схемами"
+    ]
+  },
+  {
+    "id": "upstart",
+    "name": "Upstart",
+    "url": "https://upstart-astro.pages.dev/",
+    "viewedAt": "2026-10-26",
+    "description": "Тёмная продуктовая страница с фиолетовым акцентом и сочетанием шрифтов.",
+    "palette": [
+      "тёмный фон",
+      "фиолетовый"
+    ],
+    "typography": "Контрастная пара шрифтов",
+    "density": "Средняя",
+    "adaptations": [
+      "Сочетание начертаний",
+      "Свои продуктовые тексты"
+    ]
+  },
+  {
+    "id": "startix",
+    "name": "Startix",
+    "url": "https://startix-reactjs-nu.vercel.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Каталог вариантов лендингов; сетка, контрастные акценты и крупные заголовки.",
+    "palette": [
+      "контрастные акценты"
+    ],
+    "typography": "Крупные заголовки",
+    "density": "Переменная",
+    "adaptations": [
+      "Вариативность секций",
+      "Собственные статические шаблоны"
+    ]
+  },
+  {
+    "id": "next-elite",
+    "name": "Next Elite",
+    "url": "https://next-elite-boilerplate.vercel.app/",
+    "viewedAt": "2026-10-26",
+    "description": "Чистые карточки и элементы управления; дополнительный ориентир для панели.",
+    "palette": [
+      "светлые нейтральные цвета"
+    ],
+    "typography": "Интерфейсная",
+    "density": "Средняя",
+    "adaptations": [
+      "Читаемость информационных блоков",
+      "Без переноса функций регистрации"
+    ]
+  },
+  {
+    "id": "rayz-ai",
+    "name": "Rayz AI",
+    "url": "https://rayz-ai.nextjsshop-preview.workers.dev/",
+    "viewedAt": "2026-10-26",
+    "description": "Светлая композиция с большим графическим полем и модульной сеткой.",
+    "palette": [
+      "светлый фон"
+    ],
+    "typography": "Модульная информационная",
+    "density": "Средняя",
+    "adaptations": [
+      "Большое поле для собственной схемы",
+      "Без переноса чужих изображений"
+    ]
+  }
 ]

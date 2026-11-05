@@ -45,7 +45,7 @@ export class LocalBatches {
         authorize(actor, 'site:create');
         if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestKey) || inputs.length > importLimits.rows || new Set(inputs.map(r => r.rowNumber)).size !== inputs.length || inputs.some(r => !Number.isInteger(r.rowNumber) || r.rowNumber < 2))
             throw new AppError('INVALID_INPUT', 'Некорректная пачка.');
-        const parsed = validateRows(structuredClone(inputs)), hash = createHash('sha256').update(JSON.stringify(parsed.rows.map(r => [r.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.logo ?? '', r.logoAssetId ?? '']))).digest('hex');
+        const parsed = validateRows(structuredClone(inputs)), hash = createHash('sha256').update(JSON.stringify(parsed.rows.map(r => [r.rowNumber, r.domain, r.about ?? '', r.referenceId ?? '', r.layoutReferenceId ?? '', r.logo ?? '', r.logoAssetId ?? '', r.mentionedUrl ?? '', r.mentionedDescription ?? '']))).digest('hex');
         const batchId = this.db.transaction(() => {
             const old = this.db.sql.prepare('select id,hash from batches where owner_id=? and request_key=?').get(actor.userId, requestKey);
             if (old) {
@@ -84,11 +84,11 @@ export class LocalBatches {
                     r.issues = [{ rowNumber: r.rowNumber, column: 'domain', code: 'DUPLICATE_DOMAIN', message: 'Домен уже есть в реестре.' }];
                 else {
                     const siteId = randomUUID();
-                    const input = parseSiteInput({ domain: r.input.domain, ...(r.input.about ? { about: r.input.about } : {}), ...(r.input.referenceId ? { referenceId: r.input.referenceId } : {}), ...(r.input.logoAssetId ? { logoAssetId: r.input.logoAssetId } : {}) });
+                    const input = parseSiteInput({ domain: r.input.domain, ...(r.input.about ? { about: r.input.about } : {}), ...(r.input.referenceId ? { referenceId: r.input.referenceId } : {}), ...(r.input.layoutReferenceId ? {layoutReferenceId:r.input.layoutReferenceId} : {}), ...(r.input.logoAssetId ? { logoAssetId: r.input.logoAssetId } : {}), ...(r.input.mentionedUrl ? {mentionedUrl:r.input.mentionedUrl,mentionedDescription:r.input.mentionedDescription??''}:{}) });
                     const ownerId = String(this.db.sql.prepare('select owner_id from batches where id=?').get(id)!.owner_id);
                     const site: Site = { id: siteId, domain: input.domain, ownerId, assignedUserIds: [], input, revision: 0, draftId: null, publishedId: null, generationStatus: 'queued', domainStatus: 'pending' };
                     insertLocalSite(this.db, site);
-                    insertLocalJob(this.db, { id: siteId, siteId, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(styles?{generation:batchDirection(styles,id,r.rowNumber,input.referenceId)}:{}) }, id);
+                    insertLocalJob(this.db, { id: siteId, siteId, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(styles?{generation:batchDirection(styles,id,r.rowNumber,input.layoutReferenceId?'reference-'+input.layoutReferenceId:input.referenceId)}:{}) }, id);
                     r.siteId = siteId;
                 }
                 this.putRow(id, r);
