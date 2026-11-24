@@ -10,14 +10,14 @@ const owner = { userId: 'owner', role: 'user' } as const;
 it('binds request keys to canonical rows, retains errors and isolates existing domain failures', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-batch-')), db = await openLocalDatabase(root), b = new LocalBatches(db);
     try {
-        const rows = [{ rowNumber: 2, domain: 'пример.рф', about: 'Exact one-row about' }, { rowNumber: 3, domain: 'xn--e1afmkfd.xn--p1ai' }, { rowNumber: 4, domain: '' }, { rowNumber: 5, domain: 'next.test' }];
+        const rows = [{ mentionedUrl: 'https://example.com/', rowNumber: 2, domain: 'пример.рф', about: 'Exact one-row about' }, { mentionedUrl: 'https://example.com/', rowNumber: 3, domain: 'xn--e1afmkfd.xn--p1ai' }, { mentionedUrl: 'https://example.com/', rowNumber: 4, domain: '' }, { mentionedUrl: 'https://example.com/', rowNumber: 5, domain: 'next.test' }];
         const first = await b.submitBatch(owner, rows, 'request-1');
         expect(first.siteIds).toHaveLength(2);
         expect(await b.submitBatch(owner, rows, 'request-1')).toEqual(first);
-        await expect(b.submitBatch(owner, [{ rowNumber: 2, domain: 'changed.test' }], 'request-1')).rejects.toMatchObject({ code: 'CONFLICT' });
+        await expect(b.submitBatch(owner, [{ mentionedUrl: 'https://example.com/', rowNumber: 2, domain: 'changed.test' }], 'request-1')).rejects.toMatchObject({ code: 'CONFLICT' });
         expect(db.sql.prepare('select count(*) n from sites').get()!.n).toBe(2);
         expect((await b.page(owner, first.batchId)).items).toHaveLength(4);
-        const conflict = await b.submitBatch(owner, [{ rowNumber: 2, domain: 'next.test' }, { rowNumber: 3, domain: 'other.test' }], 'request-2');
+        const conflict = await b.submitBatch(owner, [{ mentionedUrl: 'https://example.com/', rowNumber: 2, domain: 'next.test' }, { mentionedUrl: 'https://example.com/', rowNumber: 3, domain: 'other.test' }], 'request-2');
         expect(conflict.siteIds).toHaveLength(1);
         expect((await b.page(owner, conflict.batchId)).items[0]!.issues[0]!.code).toBe('DUPLICATE_DOMAIN');
     }
@@ -29,7 +29,7 @@ it('binds request keys to canonical rows, retains errors and isolates existing d
 it('keeps direct grants separate from batch scope through worker CAS and fences cancelled writes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-local-grants-')), db = await openLocalDatabase(root), b = new LocalBatches(db), q = await createLocalQueue(root, { now: () => 1000 }, db), sites = await createLocalState(root, { now: () => 1000 }, db), admin = { userId: 'admin', role: 'admin' } as const;
     try {
-        const batch = await b.submitBatch(owner, [{ rowNumber: 2, domain: 'grants.test' }], 'grants'), siteId = batch.siteIds[0]!;
+        const batch = await b.submitBatch(owner, [{ mentionedUrl: 'https://example.com/', rowNumber: 2, domain: 'grants.test' }], 'grants'), siteId = batch.siteIds[0]!;
         await sites.compareAndSet(siteId, 0, { assignedUserIds: ['direct'] });
         await expect(b.get({ userId: 'direct', role: 'spec-user' }, batch.batchId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
         await b.assign(admin, batch.batchId, ['assigned']);
@@ -52,7 +52,7 @@ it('keeps direct grants separate from batch scope through worker CAS and fences 
 it('pauses at stage boundaries, resumes only paused work and fences cancelled generation without touching later edits', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-pause-')), db = await openLocalDatabase(root), b = new LocalBatches(db), q = await createLocalQueue(root, { now: () => 1000 }, db);
     try {
-        const batch = await b.submitBatch(owner, [{ rowNumber: 2, domain: 'a.test' }, { rowNumber: 3, domain: 'b.test' }], 'key');
+        const batch = await b.submitBatch(owner, [{ mentionedUrl: 'https://example.com/', rowNumber: 2, domain: 'a.test' }, { mentionedUrl: 'https://example.com/', rowNumber: 3, domain: 'b.test' }], 'key');
         const claim = (await q.claim('worker'))!;
         await b.pauseBatch(owner, batch.batchId);
         expect(await q.claim('second')).toBeNull();
@@ -79,7 +79,7 @@ it('projects current registry status across failures, running and pause/resume w
     let batchId: string;
     const pause = () => b.pauseBatch(owner, batchId), resume = () => b.resumeBatch(owner, batchId);
     try {
-        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ rowNumber: i + 2, domain: 'status-' + i + '.test' })), 'status');
+        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ mentionedUrl: 'https://example.com/', rowNumber: i + 2, domain: 'status-' + i + '.test' })), 'status');
         batchId = batch.batchId;
         const a = (await q.claim(workerA))!, c = (await q.claim(workerA))!, d = (await q.claim(workerB))!;
         expect(a).not.toBeNull();
@@ -128,7 +128,7 @@ it('projects current registry status across failures, running and pause/resume w
 it('freezes adjacent batch directions before competing workers claim and preserves them on retry',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-directions-')),db=await openLocalDatabase(root),styles=['a','b','c'].map(id=>({id,name:id,version:'1.0.0',enabled:true,referenceIds:[]}));
  const b=new LocalBatches(db,{list:async()=>({styles,references:[]})}),q=await createLocalQueue(root,{now:()=>1000},db);
- try{const result=await b.submitBatch(owner,Array.from({length:6},(_,i)=>({rowNumber:i+2,domain:'direction-'+i+'.test'})),'directions');
+ try{const result=await b.submitBatch(owner,Array.from({length:6},(_,i)=>({ mentionedUrl: 'https://example.com/', rowNumber:i+2,domain:'direction-'+i+'.test'})),'directions');
  const jobs=result.siteIds.map(id=>JSON.parse(String(db.sql.prepare('select data from jobs where id=?').get(id)!.data)));
  expect(jobs.every(j=>j.generation)).toBe(true);for(let i=1;i<jobs.length;i++)expect(jobs[i].generation.styleId).not.toBe(jobs[i-1].generation.styleId);
  const a=(await q.claim('worker-a'))!,c=(await q.claim('worker-b'))!;expect(a.job.generation).not.toEqual(c.job.generation);const pinned=a.job.generation;
@@ -137,7 +137,7 @@ it('freezes adjacent batch directions before competing workers claim and preserv
 });
 it('individual running cancellation revokes stale execution while retaining published content',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-cancel-')),db=await openLocalDatabase(root),b=new LocalBatches(db),q=await createLocalQueue(root,{now:()=>1000},db),sites=await createLocalState(root,{now:()=>1000},db);
- try{const result=await b.submitBatch(owner,[{rowNumber:2,domain:'cancel.test'}],'cancel'),id=result.siteIds[0]!,claim=(await q.claim('worker'))!;
+ try{const result=await b.submitBatch(owner,[{ mentionedUrl: 'https://example.com/', rowNumber:2,domain:'cancel.test'}],'cancel'),id=result.siteIds[0]!,claim=(await q.claim('worker'))!;
  await q.cancel(claim.job.id);expect((await q.get(id))!.state).toBe('cancelled');await expect(q.heartbeat(claim.lease)).rejects.toMatchObject({code:'STALE_LEASE'});await expect(sites.workerCompareAndSet(id,0,{publishedId:'stale'},claim.lease)).rejects.toMatchObject({code:'STALE_LEASE'});expect((await sites.get(id))!.publishedId).toBeNull();
  }finally{await q.close();await sites.close();await db.close();await rm(root,{recursive:true,force:true});}
 });
@@ -145,7 +145,7 @@ it('individual running cancellation revokes stale execution while retaining publ
 it('checked first draft commits with its checkpoint, survives safe cancellation and fences different same-revision pointers',async()=>{
  const {runJob}=await import('../../../apps/worker/src/pipeline.js'),{createCheckpointStore}=await import('../../../apps/worker/src/checkpoints.js'),{createLocalArtifacts}=await import('../src/local-artifacts.js'),{createLocalRevisions}=await import('../src/local-revisions.js'),{FakeModel}=await import('../src/fake-model.js');
  const root=await mkdtemp(join(tmpdir(),'sf-first-draft-')),clock={now:()=>1000},db=await openLocalDatabase(root),sites=await createLocalState(root,clock,db),q=await createLocalQueue(root,clock,db),b=new LocalBatches(db),revisions=await createLocalRevisions(root,db),artifacts=await createLocalArtifacts(join(root,'artifacts'),clock),checkpoints=await createCheckpointStore(join(root,'checkpoints'),clock);
- try {const batch=await b.submitBatch(owner,[{rowNumber:2,domain:'first-draft.test',about:'A supplied concept for event tracing'}],'first-draft'),claim=(await q.claim('worker'))!;let replayed=false,earlyReplayed=false,earlyReplayError:unknown;
+ try {const batch=await b.submitBatch(owner,[{ mentionedUrl: 'https://example.com/', rowNumber:2,domain:'first-draft.test',about:'A supplied concept for event tracing'}],'first-draft'),claim=(await q.claim('worker'))!;let replayed=false,earlyReplayed=false,earlyReplayError:unknown;
  const checkpoint=q.checkpoint.bind(q);q.checkpoint=async(...args)=>{await checkpoint(...args);if(!earlyReplayed){earlyReplayed=true;try{await checkpoint(...args);}catch(error){earlyReplayError=error;}}if(args[1].stage==='publication'){if((await sites.get(claim.job.siteId))!.draftId){await checkpoint(...args);replayed=true;}}};
  await runJob(claim.job,claim.lease,{sites,queue:q,revisions,artifacts,checkpoints,clock,workspace:join(root,'work'),model:new FakeModel(),publication:{advance:async()=> 'waiting_quota'},templates:{load:async()=>[{path:'index.html',mediaType:'text/html',bytes:Buffer.from('<h1 data-topic>Topic</h1>')}]},validate:async()=>({ok:true,issues:[],screenshotIds:[]})},new AbortController().signal);
  const site=(await sites.get(claim.job.siteId))!;expect(earlyReplayError).toBeUndefined();expect(replayed).toBe(true);expect(site.draftId).toBeTruthy();expect(site.publishedId).toBeNull();expect(site.revision).toBe(0);expect((await revisions.get(site.draftId!))!.kind).toBe('draft');

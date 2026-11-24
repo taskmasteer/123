@@ -73,7 +73,7 @@ export class PostgresBatches {
                 if (r.siteId || r.issues.length)
                     return true;
                 const owner = (await tx.query('select owner_id from private.batches where id=$1', [id])).rows[0].owner_id;
-                if ((await tx.query('select id from public.sites where domain=$1', [r.input.domain])).rowCount)
+                if ((await tx.query('select id from public.sites where domain=$1 and archived_at is null', [r.input.domain])).rowCount)
                     r.issues = [{ rowNumber: r.rowNumber, column: 'domain', code: 'DUPLICATE_DOMAIN', message: 'Домен уже существует в реестре.' }];
                 else {
                     // A hosting controller can defer admission until an IPv4 is

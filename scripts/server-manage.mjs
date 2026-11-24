@@ -1,3 +1,6 @@
+import './lib/browser-env.mjs';
+import {superviseApi} from './lib/api-supervisor.mjs';
+import {rotatingLog} from './lib/rotating-log.mjs';
 import {readFile,writeFile,mkdir,rm,rename,stat} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {spawn} from 'node:child_process';
@@ -12,7 +15,7 @@ import {Console} from 'node:console';
 import {Pool} from 'pg';
 import {protectSecret} from '../dist/apps/server/src/secrets.js';
 import {migrate} from '../dist/apps/server/src/migrate.js';
-import {LocalAuth,loginInput} from '../dist/apps/server/src/auth.js';
+import {LocalAuth,loginInput,passwordHash} from '../dist/apps/server/src/auth.js';
 import {restoreWindowsBackup} from '../dist/apps/server/src/recovery.js';
 
 const root=resolve(import.meta.dirname,'..'),base=join(root,'.local-state/server'),configPath=join(base,'config.json');
@@ -25,7 +28,7 @@ async function run(binary,args,options={}){return new Promise((yes,no)=>{const c
 async function question(label,secret=false){if(!process.stdin.isTTY)throw Error('Use an interactive terminal or --input-json with JSON on stdin.');process.stdout.write(label+': ');const silent=new Writable({write(_chunk,_encoding,callback){callback();}}),rl=createInterface({input:process.stdin,output:secret?silent:process.stdout,terminal:true});try{return await rl.question('');}finally{rl.close();if(secret)process.stdout.write('\n');}}
 let supplied={};if(args.includes('--input-json')){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>16384)throw Error('Input too large');}supplied=JSON.parse(value);}
 const input=async(name,label,secret=false)=>{if(secret&&option(name)!==undefined)throw Error('Secrets must be entered interactively or through --input-json on stdin.');return supplied[name]??(secret?undefined:option(name))??await question(label,secret);};
-async function activeData(){try{return (await readFile(join(root,'active-data.txt'),'utf8')).trim();}catch(e){if(e.code!=='ENOENT')throw e;return base;}}
+async function activeData(){if(process.env.SITE_FACTORY_SERVER_DATA)return resolve(process.env.SITE_FACTORY_SERVER_DATA);try{return (await readFile(join(root,'active-data.txt'),'utf8')).trim();}catch(e){if(e.code!=='ENOENT')throw e;return base;}}
 async function config(){return JSON.parse((await readFile(configPath,'utf8')).replace(/^\uFEFF/,''));}
 async function writeConfig(value,path=configPath){const temporary=path+'.tmp-'+randomUUID();await writeFile(temporary,JSON.stringify(value,null,2),{mode:0o600});await rename(temporary,path);}
 async function configure(ip,data=base){
@@ -48,7 +51,7 @@ async function startDatabase(c){await run(pg('pg_ctl'),['-D',join(base,'postgres
 async function ensureDatabase(port){
  const running=await new Promise(yes=>{const child=spawn(pg('pg_ctl'),['-D',join(base,'postgres'),'status'],{stdio:'ignore',windowsHide:true});child.once('error',()=>yes(false));child.once('exit',code=>yes(code===0));});if(running)return;
  const service=process.platform==='win32'?(await config()).databaseService:null;
- if(!service){await startDatabase({port});return;}
+ if(!service){if(process.env.SITE_FACTORY_DATABASE_MANAGED==='1')throw Error('Managed PostgreSQL service is not running');await startDatabase({port});return;}
  if(!/^[A-Za-z0-9-]{1,80}$/.test(service))throw Error('Invalid PostgreSQL service name');
  await run('sc.exe',['start',service],{stdio:'ignore'}).catch(()=>{});
  for(let i=0;i<60;i++){try{await run(pg('pg_isready'),['-h','127.0.0.1','-p',String(port),'-q'],{stdio:'ignore'});return;}catch{}await new Promise(r=>setTimeout(r,500));}
@@ -68,6 +71,15 @@ async function main(){
   const c=await connection(),admin=new Pool({...c,database:'postgres'});try{await admin.query('create database factory');}finally{await admin.end();}
   const pool=new Pool(c);try{await migrate(pool,root);if(!prepare){const auth=new LocalAuth(pool),session=await auth.register({login,password,invite:''},true);await auth.logout(session.token);}}finally{await pool.end();}
   await configure(ip);console.log('API initialized. Install/start the service.');
+ }else if(command==='backup-target'){
+  const directory=resolve(await input('directory','External backup directory')),data=await activeData();
+  if(directory===resolve(data)||directory.startsWith(resolve(data)+(process.platform==='win32'?'\\':'/')))throw Error('Use a separate backup destination');
+  await writeConfig({directory},join(data,'backup-replica.json'));console.log('Encrypted backup replica configured. Check replica status after the next backup.');
+ }else if(command==='reset-password'){
+  const data=await activeData(),c=JSON.parse(await readFile(join(data,'config.json'),'utf8'));
+  const login=loginInput(await input('login','User login')),password=await input('password','New password (12+ characters)',true),hash=await passwordHash(password);
+  const pool=new Pool({host:'127.0.0.1',port:c.databasePort,user:'factory',database:c.databaseName??'factory',password:await protectSecret(c.databasePassword,true)});
+  try{await pool.query('begin');const result=await pool.query('update factory.accounts set password_hash=$2 where login=$1 returning id',[login,hash]);if(!result.rowCount)throw Error('User not found');const id=result.rows[0].id;await pool.query('delete from factory.sessions where user_id=$1',[id]);await pool.query("insert into factory.audit(actor,action) values($1,'account.password.operator-reset')",[id]);await pool.query('commit');console.log('Password changed; all user sessions revoked.');}catch(e){await pool.query('rollback');throw e;}finally{await pool.end();}
  }else if(command==='address'){await configure(await input('ip','Public IPv4'),option('data')?resolve(option('data')):await activeData());console.log('Restart API and import the new connection file in each client.');
  }else if(command==='restore'){
   const archive=resolve(await input('backup','Backup file')),password=await input('key','Recovery key',true),ip=await input('ip','New public IPv4');if(!isIPv4(ip))throw Error('Invalid IPv4');
@@ -79,15 +91,15 @@ async function main(){
  }else if(command==='status'){
   const c=JSON.parse(await readFile(join(await activeData(),'config.json'),'utf8')),origin=new URL(c.publicOrigin);
   await new Promise((yes,no)=>{const req=https.request({hostname:'127.0.0.1',port:c.tlsPort,path:'/auth/status',ca:c.certificate,headers:{host:origin.host,origin:origin.origin}},res=>{let bytes='';res.on('data',chunk=>{bytes+=chunk;if(bytes.length>16384)res.destroy();});res.on('error',no);res.on('end',()=>{try{const body=JSON.parse(bytes);if(res.statusCode!==200||!Object.hasOwn(body,'user')||body.bootstrap!==false)throw Error('API is not ready');yes();}catch(e){no(e);}});});req.setTimeout(3000,()=>req.destroy(Error('API check timed out')));req.on('error',no);req.end();});console.log('API ready: '+origin.origin);
- }else if(command==='serve'){
+ }else if(command==='serve'||command==='run-api'){
   const data=await activeData();
-  if(args.includes('--log')){const log=createWriteStream(join(data,'server.log'),{flags:'a',mode:0o600});globalThis.console=new Console(log,log);process.on('uncaughtExceptionMonitor',error=>console.error(new Date().toISOString(),error));}
+  if(command==='serve'){if(args.includes('--log')){const log=rotatingLog(join(data,'supervisor.log'));globalThis.console=new Console(log,log);}await superviseApi(root,data);return;}
+  if(args.includes('--log')){const log=rotatingLog(join(data,'server.log'));globalThis.console=new Console(log,log);process.on('uncaughtExceptionMonitor',()=>console.error(new Date().toISOString(),'api.uncaught_exception'));}
   const c=JSON.parse(await readFile(join(data,'config.json'),'utf8'));
   // The dedicated database cluster belongs to this installation, including after restore.
   await ensureDatabase(c.databasePort);
   process.env.SITE_FACTORY_SERVER_DATA=data;process.env.SITE_FACTORY_SOURCE_ROOT=c.sourceRoot??root;
-  process.env.PLAYWRIGHT_BROWSERS_PATH??=join(root,'.local-state/browsers');
   await import(pathToFileURL(join(root,'dist/apps/server/src/main.js')).href);
- }else throw Error('Usage: server-manage.mjs init|restore|address|serve|status [--input-json]');
+ }else throw Error('Usage: server-manage.mjs init|restore|address|serve|status|reset-password|backup-target [--input-json]');
 }
 main().catch(error=>{console.error('Operation failed: '+error.message);process.exitCode=1;});

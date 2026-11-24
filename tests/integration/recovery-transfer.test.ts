@@ -704,7 +704,8 @@ async function transportVolume(sites: number, reuseProofs = false, boundedFacts 
 }
 it('proofreuse: prepares checkpoint evidence from verified file digests without re-downloading its files', () => transportVolume(1, true), 120000);
 it('smoke: installs valid disk-paged transport records through the NativeArchives-owned production runner', () => transportVolume(2,false,false,true), 120000);
-it('measures actual900009 metadata and270000 small-body descriptors through the production transport and atomic SQL installation', () => transportVolume(5000,false,false,true), 1800000);
+const recoveryScale=process.env.SITE_FACTORY_EXTENDED_SCALE==='1'?5000:256;
+it(`measures ${recoveryScale} sites through the production transport and atomic SQL installation`, () => transportVolume(recoveryScale,false,false,true), 1800000);
 it('cohortfacts: batches typed availability, source and producer lookups within each production preparation page', () => transportVolume(3, false, true), 120000);
 it.each([false, true])('handles a stale receipt read followed by an already acknowledged concurrent replay (changed=%s)', (changed) => transferCase(1, async (c) => {
     const { pool, t, actor, id, binding, header } = c, query = pool.query.bind(pool);

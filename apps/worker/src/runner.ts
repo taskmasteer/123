@@ -8,8 +8,19 @@ export async function runWorker(deps: WorkerDeps, workerId: string, signal: Abor
     const stop = new AbortController();
     signal = AbortSignal.any([signal, stop.signal]);
     async function consume() {
+        let failures = 0;
         while (!signal.aborted) {
-            const claimed = await deps.queue.claim(workerId);
+            let claimed;
+            try { claimed = await deps.queue.claim(workerId); failures = 0; }
+            catch (error) {
+                if (signal.aborted) return;
+                const code = (error as {code?:string})?.code;
+                if (!(error instanceof AppError && error.code === 'UNAVAILABLE') &&
+                    !['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','57P01','57P02','57P03','08006','08003','53300'].includes(code ?? '')) throw error;
+                const wait = Math.min(30000, 1000 * 2 ** Math.min(failures++, 5));
+                try { await delay(wait, undefined, {signal}); } catch { if (!signal.aborted) throw error; }
+                continue;
+            }
             if (!claimed) {
                 try {
                     await delay(1000, undefined, { signal });

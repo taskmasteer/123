@@ -60,16 +60,38 @@ if [[ -n $BACKUP ]]; then
 else
   "${COMMON[@]}" init --ip "$IP"
 fi
+# PostgreSQL has its own lifecycle; restarting API must not kill its cluster.
+runuser -u sitefactory -- /usr/lib/postgresql/18/bin/pg_ctl -D "$ROOT/.local-state/server/postgres" -m fast -w stop
+cat > /etc/systemd/system/site-factory-postgres.service <<EOF
+[Unit]
+Description=Site Factory PostgreSQL
+After=network.target
+[Service]
+Type=forking
+User=sitefactory
+Group=sitefactory
+PIDFile=$ROOT/.local-state/server/postgres/postmaster.pid
+ExecStart=/usr/lib/postgresql/18/bin/pg_ctl -D $ROOT/.local-state/server/postgres -l $ROOT/.local-state/server/postgres.log -o "-h 127.0.0.1 -p 54329 -c unix_socket_directories=" -w start
+ExecStop=/usr/lib/postgresql/18/bin/pg_ctl -D $ROOT/.local-state/server/postgres -m fast -w stop
+Restart=on-failure
+TimeoutStopSec=120
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now site-factory-postgres
 cat > /etc/systemd/system/site-factory-api.service <<EOF
 [Unit]
 Description=Site Factory API and workers
-After=network-online.target
-Wants=network-online.target
+After=network-online.target site-factory-postgres.service
+Wants=network-online.target site-factory-postgres.service
 [Service]
 Type=simple
 User=sitefactory
 Group=sitefactory
 WorkingDirectory=$ROOT
+Environment=SITE_FACTORY_DATABASE_MANAGED=1
 Environment=SITE_FACTORY_PG_BIN=/usr/lib/postgresql/18/bin
 Environment=SITE_FACTORY_SECRET_KEY_FILE=$ROOT/.local-state/server/master.key
 ExecStart=$NODE $ROOT/scripts/server-manage.mjs serve

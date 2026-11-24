@@ -4,6 +4,26 @@ import { compactReadHistory, executeCall, validateContinuation } from '../src/op
 import {AppError} from '../../contracts/src/model.js';
 import type { ModelRequest,ModelContinuation } from '../../contracts/src/model.js';
 import { assertAllowedHost,mentionedUrl } from '../../contracts/src/domain-policy.js';
+
+test('an unavailable DeepSeek tool receives a bounded error without touching files and resumes from its checkpoint',async()=>{
+ let sent=false,saved:ModelContinuation|undefined;
+ const model=createDeepSeekModel('fixture',async(_url,init)=>{
+   if(!sent){sent=true;return Response.json({status:'completed',output:[{type:'function_call',call_id:'edit-1',name:'edit_file',arguments:'{}'}]});}
+   const body=JSON.parse(String(init?.body));
+   expect(body.input.find((i:{call_id?:string;type:string})=>i.call_id==='edit-1'&&i.type==='function_call_output').output).toContain('Available tools: list, read, write, replace');
+   return Response.json({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Recovered.'}]}]});
+ });
+ const forbidden=async():Promise<never>=>{throw Error('Unexpected file operation');};
+ const tools={list:forbidden,read:forbidden,write:forbidden,replace:forbidden},signal=new AbortController().signal;
+ await expect(model.run(request,tools,signal,{checkpoint:async state=>{
+   if(!saved&&state.items.some(i=>i.type==='function_call')){saved=structuredClone(state);throw Error('Restart fixture');}
+ }})).rejects.toThrow('Restart fixture');
+ expect((await model.run({...request,continuation:saved!},tools,signal)).summary).toBe('Recovered.');
+ const state=structuredClone(saved!);
+ const invalid={type:'function_call',name:'edit_file',arguments:'{}',call_id:'fixture'};
+ for(let n=0;n<3;n++)await executeCall(invalid,tools,state,signal);
+ await expect(executeCall(invalid,tools,state,signal)).rejects.toThrow('repeatedly requested');
+});
 const request:ModelRequest={mode:'generate',baseManifestId:null,conversation:[],site:{id:'site',domain:'example.test',ownerId:'owner',assignedUserIds:[],input:{domain:'example.test',mentionedUrl:'https://example.com/a'},revision:0,draftId:null,publishedId:null,generationStatus:'queued',domainStatus:'unconfigured'},instruction:'Create a page',styleId:'corporate'};
 test('DeepSeek uses fixed endpoint, ordered tools and provider-bound durable replay',async()=>{
   let calls=0;const seen:string[]=[],checkpoints:ModelContinuation[]=[];
@@ -40,6 +60,25 @@ test('rejected helper file is reported to the model and a saved failed call can 
  legacy=false;const result=await model.run({...request,operationId:'recovered-helper',continuation:resumed},tools,new AbortController().signal);
  expect(result.continuation?.items.filter(i=>i.type==='function_call_output').map(i=>i.output).join()).toContain('File rejected');
  expect(html).toBe('');
+});
+
+test.each(['read','replace'] as const)('an interrupted %s of an invented filename resumes and corrects the path',async(name)=>{
+ let turn=0,html='original',saved:ModelContinuation|undefined;
+ const args=name==='read'?{path:'B'}:{path:'B',oldText:'original',newText:'wrong'};
+ const model=createDeepSeekModel('fixture-key',async(_url,init)=>{
+   const input=JSON.parse(String(init?.body)).input;
+   if(++turn===2)expect(JSON.parse(input.at(-1).output)).toMatchObject({ok:false,paths:['index.html']});
+   return Response.json({status:'completed',output:turn===1?[{type:'function_call',name,call_id:'bad',arguments:JSON.stringify(args)}]:turn===2?[{type:'function_call',name:'replace',call_id:'fix',arguments:JSON.stringify({path:'index.html',oldText:'original',newText:'corrected'})}]:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Done'}]}]});
+ });
+ let interrupted=true;
+ function check(path:string){if(path==='B')throw new AppError('INVALID_INPUT',interrupted?'Legacy interruption':'Only static site files are allowed.');}
+ const tools={list:async()=>['index.html'],read:async(path:string)=>{check(path);return html;},replace:async(path:string,_a:string,b:string)=>{check(path);html=b;},write:async()=>{throw Error('unexpected write');}};
+ await expect(model.run(request,tools,new AbortController().signal,{checkpoint:async c=>{saved=structuredClone(c);}})).rejects.toThrow('Legacy interruption');
+ interrupted=false;
+ const operationId='resumed-filename',diagnostic='Only static site files are allowed.';
+ const continuation=model.recover!(request,saved!,{previousIdentity:model.identity!,operationId,diagnostic});
+ await model.run({...request,operationId,continuation},tools,new AbortController().signal);
+ expect(html).toBe('corrected');expect(turn).toBe(3);
 });
 
 test('editing budget hands saved output to validation and recovers legacy exhausted jobs',async()=>{
@@ -87,4 +126,15 @@ test('compacted replay resumes without repeating completed file replacements',as
  await expect(model.run(request,tools,new AbortController().signal,{checkpoint:async c=>{saved=structuredClone(c);if(c.items.some(i=>typeof i.output==='string'&&i.output.includes('Older read snapshot omitted')))throw Error('restart after compaction');}})).rejects.toThrow('restart after compaction');
  expect(saved!.items.some(i=>typeof i.output==='string'&&i.output.includes('Older read snapshot omitted'))).toBe(true);
  await model.run({...request,continuation:saved!},tools,new AbortController().signal);expect(replacements).toBe(3);expect(html.startsWith('D')).toBe(true);
+});
+
+
+test('persisted transport exhaustion waits, resumes after cooldown and has a finite retry budget',async()=>{
+ const {createResponsesModel}=await import('../src/openai/responses.js');let now=100000,saved:ModelContinuation|undefined,calls=0;
+ const model=createResponsesModel({apiKey:'fixture-key',model:'deepseek-flash',provider:'deepseek'},async()=>{calls++;return new Response('',{status:503});},{now:()=>now,delay:async ms=>{now+=ms;}});
+ const tools={list:async()=>[],read:async()=>'',write:async()=>{},replace:async()=>{}},signal=new AbortController().signal,hooks={checkpoint:async(c:ModelContinuation)=>{saved=c;}};
+ await expect(model.run(request,tools,signal,hooks)).rejects.toMatchObject({code:'PROVIDER_WAIT'});expect(saved?.transportExhausted).toBe(true);const firstCalls=calls;
+ await expect(model.run({...request,continuation:saved!},tools,signal,hooks)).rejects.toMatchObject({code:'PROVIDER_WAIT'});expect(calls).toBe(firstCalls);
+ for(let round=1;round<=3;round++){now=saved!.retryAt;await expect(model.run({...request,continuation:saved!},tools,signal,hooks)).rejects.toMatchObject({code:'PROVIDER_WAIT'});expect(saved!.retryCycles).toBe(round);}
+ now=saved!.retryAt;const finalCalls=calls;await expect(model.run({...request,continuation:saved!},tools,signal,hooks)).rejects.toMatchObject({code:'NEEDS_ATTENTION'});expect(calls).toBe(finalCalls);
 });

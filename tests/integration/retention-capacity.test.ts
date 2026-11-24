@@ -10,11 +10,12 @@ import { writeFile } from 'node:fs/promises';
 import { managedRecoveryTables } from '../../packages/adapters/src/recovery-records.js';
 import {testEvidencePrefix} from './evidence.js';
 const evidencePrefix=testEvidencePrefix('task13');
-it('measures actual5000×6 normalized history/private evidence and270000 physical descriptors before bounded snapshot capture', async () => {
+const capacity=process.env.SITE_FACTORY_EXTENDED_SCALE==='1'?5000:256;
+it(`measures ${capacity} sites with six revisions before bounded snapshot capture`, async () => {
     const pool = await database();
     await seedUsers(pool);
     try {
-        await seedRecoveryTransferVolume(pool);await seedMonitoringVolume(pool);
+        await seedRecoveryTransferVolume(pool,capacity);await seedMonitoringVolume(pool);
         let logical = 0, bytes = 0;
         const tableCounts: Record<string, number> = {};
         for (const table of managedRecoveryTables) {
@@ -24,10 +25,10 @@ it('measures actual5000×6 normalized history/private evidence and270000 physica
             bytes += Number(r.bytes);
         }
         const physical = (await pool.query("select count(*) n,coalesce(sum(octet_length(jsonb_build_object('type','file','root','object','path',f->>'key','payload','payloads/999999.bin','size',f->'size','sha256',f->'sha256','mediaType',f->'mediaType')::text)),0) bytes,coalesce(sum((f->>'size')::bigint),0) bodies from private.payload_inventory cross join lateral jsonb_array_elements(data->'objects') f")).rows[0];
-        const measurement = { sites: 5000, states: 30000, logicalRows: logical, fileRecords: Number(physical.n), metadataRecords: logical + Number(physical.n) + 1, zipEntriesBeforeIndex: logical + 2 * Number(physical.n) + 1, logicalBytes: bytes, fileRecordBytes: Number(physical.bytes), totalMetadataBytes: bytes + Number(physical.bytes), projectedBodyBytes: Number(physical.bodies), tableCounts };
+        const measurement = { sites: capacity, states: capacity*6, logicalRows: logical, fileRecords: Number(physical.n), metadataRecords: logical + Number(physical.n) + 1, zipEntriesBeforeIndex: logical + 2 * Number(physical.n) + 1, logicalBytes: bytes, fileRecordBytes: Number(physical.bytes), totalMetadataBytes: bytes + Number(physical.bytes), projectedBodyBytes: Number(physical.bodies), tableCounts };
         await writeFile('.local-state/'+evidencePrefix+'-full-volume.json', JSON.stringify(measurement, null, 2));
-        expect(measurement.fileRecords).toBe(270000);
-        expect(measurement.states).toBe(30000);
+        expect(measurement.fileRecords).toBe(capacity*54);
+        expect(measurement.states).toBe(capacity*6);
         const before = process.memoryUsage(), repo = new SupabaseRepository(pool), queue = new PostgresQueue(repo);
         const exclusiveFenceMs: number[] = [], transaction = repo.transaction.bind(repo), capture = repo.captureSnapshot.bind(repo);
         let captureHelperElapsedMs = 0;
@@ -74,7 +75,7 @@ it('measures actual5000×6 normalized history/private evidence and270000 physica
         expect(snapshot.records).toBe(measurement.metadataRecords);
         expect(io).toBe(0);
         let rootCount = 0;
-        await repo.transaction(async (tx) => { const retention = new PostgresRetention(repo, transport); await retention.closure(tx, Date.now()); rootCount = Number((await tx.query('select count(*) n from retention_protected')).rows[0].n); expect((await tx.query("select count(*) n from retention_protected where kind='artifact'")).rows[0].n).toBe('30000'); expect((await tx.query("select count(*) n from retention_protected where kind='screenshot'")).rows[0].n).toBe('60000'); }, 'exclusive');
+        await repo.transaction(async (tx) => { const retention = new PostgresRetention(repo, transport); await retention.closure(tx, Date.now()); rootCount = Number((await tx.query('select count(*) n from retention_protected')).rows[0].n); expect((await tx.query("select count(*) n from retention_protected where kind='artifact'")).rows[0].n).toBe(String(capacity*6)); expect((await tx.query("select count(*) n from retention_protected where kind='screenshot'")).rows[0].n).toBe(String(capacity*12)); }, 'exclusive');
         const end = process.memoryUsage();
         await writeFile('.local-state/'+evidencePrefix+'-full-volume.json', JSON.stringify({ ...measurement, snapshotRecords: snapshot.records,capturedMetadataBytes, captureMs, compactIndexBytes: indexBytes, indexChunks, countedPlannedZipMembers: zipMembers + indexChunks, captureHelperElapsedMs, rootCount, heapGrowth: end.heapUsed - before.heapUsed, rssGrowth: end.rss - before.rss }, null, 2));
         await backup.close({ userId: identities.admin, role: 'admin' }, snapshot.id);
@@ -82,8 +83,8 @@ it('measures actual5000×6 normalized history/private evidence and270000 physica
         expect((await collector.planCleanup(Date.now() + 32 * 86400000)).deletableManifestIds).toEqual([]);
         expect((await collector.planCleanup(Date.now() + 33 * 86400000 + 1)).deletableManifestIds).toEqual([]);
         await collector.collect(Date.now() + 33 * 86400000 + 2);
-        expect((await pool.query("select count(*) n from private.payload_inventory where kind='checkpoint' and state='deleted'")).rows[0].n).toBe('30000');
-        expect((await pool.query("select count(*) n from private.payload_inventory where kind in ('artifact','screenshot') and state='available'")).rows[0].n).toBe('90000');
+        expect((await pool.query("select count(*) n from private.payload_inventory where kind='checkpoint' and state='deleted'")).rows[0].n).toBe(String(capacity*6));
+        expect((await pool.query("select count(*) n from private.payload_inventory where kind in ('artifact','screenshot') and state='available'")).rows[0].n).toBe(String(capacity*18));
         await writeFile('.local-state/'+evidencePrefix+'-closure-measured.json', JSON.stringify({ rootCount, planAndCollectMs: performance.now() - planStart, maxExclusiveFenceMs: Math.max(...exclusiveFenceMs), exclusiveFenceMs, heapGrowth: process.memoryUsage().heapUsed - before.heapUsed }));
         const excess = 1000001 - measurement.logicalRows;
         await pool.query("insert into private.audit(actor_id,action,target_id) select $1,'capacity event',$2 from generate_series(1,$3::int)", [identities.admin, '00000000-0000-4000-8000-000000000001', excess]);

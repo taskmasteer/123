@@ -7,7 +7,7 @@ import {LocalBatches} from '../src/local-batches.js';
 import {ActivityTimer} from '../../../apps/worker/src/activity.js';
 it('atomically folds only actual pause/end, retains false-boundary time and exact ambiguous-window replay',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-activity-')),db=await openLocalDatabase(root),clock={now:()=>1000},queue=await createLocalQueue(root,clock,db),batches=new LocalBatches(db),actor={userId:'owner',role:'user' as const};
- try{const batch=await batches.submitBatch(actor,[{rowNumber:2,domain:'duration.test'}],'activity');let claim=(await queue.claim('worker'))!;let now=0,recordCalls=0;const timer=new ActivityTimer(async s=>{recordCalls++;await queue.recordActivity!(claim.lease,s);},()=>now);
+ try{const batch=await batches.submitBatch(actor,[{ mentionedUrl: 'https://example.com/', rowNumber:2,domain:'duration.test'}],'activity');let claim=(await queue.claim('worker'))!;let now=0,recordCalls=0;const timer=new ActivityTimer(async s=>{recordCalls++;await queue.recordActivity!(claim.lease,s);},()=>now);
  const original=db.transaction.bind(db);let commits=0;db.transaction=action=>{commits++;return original(action);};
  for(let i=0;i<3;i++){now+=10;expect(await timer.boundary(s=>queue.pauseAtBoundary!(claim.lease,s))).toBe(false);expect(db.sql.prepare('select count(*) n from job_activity').get()!.n).toBe(0);}
  await timer.boundary(async s=>{await queue.finish(claim.lease,'paused',s);return true;});expect(commits).toBe(4);expect(recordCalls).toBe(0);let saved=JSON.parse(String(db.sql.prepare('select data from job_activity').get()!.data));expect(saved.durationMs).toBe(30);

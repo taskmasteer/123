@@ -111,7 +111,7 @@ test('managed runner executes queued work and graceful pause commits the current
     const f = await fixture(), root = await directory(), db = await openLocalDatabase(root);
     openedDatabases.push(db);
     const queue = await createLocalQueue(root, f.deps.clock, db), batches = new LocalBatches(db), owner = { userId: 'owner', role: 'user' } as const;
-    const batch = await batches.submitBatch(owner, [{ rowNumber: 2, domain: 'runner-pause.test' }], 'pause-request'), jobId = batch.siteIds[0]!;
+    const batch = await batches.submitBatch(owner, [{ rowNumber: 2, mentionedUrl: 'https://example.com/', domain: 'runner-pause.test' }], 'pause-request'), jobId = batch.siteIds[0]!;
     const sites = await createLocalState(root, f.deps.clock, db);
     openedSites.push(sites);
     f.deps.sites = sites;
@@ -595,3 +595,23 @@ test('legacy checkpoint before its first provider call pins the new prompt versi
 });
 
 test('technical-only generation skips browser quality gates and repair passes',async()=>{const f=await fixture();f.deps.generationChecks='technical-only';f.deps.validate=async()=>{throw Error('Quality gate must not run');};await runJob(f.job,f.lease,f.deps,new AbortController().signal);expect(f.job.state).toBe('completed');});
+
+test.each([true,false])('technical generation repairs an external embed and only archives a corrected site (corrected=%s)',async corrected=>{
+    const f=await fixture();
+    f.deps.generationChecks='technical-only';
+    let calls=0;
+    f.deps.model={async run(_request,tools){
+        calls++;
+        const content=calls>1&&corrected?'<h1>Archive guide</h1>':'<h1>Archive guide</h1><iframe title="Example" src="about:blank"></iframe>';
+        await tools.write('index.html',new TextDecoder().decode(siteFiles(content)[0]!.bytes));
+        return {summary:'Page written',inputTokens:1,outputTokens:1};
+    }};
+    await runJob(f.job,f.lease,f.deps,new AbortController().signal);
+    expect(calls).toBe(corrected?2:3);
+    expect(f.job.state).toBe(corrected?'completed':'needs_attention');
+    if(!corrected){
+        const saved=await f.deps.checkpoints.load(f.job.checkpointId!);
+        expect(saved.state.validation).toMatchObject({ok:false,issues:expect.arrayContaining([expect.objectContaining({code:'active-content'})])});
+        expect(saved.state.manifestId).toBeNull();
+    }
+});

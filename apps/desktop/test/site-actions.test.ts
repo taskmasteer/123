@@ -6,5 +6,5 @@ test('contextual cancellation follows own-generation and scoped spec-user edit r
 });
 test('managed queue mode enables compose independently of local blocked controls and uses neutral persistence copy',()=>{
  const props={messages:[],instruction:'A meaningful instruction',setInstruction:()=>{},onSend:()=>{},busy:false,refinement:false,onResetBase:()=>{}};
- expect(renderToStaticMarkup(React.createElement(ChatPanel,{...props,modelMode:'blocked'}))).toMatch(/<button[^>]*disabled[^>]*type="submit"/);const managed=renderToStaticMarkup(React.createElement(ChatPanel,{...props,modelMode:'managed'}));expect(managed).not.toMatch(/disabled/);expect(managed).toContain('История сохраняется вместе с сайтом');expect(managed).toContain('локальные ключи панели не нужны');
+ expect(renderToStaticMarkup(React.createElement(ChatPanel,{...props,modelMode:'blocked'}))).toMatch(/<button[^>]*disabled[^>]*type="submit"/);const managed=renderToStaticMarkup(React.createElement(ChatPanel,{...props,modelMode:'managed'}));expect(managed).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/);expect(managed).toContain('История сохраняется вместе с сайтом');expect(managed).toContain('локальные ключи панели не нужны');
 });

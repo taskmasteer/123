@@ -1,3 +1,4 @@
+import {verifyRelease} from './release-signature.mjs';
 import {app,BrowserWindow,ipcMain,protocol,session,dialog,clipboard,nativeTheme,shell} from 'electron';
 import {readFile,writeFile,open,rename,rm} from 'node:fs/promises';
 import {resolve,extname,sep} from 'node:path';
@@ -42,7 +43,7 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
   ipcMain.on('factory:version',event=>{event.returnValue=app.getVersion();});
   ipcMain.handle('factory:update-download',async event=>{
    trusted(event);const response=await connection.request('/api/client-release');if(response.status!==200)throw Error('Не удалось проверить обновление.');
-   const release=JSON.parse(response.bytes.toString());if(!release.available||release.protocol!==1||!/^[a-f0-9]{64}$/.test(release.sha256)||!Number.isSafeInteger(release.size)||release.size<1||release.size>512*1024*1024)throw Error('Некорректный пакет обновления.');
+   const release=JSON.parse(response.bytes.toString());verifyRelease(release,await readFile(resolve(root,'release-key.pem')));if(!release.available||release.protocol!==1||!/^[a-f0-9]{64}$/.test(release.sha256)||!Number.isSafeInteger(release.size)||release.size<1||release.size>512*1024*1024)throw Error('Некорректный пакет обновления.');
    const choice=await dialog.showSaveDialog(main,{defaultPath:'SiteFactory-update.zip',filters:[{name:'Обновление Site Factory',extensions:['zip']}]});if(choice.canceled)return false;
    const pending=choice.filePath+'.partial-'+randomUUID();let file;
    try{file=await open(pending,'wx',0o600);const digest=createHash('sha256');for(let offset=0;offset<release.size;offset+=1024*1024){const part=await connection.request('/api/client-release/'+release.sha256+'?offset='+offset,'GET',undefined,1024*1024);if(part.status!==200||part.bytes.length!==Math.min(1024*1024,release.size-offset))throw Error('Загрузка обновления прервана.');digest.update(part.bytes);await file.writeFile(part.bytes);}if(digest.digest('hex')!==release.sha256)throw Error('Контрольная сумма обновления не совпадает.');await file.sync();await file.close();file=null;await rename(pending,choice.filePath);return true;}finally{await file?.close();await rm(pending,{force:true});}

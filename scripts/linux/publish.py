@@ -29,14 +29,18 @@ def config_text(site, ips, tls):
     common = f'''server_name {domain} {' '.join(ips)};
     root {root}; index index.html; server_tokens off;
     add_header X-Content-Type-Options nosniff always;
+    add_header Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'" always;
     location = /__site_factory_release {{ default_type text/plain; alias {root}/release-id.txt; add_header Cache-Control no-store always; }}
     location ^~ /.well-known/acme-challenge/ {{ root /srv/site-factory/acme; }}
-    location ~ /\\. {{ deny all; }}
-    location / {{ try_files $uri $uri/ =404; }}'''
-    http = 'server {\n' + ''.join(f'listen {ip}:80;\n' for ip in ips) + common + '\n}\n'
+    location ~ /\\. {{ deny all; }}'''
+    serve = 'location / { try_files $uri $uri/ =404; }'
+    # Use the configured name even for requests made by IP. ACME and the
+    # revision probe keep their own locations throughout renewals and updates.
+    cleartext = f'location / {{ return 308 https://{domain}$request_uri; }}' if tls else serve
+    http = 'server {\n' + ''.join(f'listen {ip}:80;\n' for ip in ips) + common + '\n' + cleartext + '\n}\n'
     if tls:
         cert = f'/etc/letsencrypt/live/sf-{sid}'
-        http += 'server {\n' + ''.join(f'listen {ip}:443 ssl;\n' for ip in ips) + common + f'\nssl_certificate {cert}/fullchain.pem;\nssl_certificate_key {cert}/privkey.pem;\nssl_protocols TLSv1.2 TLSv1.3;\n}}\n'
+        http += 'server {\n' + ''.join(f'listen {ip}:443 ssl;\n' for ip in ips) + common + '\n' + serve + f'\nssl_certificate {cert}/fullchain.pem;\nssl_certificate_key {cert}/privkey.pem;\nssl_protocols TLSv1.2 TLSv1.3;\n}}\n'
     return http
 
 def main():
@@ -101,7 +105,7 @@ def main():
                 path = item['path']
                 parts = path.split('/')
                 if len(path) > 240 or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', part) or part in ('.','..') for part in parts): raise ValueError('Unsafe file path')
-                if pathlib.PurePosixPath(path).suffix.lower() not in ('.html','.css','.js','.svg','.png','.jpg','.jpeg','.webp','.gif','.ico','.woff','.woff2'): raise ValueError('Non-static file')
+                if pathlib.PurePosixPath(path).suffix.lower() not in ('.json','.txt','.xml','.html','.css','.js','.svg','.png','.jpg','.jpeg','.webp','.gif','.ico','.woff','.woff2'): raise ValueError('Non-static file')
                 if path.lower() in names: raise ValueError('Duplicate path')
                 names.add(path.lower())
                 content = base64.b64decode(item['data'], validate=True); total += len(content)

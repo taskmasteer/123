@@ -5,8 +5,8 @@ import { record } from '../../../contracts/src/inputs.js';
 export const toolFields = { list: [], read: ['path'], write: ['path', 'text'], replace: ['path', 'oldText', 'newText'] } as const;
 export const toolsSchema = Object.entries(toolFields).map(([name, fields]) => ({ type: 'function', name, strict: true,
     description: `${name} local static website files. Always include every required field, including path. Prefer small replace edits (under 6000 characters each) to rewriting large files.`, parameters: { type: 'object', properties: Object.fromEntries(fields.map(field => [field, { type: 'string' }])), required: fields, additionalProperties: false } }));
-function callEnvelope(item:Record<string,unknown>){
-    if(typeof item.name!=='string'||!Object.hasOwn(toolFields,item.name)||typeof item.call_id!=='string'||!item.call_id||typeof item.arguments!=='string')throw new AppError('NEEDS_ATTENTION','Unsupported model tool call.');
+function callEnvelope(item:Record<string,unknown>,allowUnknown=false){
+    if(typeof item.name!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(item.name)||(!allowUnknown&&!Object.hasOwn(toolFields,item.name))||typeof item.call_id!=='string'||!item.call_id||typeof item.arguments!=='string')throw new AppError('NEEDS_ATTENTION','Unsupported model tool call.');
 }
 export function digest(value: unknown) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 /** Old read snapshots are redundant: workspace files are the source of truth.
@@ -42,7 +42,15 @@ export function parseCall(item: Record<string, unknown>) {
 }
 export async function executeCall(item: Record<string, unknown>, tools: FileTools, state: ModelContinuation, signal: AbortSignal) {
     signal.throwIfAborted();
-    callEnvelope(item);
+    callEnvelope(item,state.provider==='deepseek-responses');
+    if (!Object.hasOwn(toolFields,item.name as string)) {
+        // Unknown calls have no filesystem capability. Keep their IDs for replay
+        // so that the model can replace them with a supported operation.
+        const signature=digest(['unsupported-tool']);
+        state.seen[signature]=(state.seen[signature]??0)+1;
+        if(state.seen[signature]!>3)throw new AppError('NEEDS_ATTENTION','Model repeatedly requested an unavailable tool.');
+        return {type:'function_call_output',call_id:item.call_id,output:JSON.stringify({ok:false,error:'Unknown tool. No action was taken. Available tools: list, read, write, replace. Use replace for a small edit or write for a complete file.'})};
+    }
     let parsed:ReturnType<typeof parseCall>;
     try{parsed=parseCall(item);}catch(error){
         if(!(error instanceof AppError)||error.message!=='Invalid model tool arguments.')throw error;
@@ -52,7 +60,8 @@ export async function executeCall(item: Record<string, unknown>, tools: FileTool
     }
     const { name, args, callId } = parsed;
     const snapshot = [];
-    for (const path of (await tools.list()).sort())
+    const availablePaths = (await tools.list()).sort();
+    for (const path of availablePaths)
         snapshot.push([path, await tools.read(path)]);
     const signature = digest([name, args, snapshot]);
     state.seen[signature] = (state.seen[signature] ?? 0) + 1;
@@ -66,7 +75,23 @@ export async function executeCall(item: Record<string, unknown>, tools: FileTool
             result = await tools.list();
             break;
         case 'read':
-            result = await tools.read(args.path!);
+        case 'replace':
+            try {
+                if (name === 'read') result = await tools.read(args.path!);
+                else {
+                    await tools.replace(args.path!, args.oldText!, args.newText!);
+                    result = { ok: true };
+                }
+            } catch (error) {
+                if (error instanceof AppError && error.code === 'INVALID_INPUT' && error.message === 'Replacement must match exactly once.') {
+                    result = { ok: false, error: 'Replacement must match exactly once. No changes were made. Read the file again and copy a unique exact substring without extra escaping.' };
+                } else if (!availablePaths.includes(args.path!) && (
+                    (error instanceof AppError && error.code === 'INVALID_INPUT' && error.message === 'Only static site files are allowed.') ||
+                    (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+                )) {
+                    result = { ok: false, error: 'Unknown site file. No changes were made. Use an exact path from the current file list.', paths: availablePaths };
+                } else throw error;
+            }
             break;
         case 'write':
             try {
@@ -75,17 +100,6 @@ export async function executeCall(item: Record<string, unknown>, tools: FileTool
             } catch(error) {
                 if (!(error instanceof AppError) || error.code !== 'INVALID_INPUT' || error.message !== 'Only static site files are allowed.') throw error;
                 result = {ok:false,error:'File rejected; nothing was written. Only static website files are allowed: HTML, CSS, JavaScript, SVG and local image/font assets. Do not create Python, shell, JSON, Markdown or other helper files. No command execution is available. Continue editing the website files directly.'};
-            }
-            break;
-        case 'replace':
-            try {
-                await tools.replace(args.path!, args.oldText!, args.newText!);
-                result = { ok: true };
-            } catch (error) {
-                // A stale/ambiguous edit is recoverable: let the model reread the file.
-                // Filesystem, path-policy and other failures remain fatal.
-                if (!(error instanceof AppError) || error.code !== 'INVALID_INPUT' || error.message !== 'Replacement must match exactly once.') throw error;
-                result = { ok: false, error: 'Replacement must match exactly once. No changes were made. Read the file again and copy a unique exact substring without extra escaping.' };
             }
             break;
     }
@@ -98,6 +112,7 @@ export function validateContinuation(value: unknown, binding: string, provider: 
         (value.turns as number) > 48 || (value.retries as number) > 3 || typeof value.transportExhausted !== 'boolean' || typeof value.requestPending !== 'boolean' || typeof value.summary !== 'string' ||
         (value.responseId !== null && typeof value.responseId !== 'string') || ![null, 'final', 'refused', 'incomplete', 'failed', 'cancelled', 'stalled'].includes(value.terminal as null) ||
         (value.recoverable!==undefined&&(!['account','configuration'].includes(String(value.recoverable))||value.terminal!=='failed'))||
+        (value.retryCycles!==undefined&&(!Number.isSafeInteger(value.retryCycles)||(value.retryCycles as number)<0||(value.retryCycles as number)>3))||
         (value.uncertainRequests!==undefined&&(!Number.isSafeInteger(value.uncertainRequests)||(value.uncertainRequests as number)<0||(value.uncertainRequests as number)>1000))||
         (value.outputRepairs!==undefined&&(!Number.isSafeInteger(value.outputRepairs)||(value.outputRepairs as number)<0||(value.outputRepairs as number)>3))||
         !record(value.seen) || !Object.entries(value.seen).every(([key, n]) => /^[0-9a-f]{64}$/.test(key) && Number.isSafeInteger(n) && (n as number) > 0) || JSON.stringify(value).length > 1000000)
@@ -107,7 +122,7 @@ export function validateContinuation(value: unknown, binding: string, provider: 
         if (item.type === 'function_call') {
             // Arguments are untrusted model output. Preserve malformed calls so
             // executeCall can return a schema error without touching the files.
-            callEnvelope(item);
+            callEnvelope(item,provider==='deepseek-responses');
             if (calls.has(item.call_id as string))
                 throw new AppError('INVALID_INPUT', 'Duplicate tool call identity.');
             calls.add(item.call_id as string);

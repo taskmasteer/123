@@ -37,8 +37,8 @@ test('GoDaddy paginates and only replaces apex A, preserves SRV/CAA and rejects 
   records.push({recordId:'a2',type:'A',name:'@',data:'192.0.2.21',ttl:600});await expect(dns.write(mergeIPv4(await dns.read('fixture.example'),'192.0.2.30','600'))).rejects.toThrow(/несколько/);expect(writes).toHaveLength(1);
 });
 test('SSH form rejects internal addresses and unsafe usernames',()=>{
-  const valid={name:'Test',host:'203.0.113.20',username:'ubuntu',password:'fixture-secret'};
-  expect(validateServer(valid).port).toBe(22);
+  const valid={name:'Test',host:'203.0.113.20',username:'ubuntu',password:'fixture-secret',fingerprint:'SHA256:'+'a'.repeat(43)};
+  expect(validateServer(valid).port).toBe(22);expect(()=>validateServer({...valid,fingerprint:''})).toThrow();
   for(const host of ['127.0.0.1','169.254.169.254','10.0.0.2','192.168.0.3'])expect(()=>validateServer({...valid,host})).toThrow();
   expect(()=>validateServer({...valid,username:'ubuntu; id'})).toThrow();
 });
@@ -56,7 +56,7 @@ test('unapproved domains are rejected before DNS transport',async()=>{
 
 const enabled=process.env.SITE_FACTORY_SERVER_TEST==='1',id='sf_hosting_'+randomUUID().replaceAll('-',''),root=resolve('.'),data=resolve('.local-state',id),actor={userId:randomUUID(),role:'admin' as const};
 let admin:Pool,pool:Pool,repository:SupabaseRepository,store:R2Store,hosting:Awaited<ReturnType<typeof createHosting>>;
-beforeAll(async()=>{if(!enabled)return;const config=JSON.parse(await readFile('.local-state/server/config.json','utf8'));const connection={host:'127.0.0.1',port:config.databasePort,user:'factory',password:await protectSecret(config.databasePassword,true)};admin=new Pool({...connection,database:'postgres'});await admin.query('create database '+id);pool=new Pool({...connection,database:id,max:10});await mkdir(data,{recursive:true});await migrate(pool,root);await pool.query('insert into auth.users values($1)',[actor.userId]);await pool.query('insert into public.users(id) values($1)',[actor.userId]);await pool.query("insert into public.memberships values($1,'admin',true)",[actor.userId]);repository=new SupabaseRepository(configureSnapshotConnection(pool,'direct'));store=new R2Store(repository,new FileObjectTransport(join(data,'objects')),new PostgresQueue(repository));await pool.query("insert into factory.hosting_addresses(address,host_id) values('192.0.2.10','fixture'),('192.0.2.11','fixture')");},60000);
+beforeAll(async()=>{if(!enabled)return;const config=JSON.parse(await readFile(process.env.SITE_FACTORY_TEST_CONFIG??'.local-state/server/config.json','utf8'));const connection={host:'127.0.0.1',port:config.databasePort,user:'factory',password:await protectSecret(config.databasePassword,true)};admin=new Pool({...connection,database:'postgres'});await admin.query('create database '+id);pool=new Pool({...connection,database:id,max:10});await mkdir(data,{recursive:true});await migrate(pool,root);await pool.query('insert into auth.users values($1)',[actor.userId]);await pool.query('insert into public.users(id) values($1)',[actor.userId]);await pool.query("insert into public.memberships values($1,'admin',true)",[actor.userId]);repository=new SupabaseRepository(configureSnapshotConnection(pool,'direct'));store=new R2Store(repository,new FileObjectTransport(join(data,'objects')),new PostgresQueue(repository));await pool.query("insert into factory.hosting_addresses(address,host_id) values('192.0.2.10','fixture'),('192.0.2.11','fixture')");},60000);
 afterAll(async()=>{if(!enabled)return;await hosting?.close();await pool?.end();if(admin){await admin.query('drop database '+id);await admin.end();}},30000);
 async function version(siteId:string,text:string){const revision=randomUUID(),manifest=await store.put(siteId,[{path:'index.html',bytes:Buffer.from('<h1>'+text+'</h1>'),mediaType:'text/html'}],'fixture');await pool.query("insert into public.revisions values($1,$2,null,$3,'draft',$4)",[revision,siteId,manifest.id,Date.now()]);await pool.query('update public.sites set draft_id=$2 where id=$1',[siteId,revision]);return revision;}
 test.skipIf(!enabled)('durable publication: allocation race, restart, update, rollback, replacement, DNS conflict',async()=>{
@@ -90,6 +90,7 @@ test.skipIf(!enabled)('durable publication: allocation race, restart, update, ro
 test.skipIf(!enabled)('allocation honors selected host and failed first upload permits correcting DNS provider',async()=>{
   await hosting?.close();
   await pool.query("insert into factory.hosting_addresses(address,host_id) values('198.51.100.20','host-a'),('198.51.100.21','host-b')");
+  await pool.query("insert into factory.hosting_domains values('routing.example','godaddy')");
   const site=await repository.create({domain:'routing.example'},actor);await version(site.id,'routing');
   hosting=await createHosting(pool,repository,store,data,{publish:async()=>{throw Error('offline fixture');},dns:{read:async()=>({domain:site.domain,records:[]}),write:async()=>{}},propagated:async()=>true,health:async()=>{}});
   await hosting.enqueue(actor,site.id,{serverId:'host-b'});await hosting.tick();
@@ -106,11 +107,11 @@ test.skipIf(!enabled)('server provisioning encrypts bootstrap, pins identity and
     if(networkArmed&&failOnce){failOnce=false;throw new Error('Simulated connection interruption');}return '';
   }});
   try{
-    const {id:serverId}=await servers.add({name:'Fixture VPS',host:'203.0.113.20',username:'root',password:'private-bootstrap-test',additionalIPv4:'203.0.113.21'});
+    const {id:serverId}=await servers.add({name:'Fixture VPS',host:'203.0.113.20',username:'root',password:'private-bootstrap-test',fingerprint:'SHA256:'+'a'.repeat(43),additionalIPv4:'203.0.113.21'});
     const saved=(await pool.query('select * from factory.hosting_hosts where id=$1',[serverId])).rows[0];expect(saved.bootstrap).not.toContain('private-bootstrap-test');expect(saved.credential).not.toContain('PRIVATE KEY');
     await servers.tick();expect((await servers.list()).find(h=>h.id===serverId).status).toBe('failed');expect((await pool.query('select bootstrap from factory.hosting_hosts where id=$1',[serverId])).rows[0].bootstrap).toBeNull();
     await servers.close();const resumed=await createServers(pool,root,data,{fingerprint:async()=>{throw Error('must preserve pin');},execute:async(_host,_command,input)=>{if(input){const p=JSON.parse(input);actions.push(p.action);return JSON.stringify({ok:true,rollback:['network','firewall'].includes(p.action)?'fixture':null,ready:true});}return '';}});
-    try{await resumed.retry(serverId);await resumed.tick();const result=(await resumed.list()).find(h=>h.id===serverId);expect(result.status).toBe('ready');expect(result).not.toHaveProperty('credential');expect(result).not.toHaveProperty('bootstrap');expect(fingerprints).toBe(1);expect(actions.filter(a=>a==='packages')).toHaveLength(1);expect(actions.filter(a=>a==='recover-network')).toHaveLength(2);expect(actions).toContain('confirm-firewall');}finally{await resumed.close();}
+    try{await resumed.retry(serverId);await resumed.tick();const result=(await resumed.list()).find(h=>h.id===serverId);expect(result.status).toBe('ready');expect(result).not.toHaveProperty('credential');expect(result).not.toHaveProperty('bootstrap');expect(fingerprints).toBe(0);expect(actions.filter(a=>a==='packages')).toHaveLength(1);expect(actions.filter(a=>a==='recover-network')).toHaveLength(2);expect(actions).toContain('confirm-firewall');}finally{await resumed.close();}
   }finally{await servers.close();}
 },60000);
 
@@ -128,6 +129,7 @@ test.skipIf(!enabled)('host queues run independently and serialize publications 
 
 test.skipIf(!enabled)('preflight is read-only, respects exclusions and rejects missing drafts',async()=>{
  await hosting?.close();await pool.query("insert into factory.hosting_hosts(id,name,host,port,username,host_fingerprint,credential,config,status,phase) values('preflight','preflight','203.0.113.50',22,'ubuntu','fixture','fixture','{}','ready','ready')");await pool.query("insert into factory.hosting_addresses(address,host_id) values('203.0.113.50','preflight')");
+ await pool.query("insert into factory.hosting_domains values('preflight.example','godaddy')");
  const site=await repository.create({domain:'preflight.example'},actor);let writes=0;
  hosting=await createHosting(pool,repository,store,data,{publish:async()=>{writes++;},dns:{read:async domain=>({domain,records:[]}),write:async()=>{writes++;}},propagated:async()=>true,health:async()=>{}});
  await expect(hosting.preflight(actor,site.id)).rejects.toThrow(/черновика/);const revisionId=await version(site.id,'ready');const before=(await pool.query('select count(*) n from factory.hosting_jobs')).rows[0].n;
@@ -135,7 +137,7 @@ test.skipIf(!enabled)('preflight is read-only, respects exclusions and rejects m
 },30000);
 
 test('dedicated inventory accepts 256 additional IPv4 and rejects excess',()=>{
- const ips=Array.from({length:257},(_,i)=>'203.0.'+(114+Math.floor(i/254))+'.'+(i%254+1));const body={host:'203.0.120.1',username:'ubuntu',name:'Dedicated',password:'fixture'};
+ const ips=Array.from({length:257},(_,i)=>'203.0.'+(114+Math.floor(i/254))+'.'+(i%254+1));const body={host:'203.0.120.1',username:'ubuntu',name:'Dedicated',password:'fixture',fingerprint:'SHA256:'+'a'.repeat(43)};
  expect(validateServer({...body,additionalIPv4:ips.slice(0,256).join(' ')}).additionalIPv4).toHaveLength(256);expect(()=>validateServer({...body,additionalIPv4:ips.join(' ')})).toThrow(/256/);
 });
 test('concurrent host queues reserve distinct Namecheap rate slots',async()=>{
@@ -156,6 +158,12 @@ test.skipIf(!enabled)('one-click creation reserves IPv4 atomically and publishes
   await version(site.id,'automatic');
   await pool.query("update private.jobs set data=jsonb_set(data,'{state}',to_jsonb($2::text)) where site_id=$1",[site.id,'completed']);
   await hosting.close();hosting=await createHosting(pool,repository,store,data,ports);
+  const originalScoped=repository.scoped;
+  repository.scoped=async()=>{throw new AppError('UNAVAILABLE','SSH-подключение не выполнено.');};
+  try{await hosting.tick();}finally{repository.scoped=originalScoped;}
+  const pending=(await pool.query('select status,retry_count,next_attempt>now() delayed from factory.auto_publications where site_id=$1',[site.id])).rows[0];
+  expect(pending).toMatchObject({status:'waiting',retry_count:1,delayed:true});
+  await pool.query('update factory.auto_publications set next_attempt=now() where site_id=$1',[site.id]);
   await hosting.tick();await hosting.tick();
   const result=await hosting.details(site.id);
   expect(result.automatic?.status).toBe('submitted');expect(result.jobs).toHaveLength(1);expect(result.jobs[0].status,result.jobs[0].error??'').toBe('complete');expect(writes).toBe(1);expect(uploads).toBe(2);

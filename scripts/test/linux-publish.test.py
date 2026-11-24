@@ -62,6 +62,21 @@ class MaintenanceTests(unittest.TestCase):
         self.assertFalse(self.config.exists())
         self.assertEqual(json.loads(self.state.read_text())['ips'], [])
 
+    def test_visitor_transport_and_resource_policy_before_and_after_certificate(self):
+        site = {'domain':'fixture.example','siteId':self.sid}
+        config = self.scope['config_text']
+        bootstrap = config(site, ['203.0.113.1'], False)
+        self.assertNotIn('return 308', bootstrap)
+        clear, encrypted = config(site, ['203.0.113.1'], True).split('\n}\nserver {')
+        self.assertIn('return 308 https://fixture.example$request_uri;', clear)
+        self.assertNotIn('try_files', clear)
+        self.assertIn('try_files', encrypted)
+        for block in (bootstrap, clear, encrypted):
+            self.assertIn('location ^~ /.well-known/acme-challenge/', block)
+            self.assertIn('location = /__site_factory_release', block)
+            self.assertIn("form-action 'none'", block)
+            self.assertIn("connect-src 'none'", block)
+
     def test_prune_preserves_current_and_requested_versions(self):
         self.invoke('prune', keep=self.revisions[2:])
         self.assertEqual({p.name for p in (self.site/'releases').iterdir()}, set([self.revisions[0]] + self.revisions[2:]))

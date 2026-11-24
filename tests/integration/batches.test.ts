@@ -16,7 +16,7 @@ it('locks only one admission candidate while a competing worker waits for capaci
         await seedUsers(pool);
         const repo = new SupabaseRepository(pool), queue = new PostgresQueue(repo), worker = randomUUID(), actor = { userId: identities.user, role: 'user' } as const;
         await pool.query('insert into private.workers(id,name,token_hash) values($1,$2,$3)', [worker, 'fixture', 'b'.repeat(64)]);
-        await new PostgresBatches(repo).submitBatch(actor, Array.from({ length: 4 }, (_, i) => ({ rowNumber: i + 2, domain: `candidate-${i}.test` })), 'candidates');
+        await new PostgresBatches(repo).submitBatch(actor, Array.from({ length: 4 }, (_, i) => ({ rowNumber: i + 2, mentionedUrl:'https://example.com/guide', domain: `candidate-${i}.test` })), 'candidates');
         await pool.query("create function private.block_claim_fixture() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(7654321); return new; end $$;create trigger block_claim_fixture before update on private.workers for each row execute function private.block_claim_fixture()");
         await gate.query('begin');
         gateHeld = true;
@@ -50,11 +50,11 @@ it('atomically admits canonical rows, replays exact requests, isolates conflicts
     try {
         await seedUsers(pool);
         const repo = new SupabaseRepository(pool), b = new PostgresBatches(repo), owner = { userId: identities.user, role: 'user' } as const, admin = { userId: identities.admin, role: 'admin' } as const, spec = { userId: identities.spec, role: 'spec-user' } as const;
-        const rows = [{ rowNumber: 2, domain: 'пример.рф', about: 'First exact description' }, { rowNumber: 3, domain: 'xn--e1afmkfd.xn--p1ai' }, { rowNumber: 4, domain: 'other.test' }];
+        const rows = [{ rowNumber: 2, mentionedUrl:'https://example.com/guide', domain: 'пример.рф', about: 'First exact description' }, { rowNumber: 3, mentionedUrl:'https://example.com/guide', domain: 'xn--e1afmkfd.xn--p1ai' }, { rowNumber: 4, mentionedUrl:'https://example.com/guide', domain: 'other.test' }];
         const results = await Promise.all([b.submitBatch(owner, rows, 'same'), b.submitBatch(owner, rows, 'same')]);
         expect(results[0]!.siteIds).toHaveLength(2);
         expect(results[1]).toEqual(results[0]);
-        await expect(b.submitBatch(owner, [{ rowNumber: 2, domain: 'changed.test' }], 'same')).rejects.toMatchObject({ code: 'CONFLICT' });
+        await expect(b.submitBatch(owner, [{ rowNumber: 2, mentionedUrl:'https://example.com/guide', domain: 'changed.test' }], 'same')).rejects.toMatchObject({ code: 'CONFLICT' });
         expect(Number((await pool.query('select count(*) n from private.site_operations')).rows[0].n)).toBe(2);
         const id = results[0]!.batchId;
         await expect(b.request(spec, 'batch.get', { id })).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -147,7 +147,7 @@ it('wires staged HTTP source and PNG mapping through fresh services to a lease-b
         const app = createApp({ repository: repo, queue, auth: { verifyUser: async () => actor, verifyWorker: async () => ({ workerId: worker }) } });
         const call = async (method: string, params: unknown) => { const response = await app(new Request('https://control.test/batches/commands', { method: 'POST', headers: { authorization: 'Bearer fixture', 'content-type': 'application/json' }, body: JSON.stringify({ method, params }) })); const value = await response.json(); expect(response.status, JSON.stringify(value)).toBe(200); return value; };
         const upload = async (name: string, bytes: Buffer, extra: Record<string, unknown> = {}) => { const r = await call('resource.begin', { name, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), ...extra }); await call('resource.chunk', { id: r.id, index: 0, base64: bytes.toString('base64') }); return r.id; };
-        const id = await upload('source.csv', Buffer.from('domain,about,logo\nlogo.test,Original,brand.png\n' + Array.from({ length: 29 }, (_, i) => `row-${i + 1}.test,Row ${i + 1},`).join('\n') + '\n,Invalid,\n'));
+        const id = await upload('source.csv', Buffer.from('domain,about,logo,mentionedUrl\nlogo.test,Original,brand.png,https://example.com/guide\n' + Array.from({ length: 29 }, (_, i) => `row-${i + 1}.test,Row ${i + 1},,https://example.com/guide`).join('\n') + '\n,Invalid,\n'));
         let s = await call('import.prepare', { id });
         s = await call('import.update', { id, revision: s.revision, rowNumber: 2, about: 'Exact edited row' });
         const png = PNG.sync.write(new PNG({ width: 2, height: 3 })), logo = await upload('brand.png', png, { draftId: id, rowNumber: 2, revision: s.revision });
@@ -184,7 +184,7 @@ it('projects current registry status across failures, running and pause/resume w
             await pool.query('insert into private.workers(id,name,token_hash) values($1,$2,$3)', [worker, 'fixture', token!.repeat(64)]);
         let batchId: string;
         const pause = () => b.request(owner, 'batch.pause', { id: batchId }), resume = () => b.request(owner, 'batch.resume', { id: batchId });
-        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ rowNumber: i + 2, domain: 'status-' + i + '.test' })), 'status');
+        const batch = await b.submitBatch(owner, Array.from({ length: 6 }, (_, i) => ({ rowNumber: i + 2, mentionedUrl:'https://example.com/guide', domain: 'status-' + i + '.test' })), 'status');
         batchId = batch.batchId;
         const a = (await q.claim(workerA))!, c = (await q.claim(workerA))!, d = (await q.claim(workerB))!;
         expect(a).not.toBeNull();

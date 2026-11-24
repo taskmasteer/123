@@ -1,4 +1,5 @@
 import {createSiteUpload} from './site-upload.js';
+import {logFailure} from './diagnostics.js';
 import { createServer } from 'node:http';
 import {createServer as createHttpsServer,type ServerOptions} from 'node:https';
 import { readFile, stat,open } from 'node:fs/promises';
@@ -23,6 +24,13 @@ export function createHttpHandler(runtime:ServerRuntime,origin:string,webRoot:st
     const raw=request.headers.get('cookie')?.split(';').map(v=>v.trim()).find(v=>v.startsWith(cookieName+'='))?.slice(cookieName.length+1)??'';
     try{
       if(url.origin!==origin)throw new AppError('FORBIDDEN','Неверный адрес панели.');
+      if(path==='/health/live'&&request.method==='GET')return json({ok:true});
+      if(path==='/health/ready'&&request.method==='GET'){
+        await runtime.pool.query('select 1');
+        const status=runtime.status(),state=runtime.recoveryState();
+        const ready=!state.held&&!state.maintenance&&(!status.configured||status.running);
+        return json({ok:ready},ready?200:503);
+      }
       if(request.method!=='GET'&&request.method!=='HEAD'&&request.headers.get('origin')!==origin)throw new AppError('FORBIDDEN','Недопустимый источник запроса.');
       // Preview is independently authorized by expiring, revision-bound capabilities.
       // Its opaque sandbox origin must never need the application session cookie.
@@ -88,14 +96,16 @@ export function createHttpHandler(runtime:ServerRuntime,origin:string,webRoot:st
         if(path==='/api/servers'&&request.method==='GET')return json(await runtime.servers.list());
         if(path==='/api/servers'&&request.method==='POST'){const result=await runtime.servers.add(await parse());await runtime.auth.audit(session.id,'server.add');return json(result,202);}
         const serverMaintenance=/^\/api\/servers\/([a-zA-Z0-9-]+)\/maintenance$/.exec(path);
-        if(serverMaintenance&&request.method==='POST'){const body=await parse(),result=await runtime.servers.maintain(serverMaintenance[1]!,body);await runtime.auth.audit(session.id,'server.maintenance.'+String(body.action));return json(result,202);}
+        if(serverMaintenance&&request.method==='POST'){const body=await parse(),result=runtime.recoveryState().held&&body.action==='connection'?await runtime.servers.repairConnection(serverMaintenance[1]!,body):await runtime.servers.maintain(serverMaintenance[1]!,body);await runtime.auth.audit(session.id,'server.maintenance.'+String(body.action));return json(result,202);}
         const serverCredentials=/^\/api\/servers\/([a-zA-Z0-9-]+)\/credentials$/.exec(path);
         if(serverCredentials&&request.method==='POST'){const result=await runtime.servers.credentials(serverCredentials[1]!,await parse());await runtime.auth.audit(session.id,'server.credentials');return json(result,202);}
         const serverRetry=/^\/api\/servers\/([a-zA-Z0-9-]+)\/retry$/.exec(path);
         if(serverRetry&&request.method==='POST'){const result=await runtime.servers.retry(serverRetry[1]!);await runtime.auth.audit(session.id,'server.retry');return json(result,202);}
         if(path==='/api/settings/godaddy'&&request.method==='POST'){const body=await parse();await runtime.hosting.configureGoDaddy(body.token);await runtime.auth.audit(session.id,'godaddy.configure');return json({ok:true});}
+        if(path==='/api/hosting/domains'&&request.method==='GET')return json(await runtime.hosting.domainProviders());
+        if(path==='/api/hosting/domains'&&request.method==='POST'){const body=await parse();await runtime.hosting.setDomainProvider(body.domain,body.provider);return json({ok:true});}
         if(path==='/api/hosting'&&request.method==='GET')return json(await runtime.hosting.status());
-        if(path==='/api/hosting/jobs'&&request.method==='GET')return json(await runtime.hosting.jobs());
+        if(path==='/api/hosting/jobs'&&request.method==='GET'){const offset=integer(Number(url.searchParams.get('offset')??0),0,1000000),rows=await runtime.hosting.jobs(offset);return json(url.searchParams.has('offset')?{items:rows.slice(0,50),nextOffset:rows.length>50?offset+50:null}:rows.slice(0,50));}
         if(path==='/api/settings/namecheap'&&request.method==='POST'){
           const body=await parse();await runtime.hosting.configureDns(body);await runtime.auth.audit(session.id,'namecheap.configure');return json({ok:true});
         }
@@ -123,17 +133,32 @@ export function createHttpHandler(runtime:ServerRuntime,origin:string,webRoot:st
           return json({items:rows.slice(0,20).map(r=>({id:r.id,createdAt:Number(r.created_at),current:r.depth===0})),nextOffset:rows.length>20?offset+20:null});
         }
         if(path==='/auth/logout'&&request.method==='POST'){await runtime.auth.logout(raw);const response=json({ok:true});response.headers.set('set-cookie',cookie('',0));return response;}
+        if(path==='/api/diagnostics'&&request.method==='GET'){
+          const jobs=(await runtime.pool.query("select data->>'state' state,count(*)::int count from private.jobs group by data->>'state'")).rows;
+          const hosts=(await runtime.pool.query('select status,count(*)::int count from factory.hosting_hosts group by status')).rows;
+          const lastBackup=(await runtime.pool.query('select status,error,completed_at,replica from factory.backups order by created_at desc limit 1')).rows[0]??null;
+          const config=JSON.parse(await readFile(resolve(runtime.dataRoot,'config.json'),'utf8').catch(()=> '{}'));
+          const expiry=config.certificate?new (await import('node:crypto')).X509Certificate(config.certificate).validTo:null;
+          return json({worker:runtime.status(),recovery:runtime.recoveryState(),jobs,hosts,lastBackup,certificateExpiresAt:expiry?new Date(expiry).toISOString():null});
+        }
         if(path==='/api/settings/model'){
           if(request.method==='GET')return json(runtime.status());
           if(request.method==='POST'){const body=await parse();await runtime.configure(body.apiKey);await runtime.auth.audit(session.id,'model.configure');return json(runtime.status());}
         }
         if(path==='/api/accounts'&&request.method==='GET')return json((await runtime.pool.query('select a.id,a.login,m.active from factory.accounts a join public.memberships m on m.user_id=a.id order by a.login')).rows);
+        if(path==='/api/account/password'&&request.method==='POST'){const body=await parse();await runtime.auth.changePassword(raw,body.currentPassword,body.newPassword);return json({ok:true});}
+        if(path==='/api/account/sessions'&&request.method==='GET')return json(await runtime.auth.sessions(raw));
+        if(path==='/api/account/sessions/revoke'&&request.method==='POST'){await runtime.auth.revokeOtherSessions(raw);return json({ok:true});}
         if(path==='/api/invitations'&&request.method==='POST'){const body=await parse();return json(await runtime.auth.invite(session.id,body.login));}
         if(path==='/api/accounts/status'&&request.method==='POST'){
           const body=await parse();if(body.id===session.id||typeof body.active!=='boolean')throw new AppError('INVALID_INPUT','Собственный доступ отключить нельзя.');
           await runtime.pool.query('update public.memberships set active=$2 where user_id=$1',[body.id,body.active]);if(!body.active)await runtime.pool.query('delete from factory.sessions where user_id=$1',[body.id]);await runtime.auth.audit(session.id,'account.status');return json({ok:true});
         }
-        if(path==='/api/jobs'&&request.method==='GET')return json((await runtime.pool.query("select j.data,s.domain,s.input from private.jobs j join public.sites s on s.id=j.site_id order by j.id desc limit 100")).rows);
+        if(path==='/api/jobs'&&request.method==='GET'){
+          const offset=integer(Number(url.searchParams.get('offset')??0),0,1000000);
+          const rows=(await runtime.pool.query("select j.data,s.domain,s.input,j.created_at from public.sites s join lateral(select * from private.jobs where site_id=s.id order by case when data->>'state' in ('queued','running','waiting_provider','paused') then 0 else 1 end,created_at desc,id desc limit 1) j on true where s.archived_at is null order by case when j.data->>'state' in ('queued','running','waiting_provider','paused','needs_attention') then 0 else 1 end,j.created_at desc,j.id desc limit 51 offset $1",[offset])).rows;
+          return json(url.searchParams.has('offset')?{items:rows.slice(0,50),nextOffset:rows.length>50?offset+50:null}:rows.slice(0,50));
+        }
         let body:unknown=undefined;
         if(!['GET','HEAD'].includes(request.method))body=await parse();
         if(path==='/api/sites'&&request.method==='POST'){
@@ -142,7 +167,7 @@ export function createHttpHandler(runtime:ServerRuntime,origin:string,webRoot:st
           if(!input.mentionedUrl?.trim())throw new AppError('INVALID_INPUT','Укажите обязательную упоминаемую ссылку.');
           if(input.layoutReferenceId){const catalog=await runtime.catalog.list();if(!catalog.references.some(r=>r.id===input.layoutReferenceId)||!catalog.styles.some(s=>s.id==='reference-'+input.layoutReferenceId&&s.enabled))throw new AppError('INVALID_INPUT','Этот референс недоступен для генерации.');}
           if(input.mentionedUrl&&!input.mentionedDescription?.trim()){
-            try{input.mentionedDescription=await readMentionedPage(input.mentionedUrl);}catch(error){if(error instanceof AppError)throw error;throw new AppError('INVALID_INPUT','Страницу ссылки прочитать не удалось. Добавьте пояснение в поле под ссылкой.');}
+            try{input.mentionedDescription=await readMentionedPage(input.mentionedUrl);}catch(error){if(error instanceof AppError)throw error;throw new AppError('INVALID_INPUT','Не удалось прочитать упоминаемую ссылку. Проверьте её доступность без входа в аккаунт или укажите другую ссылку.');}
           }
           const site=await runtime.hosting.createSite(await runtime.auth.verifyUser(raw),input);
           await runtime.auth.audit(session.id,'site.create-and-publish');
@@ -165,10 +190,10 @@ export function createHttpHandler(runtime:ServerRuntime,origin:string,webRoot:st
       try{if(!(await stat(file)).isFile())throw new Error();}catch{if(path.startsWith('/assets/'))return new Response(null,{status:404});file=resolve(webRoot,'web.html');}
       const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.png':'image/png'};
       return new Response(await readFile(file),{headers:{'content-type':mime[extname(file)]??'application/octet-stream','content-security-policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",'cache-control':'no-cache'}});
-    }catch(error){const code=error instanceof AppError?error.code:'UNAVAILABLE';const status=code==='UNAUTHENTICATED'?401:code==='FORBIDDEN'?403:code==='INVALID_INPUT'?400:code==='CONFLICT'?409:code==='NOT_FOUND'?404:503;return json({error:{code,message:error instanceof AppError?error.message:'Операция не выполнена. Повторите позже.'}},status);}
+    }catch(error){if(!(error instanceof AppError))logFailure('http.request',error);const code=error instanceof AppError?error.code:'UNAVAILABLE';const status=code==='UNAUTHENTICATED'?401:code==='FORBIDDEN'?403:code==='INVALID_INPUT'?400:code==='CONFLICT'?409:code==='NOT_FOUND'?404:503;return json({error:{code,message:error instanceof AppError?error.message:'Операция не выполнена. Повторите позже.'}},status);}
   };
   return async(request:Request,remote='127.0.0.1'):Promise<Response>=>{
-    if(new URL(request.url).pathname==='/api/recovery')return handle(request,remote);
+    if(request.method==='GET'||['/api/recovery','/health/live','/health/ready'].includes(new URL(request.url).pathname))return handle(request,remote);
     try{return await runtime.gate.request(()=>handle(request,remote));}
     catch(e){return json({error:{code:'UNAVAILABLE',message:e instanceof AppError?e.message:'Обслуживание сервера.'}},503);}
   };

@@ -6,6 +6,15 @@ export class FakeModel implements ModelPort {
   readonly runtimeStatus = { mode: 'demo', realModel: false } as const;
   async run(request: ModelRequest, tools: FileTools, signal: AbortSignal): Promise<ModelResult> {
     signal.throwIfAborted();
+    const exercise='Compare the checksum of the downloaded wallet software with the digest in its signed release manifest. A mismatch means the files differ.';
+    if(request.mode==='plan' && request.operationId?.includes(':subject:')){
+      const {article}=JSON.parse(request.instruction) as {article:string};
+      return {summary:JSON.stringify({topic:article.includes(exercise)?'suitable':'missing_connection'}),inputTokens:0,outputTokens:0};
+    }
+    if (request.mode === 'plan' && request.operationId?.includes(':review:')) {
+      const {candidate,others}=JSON.parse(request.instruction) as {candidate:string;others:string[]};
+      return {summary:JSON.stringify({topic:others.includes(candidate)?'duplicate':'distinct'}),inputTokens:0,outputTokens:0};
+    }
     if (request.mode === 'plan') return {summary:JSON.stringify({topic:'A demonstration concept for verifiable event tracing at '+request.site.domain}),inputTokens:0,outputTokens:0};
     const html = await tools.read('index.html');
     if (request.mode === 'edit') {
@@ -18,8 +27,14 @@ export class FakeModel implements ModelPort {
       return { summary: 'Демо: заменён только главный заголовок на введённый текст. Остальные файлы сохранены.', inputTokens: 0, outputTokens: 0 };
     }
     const brief = request.site.input.about?.trim() || request.instruction;
-    const next = html.replace(/(<h1\b[^>]*data-topic[^>]*>)[\s\S]*?(<\/h1>)/i, (_match, open: string, close: string) => open + escape(brief) + close)
+    let next = html.replace(/(<h1\b[^>]*data-topic[^>]*>)[\s\S]*?(<\/h1>)/i, (_match, open: string, close: string) => open + escape(brief) + close)
       .replace(/(<title>)[\s\S]*?(<\/title>)/i, (_match, open: string, close: string) => open + escape(request.site.domain) + close);
+    if(request.instructions?.includes('genuine technical connection to cryptocurrency')&&!next.includes(exercise))
+      next=next.replace('</main>','<p>'+exercise+'</p></main>');
+    if(request.site.input.mentionedUrl&&!next.includes('data-mentioned-link="true"')){
+      const section='<section data-mentioned-link="true"><h2>Further reading</h2><p>This demonstration links to the resource supplied for this site. Visit the original page to explore its information and decide whether it is useful for your project.</p><a href="'+escape(request.site.input.mentionedUrl)+'">Explore the resource</a></section>';
+      next=next.includes('</main>')?next.replace('</main>',section+'</main>'):next+section;
+    }
     signal.throwIfAborted(); await tools.write('index.html', next);
     return { summary: 'Local demonstration generated from the selected original template.', inputTokens: 0, outputTokens: 0 };
   }

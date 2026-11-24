@@ -47,7 +47,9 @@ export function validateStatic(files: ArtifactFile[]): ValidationReport {
         if (!('tagName' in node)) return;
         const tag = node.tagName; const attrs = Object.fromEntries(node.attrs.map((attr) => [attr.name, attr.value]));
         if (attrs.id) anchors.add(attrs.id); if (tag === 'a' && attrs.name) anchors.add(attrs.name);
-        if (['form', 'input', 'textarea', 'select'].includes(tag) || 'formaction' in attrs || 'form' in attrs) add('form', file.path, 'Forms and data-entry fields are forbidden.');
+        const checklistItem = tag === 'input' && attrs.type?.toLowerCase() === 'checkbox' && !('name' in attrs);
+        if ((tag === 'input' && !checklistItem) || ['form','textarea','select'].includes(tag) || 'formaction' in attrs || 'form' in attrs)
+          add('form', file.path, 'Remove forms and data-entry fields. A local checklist may use unnamed standalone checkboxes.');
         if (['base', 'iframe', 'frame', 'frameset', 'object', 'embed', 'portal', 'foreignObject'].includes(tag) ||
             (tag === 'meta' && /refresh/i.test(attrs['http-equiv'] ?? ''))) add('active-content', file.path, 'Embedded documents, base URLs and refresh redirects are forbidden.');
         if (tag === 'script' && attrs.type && !/^(?:text|application)\/javascript$/i.test(attrs.type)) add('script-type', file.path, 'Only classic browser JavaScript is allowed.');
@@ -82,4 +84,9 @@ export function validateStatic(files: ArtifactFile[]): ValidationReport {
     } catch { add(reference.anchor ? 'broken-link' : 'external-request', reference.source, 'Unsafe URL: ' + reference.raw); }
   }
   return { ok: issues.length === 0, issues, screenshotIds: [] };
+}
+
+/** Publication shares the technical checks for generated pages and uploaded ZIPs. */
+export function publicationIssues(files: ArtifactFile[]): Issue[] {
+  return validateStatic(files).issues.filter(issue => issue.code !== 'readability' && issue.code !== 'placeholder');
 }

@@ -1,55 +1,56 @@
-name: Verify and package
+name: Verify current API and client
 on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      package:
-        description: Build unsigned artifacts on configured matching hosts
-        type: boolean
-        default: false
 permissions:
   contents: read
 jobs:
   verify:
-    runs-on: [self-hosted, site-factory-win11-x64]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: actions/setup-node@v4.4.0
         with:
-          node-version: '24.21.0'
+          node-version: '24.22.1'
+          cache: npm
       - run: npm ci --ignore-scripts
-      - run: node scripts/prepare-browser.mjs --target win32-x64
+      - name: PostgreSQL on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          echo "SITE_FACTORY_PG_BIN=$(pg_config --bindir)" >> "$GITHUB_ENV"
+      - name: PostgreSQL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pg = Get-ChildItem 'C:/Program Files/PostgreSQL' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $pg) { throw 'PostgreSQL toolchain is required' }
+          "SITE_FACTORY_PG_BIN=$($pg.FullName)/bin" >> $env:GITHUB_ENV
+      - run: node node_modules/playwright/cli.js install --with-deps chromium --only-shell
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/browsers'
       - run: npm run verify
         env:
-          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/package/win32-x64/runtime/browsers'
-      - run: npm run pilot -- --fixtures
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/package/win32-x64/runtime/browsers'
-  package:
-    if: github.event_name == 'workflow_dispatch' && inputs.package
-    strategy:
-      max-parallel: 1
-      matrix:
-        include:
-          - target: win32-x64
-            runner: site-factory-win11-x64
-          - target: darwin-arm64
-            runner: site-factory-macos14-arm64
-          - target: darwin-x64
-            runner: site-factory-macos14-x64
-    runs-on: [self-hosted, '${{ matrix.runner }}']
-    steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: actions/setup-node@v4.4.0
-        with:
-          node-version: '24.21.0'
-      - run: npm ci --ignore-scripts
-      - run: npm run package:desktop -- --target ${{ matrix.target }}
+          PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/browsers'
+      - run: node scripts/api-install-smoke.mjs
+      - run: node scripts/reference-template-smoke.mjs
+      - run: python -X utf8 scripts/test/linux-publish.test.py
+      - run: node --test apps/client/test/*.test.mjs scripts/test/linux-ssh.test.mjs scripts/test/api-release.test.mjs scripts/test/api-upgrade.test.mjs
+      - name: Build Electron client
+        if: runner.os == 'Windows'
+        run: npm run build:client
+      - name: Build Linux API archive
+        if: runner.os == 'Linux'
+        run: node scripts/package-api.mjs --linux
       - uses: actions/upload-artifact@v4.6.2
         with:
-          name: unsigned-${{ matrix.target }}
+          name: verified-${{ runner.os }}
           path: |
-            .local-state/cargo-target/**/release/bundle/
-            .local-state/package/${{ matrix.target }}/package-result.json
-            .local-state/build-receipts/${{ matrix.target }}.json
+            .local-state/releases/
+            .local-state/client-build.json

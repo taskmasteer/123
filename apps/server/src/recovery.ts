@@ -1,3 +1,5 @@
+import {replicateBackup} from './backup-replica.js';
+import {logFailure} from './diagnostics.js';
 import {createHash,randomBytes,randomUUID,createCipheriv,createDecipheriv,scrypt as scryptCallback} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {readFile,writeFile,readdir,stat,mkdir,rm,open,rename,lstat} from 'node:fs/promises';
@@ -28,7 +30,7 @@ async function pgTool(root:string,name:'pg_dump'|'pg_restore',connection:PoolCon
 async function restrictRestoredDirectory(path:string){
   if(process.platform!=='win32')return;
   await new Promise<void>((yes,no)=>{
-    const child=spawn('icacls.exe',[path,'/inheritance:r','/grant:r','*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F'],{windowsHide:true,stdio:'ignore'});
+    const child=spawn('icacls.exe',[path,'/inheritance:r','/grant:r','*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F','*S-1-5-19:(OI)(CI)M'],{windowsHide:true,stdio:'ignore'});
     child.once('error',no);child.once('exit',code=>code===0?yes():no(Error('Cannot protect restored data')));
   });
 }
@@ -151,12 +153,13 @@ export async function createRecovery(pool:Pool,root:string,data:string,exclusive
       try{const password=await key(),config=JSON.parse(await readFile(join(data,'config.json'),'utf8'));
         const result=await exclusive(async()=>captureWindowsBackup({pool,root,data,password,connection:{host:'127.0.0.1',port:config.databasePort,user:'factory',database:config.databaseName??'factory',password:await protectSecret(config.databasePassword,true)}}));
         await pool.query("update factory.backups set status='complete',path=$2,bytes=$3,completed_at=now() where id=$1",[id,result.file,result.bytes]);
+        try{const replica=await replicateBackup(data,result.file,id);await pool.query('update factory.backups set replica=$2 where id=$1',[id,replica]);}catch(e){logFailure('backup.replica',e);await pool.query("update factory.backups set replica='{\"configured\":true,\"verified\":false}',error='Локальная копия готова, внешняя копия не подтверждена. Проверьте доступ к хранилищу.' where id=$1",[id]);}
         const expired=(await pool.query("select id,path from factory.backups where status='complete' and (download_until is null or download_until<now()) and id not in(select id from factory.backups where status='complete' order by completed_at desc limit 7)")).rows;
         for(const old of expired)if(old.path&&resolve(old.path).startsWith(resolve(data,'recovery')+sep)){try{await rm(old.path,{force:true});await pool.query("update factory.backups set status='expired',path=null where id=$1",[old.id]);}catch{console.error('Не удалось удалить старую резервную копию; новая копия сохранена.');}}
-      }catch{await pool.query("update factory.backups set status='failed',error='Копия не создана. Проверьте свободное место и доступ к PostgreSQL; рабочие данные сохранены.' where id=$1",[id]);}
+      }catch(error){logFailure('backup.create',error);await pool.query("update factory.backups set status='failed',error='Копия не создана. Проверьте свободное место и доступ к PostgreSQL; рабочие данные сохранены.' where id=$1",[id]);}
     }).finally(()=>{running=null;admitted=false;});return {id};
   }
-  const list=async()=>(await pool.query('select id,status,error,bytes,created_at,completed_at from factory.backups order by created_at desc limit 30')).rows;
+  const list=async()=>(await pool.query('select id,status,error,bytes,created_at,completed_at,replica from factory.backups order by created_at desc limit 30')).rows;
   const timer=setInterval(()=>{if(automated&&!admitted&&!closed)void pool.query("select 1 from factory.backups where status='complete' and completed_at>now()-interval '24 hours' or status in ('failed','running') and created_at>now()-interval '1 hour'").then(r=>{if(!r.rowCount)return create();}).catch(()=>{});},60000);timer.unref();
   return {create,key,list,async file(id:string){const row=(await pool.query("update factory.backups set download_until=now()+interval '10 minutes' where id=$1 and status='complete' returning path,bytes",[id])).rows[0];if(!row||!resolve(row.path).startsWith(resolve(data,'recovery')+sep))throw new AppError('NOT_FOUND','Копия не найдена.');return row;},async close(){closed=true;clearInterval(timer);await running;}};
 }

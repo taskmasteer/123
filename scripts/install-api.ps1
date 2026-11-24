@@ -53,10 +53,21 @@ if($LASTEXITCODE -ne 0){throw 'PostgreSQL service registration failed.'}
 $baseConfig=Get-Content (Join-Path $data 'config.json') -Raw | ConvertFrom-Json
 $baseConfig | Add-Member -Force -NotePropertyName databaseService -NotePropertyValue 'SiteFactory-Postgres'
 [IO.File]::WriteAllText((Join-Path $data 'config.json'),($baseConfig | ConvertTo-Json -Depth 20))
+# LocalService has no administrator token; grant only this installation's files.
+& (Join-Path $PSScriptRoot 'grant-service-traversal.ps1') -InstallRoot $root
+& icacls $root /grant '*S-1-5-19:(OI)(CI)RX' /Q | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Cannot grant application read access.'}
+& icacls $data /grant '*S-1-5-19:(OI)(CI)M' /T /Q | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Cannot grant application data access.'}
+& sc.exe config SiteFactory-Postgres obj= 'NT AUTHORITY\LocalService' password= '' | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Cannot set database service account.'}
+& sc.exe failure SiteFactory-Postgres reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Cannot configure database recovery.'}
+& sc.exe failureflag SiteFactory-Postgres 1 | Out-Null
 Start-Service SiteFactory-Postgres
 $action=New-ScheduledTaskAction -Execute $node -Argument ('"'+(Join-Path $root 'scripts/server-manage.mjs')+'" serve --log') -WorkingDirectory $root
 $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -StartWhenAvailable
-Register-ScheduledTask -TaskName SiteFactory-API -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest) -Settings $settings | Out-Null
+Register-ScheduledTask -TaskName SiteFactory-API -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' -LogonType ServiceAccount -RunLevel Limited) -Settings $settings | Out-Null
 New-NetFirewallRule -Name SiteFactory-API-9443 -DisplayName 'Site Factory API' -Direction Inbound -Protocol TCP -LocalPort 9443 -Action Allow | Out-Null
 Start-ScheduledTask SiteFactory-API
 $ready=$false

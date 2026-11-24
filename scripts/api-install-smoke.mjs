@@ -12,6 +12,7 @@ const root=resolve(import.meta.dirname,'..'),stage=join(root,'.local-state/api-i
 await mkdir(stage,{recursive:true});
 for(const file of ['dist','scripts','templates','references','supabase/migrations','package.json','package-lock.json'])await cp(join(root,file),join(stage,file),{recursive:true});
 for(const family of ['apps','packages'])for(const name of await readdir(join(root,family))){try{await mkdir(join(stage,family,name),{recursive:true});await cp(join(root,family,name,'package.json'),join(stage,family,name,'package.json'));}catch(e){if(e.code!=='ENOENT')throw e;}}
+await cp(join(root,'apps/client/release-key.pem'),join(stage,'apps/client/release-key.pem'));
 const pgBin=process.env.SITE_FACTORY_PG_BIN??join(root,'.local-state/tools/pgsql/bin'),env={...process.env,SITE_FACTORY_PG_BIN:pgBin,PLAYWRIGHT_BROWSERS_PATH:process.env.PLAYWRIGHT_BROWSERS_PATH??join(root,'.local-state/browsers')};
 if(process.platform==='linux')env.SITE_FACTORY_SECRET_KEY_FILE=join(stage,'.local-state/server/master.key');
 const cli=join(stage,'scripts/server-manage.mjs'),login='portable_owner',password='fixture-only-'+randomUUID(),recoveryKey='fixture-only-'+randomUUID();
@@ -33,6 +34,16 @@ try{
  const target=new Pool({...connection,database:rc.databaseName});try{assert.equal((await target.query("select value from factory.system_state where key='recovery_hold'")).rows[0].value,true);}finally{await target.end();}
  assert.equal(await readFile(join(restored,'objects/portable.txt'),'utf8'),'portable fixture');
  const old=JSON.parse(await readFile(join(stage,'site-factory.sfconnection'),'utf8'));await run(process.execPath,[cli,'address','--ip','127.0.0.1']);assert.notEqual(JSON.parse(await readFile(join(stage,'site-factory.sfconnection'),'utf8')).fingerprint,old.fingerprint);await start();await stop();
+ if(process.env.SITE_FACTORY_TEST_UPGRADE_ARCHIVE){
+  env.SITE_FACTORY_NPM_CLI=join(root,'.local-state/tools/npm/package/bin/npm-cli.js');
+  await writeFile(join(stage,'scripts/fixture-upgrade.txt'),'previous release');
+  const fingerprint=JSON.parse(await readFile(join(stage,'site-factory.sfconnection'),'utf8')).fingerprint;
+  await run(process.execPath,[join(stage,'scripts/update-api.mjs'),process.env.SITE_FACTORY_TEST_UPGRADE_ARCHIVE]);
+  await start();await stop();assert.equal(JSON.parse(await readFile(join(stage,'site-factory.sfconnection'),'utf8')).fingerprint,fingerprint);
+  await run(process.execPath,[join(stage,'scripts/update-api.mjs'),'rollback']);await start();await stop();
+  assert.equal(await readFile(join(stage,'scripts/fixture-upgrade.txt'),'utf8'),'previous release');
+  console.log('Signed API upgrade, preserved TLS/accounts, rollback and healthy restart: passed');
+ }
  console.log('CLI restore, preserved account/files, held workers, address rotation and restart: passed');
  console.log('Evidence: '+stage);
 }finally{await stop();await run(join(pgBin,'pg_ctl'+(process.platform==='win32'?'.exe':'')),['-D',join(stage,'.local-state/server/postgres'),'-m','fast','-w','stop']).catch(()=>{});}

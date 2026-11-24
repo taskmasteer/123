@@ -8,6 +8,7 @@ export interface ResponsesConfig {
     model: string;
     imageModel?: string;
     provider?: 'openai' | 'deepseek';
+    onUsage?: (response: Response, tokens: number) => Promise<void>;
 }
 export function validateModelConfig(config: ResponsesConfig) {
     if (typeof config.apiKey !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(config.apiKey) || !validModel(config.model) || (config.imageModel !== undefined && !validModel(config.imageModel)))
@@ -56,7 +57,7 @@ export function canRecover(value:unknown,diagnostic?:string):boolean {
           if(diagnostic==='Provider replay exceeded its private storage limit.'&&state.terminal===null){const before=JSON.stringify(state).length;compactReadHistory(state);return JSON.stringify(state).length<before;}
           if(diagnostic==='Invalid model tool arguments.'&&state.terminal===null&&state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return true;
           if(diagnostic==='Model response incomplete.'&&state.terminal==='incomplete'&&(state.outputRepairs??0)<3&&state.items.some(item=>item.type==='function_call'&&item.status==='incomplete'&&!finished.has(item.call_id)))return true;
-          if(diagnostic==='Only static site files are allowed.'&&state.terminal===null&&state.items.some(item=>item.type==='function_call'&&item.name==='write'&&!finished.has(item.call_id)))return true;
+          if(diagnostic==='Only static site files are allowed.'&&state.terminal===null&&state.items.some(item=>item.type==='function_call'&&['read','replace','write'].includes(String(item.name))&&!finished.has(item.call_id)))return true;
           if(diagnostic==='Model response stalled.'&&state.terminal==='stalled'&&state.turns>=48&&!state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return true;
           if(state.terminal!=='failed')return false;
         if(state.items.some(item=>item.type==='function_call'&&!finished.has(item.call_id)))return false;
@@ -102,6 +103,7 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 state.requestPending = false;
                 if (state.retries >= 3) {
                     state.transportExhausted = true;
+                    state.retryAt=timing.now()+300000;
                     await checkpoint();
                     throw new AppError('PROVIDER_WAIT', 'Model transport failed after three retries.');
                 }
@@ -116,6 +118,11 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 await timing.delay(delay, signal);
             }
             await checkpoint();
+            if(state.transportExhausted&&!state.requestPending&&state.retryAt<=timing.now()){
+                if((state.retryCycles??0)>=3)throw new AppError('NEEDS_ATTENTION','Provider transport retry budget exhausted. Check provider connectivity before restarting.');
+                state.retryCycles=(state.retryCycles??0)+1;state.transportExhausted=false;state.retries=0;
+                await checkpoint();
+            }
             if (state.requestPending) {
                 signal.throwIfAborted();
                 await retry();
@@ -158,8 +165,9 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 try {
                     response = await transport(provider==='deepseek'?'https://api.deepseek.com/responses':'https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({...body,...(provider==='deepseek'?{reasoning:{effort:'none'},max_output_tokens:16000}:{})}), redirect:'error', signal: AbortSignal.any([signal, AbortSignal.timeout(provider==='deepseek'?120000:60000)]) });
                 }
-                catch {
+                catch (error) {
                     signal.throwIfAborted();
+                    if(error instanceof AppError&&['NEEDS_ATTENTION','STALE_LEASE','CONFLICT'].includes(error.code)){state.requestPending=false;await checkpoint();throw error;}
                     await retry();
                     continue;
                 }
@@ -199,13 +207,18 @@ export function createResponsesModel(config: ResponsesConfig, transport: typeof 
                 const outputStart=state.items.length;
                 state.items.push(...data.output);
                 state.responseId = typeof data.id === 'string' ? data.id : null;
-                if (record(data.usage))
+                if (record(data.usage)) {
                     for (const [source, target] of [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens']] as const) {
                         const count = data.usage[source];
                         if (!Number.isSafeInteger(count) || (count as number) < 0)
                             throw new AppError('NEEDS_ATTENTION', 'Invalid provider usage.');
                         state[target] += count as number;
                     }
+                    const measured = Number(data.usage.input_tokens) + Number(data.usage.output_tokens);
+                    if (config.onUsage && data.status === 'completed' && !data.error && measured > 0 &&
+                        Number.isSafeInteger(measured) && (data.usage.total_tokens === undefined || data.usage.total_tokens === measured))
+                        await config.onUsage(response, measured);
+                }
                 const content = data.output.flatMap(item => item.type === 'message' && Array.isArray(item.content) ? item.content : []);
                 // Save the full ordered output BEFORE executing any tools, including opaque reasoning and phase.
                 if(data.error!==undefined&&data.error!==null)await terminal('failed');

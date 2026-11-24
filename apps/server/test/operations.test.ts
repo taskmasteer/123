@@ -21,7 +21,7 @@ import {LocalAuth} from '../src/auth.js';
 import type {DnsZone} from '../src/namecheap.js';
 const enabled=process.env.SITE_FACTORY_SERVER_TEST==='1',root=resolve('.'),id='sf_ops_'+randomUUID().replaceAll('-',''),data=resolve('.local-state',id);
 const actor={userId:randomUUID(),role:'admin' as const};let admin:Pool,pool:Pool,repository:SupabaseRepository,store:R2Store,connection:any;
-beforeAll(async()=>{if(!enabled)return;const c=JSON.parse(await readFile('.local-state/server/config.json','utf8'));connection={host:'127.0.0.1',port:c.databasePort,user:'factory',password:await protectSecret(c.databasePassword,true)};admin=new Pool({...connection,database:'postgres'});await admin.query('create database '+id);pool=new Pool({...connection,database:id,max:10});await mkdir(data,{recursive:true});await migrate(pool,root);await pool.query('insert into auth.users values($1)',[actor.userId]);await pool.query('insert into public.users(id) values($1)',[actor.userId]);await pool.query("insert into public.memberships values($1,'admin',true)",[actor.userId]);repository=new SupabaseRepository(configureSnapshotConnection(pool,'direct'));store=new R2Store(repository,new FileObjectTransport(join(data,'objects')),new PostgresQueue(repository));
+beforeAll(async()=>{if(!enabled)return;const c=JSON.parse(await readFile(process.env.SITE_FACTORY_TEST_CONFIG??'.local-state/server/config.json','utf8'));connection={host:'127.0.0.1',port:c.databasePort,user:'factory',password:await protectSecret(c.databasePassword,true)};admin=new Pool({...connection,database:'postgres'});await admin.query('create database '+id);pool=new Pool({...connection,database:id,max:10});await mkdir(data,{recursive:true});await migrate(pool,root);await pool.query('insert into auth.users values($1)',[actor.userId]);await pool.query('insert into public.users(id) values($1)',[actor.userId]);await pool.query("insert into public.memberships values($1,'admin',true)",[actor.userId]);repository=new SupabaseRepository(configureSnapshotConnection(pool,'direct'));store=new R2Store(repository,new FileObjectTransport(join(data,'objects')),new PostgresQueue(repository));
  for(const [name,ip]of [['a','203.0.113.10'],['b','203.0.113.20'],['ops','203.0.113.30']]){await pool.query("insert into factory.hosting_hosts(id,name,host,port,username,host_fingerprint,credential,config,status,phase) values($1,$1,$2,22,'ubuntu',$3,$4,$5,'ready','ready')",[name,ip,'SHA256:'+'a'.repeat(43),await protectSecret('fixture-private-key'),{additionalIPv4:[],publicKey:'ssh-ed25519 AAAA fixture'}]);await pool.query('insert into factory.hosting_addresses(address,host_id) values($1,$2)',[ip,name]);}
 },60000);
 afterAll(async()=>{if(!enabled)return;await pool?.end();if(admin){await admin.query('drop database '+id+' with (force)');await admin.end();}},30000);
@@ -124,3 +124,73 @@ test.skipIf(!enabled)('full encrypted backup restores factory data, files and po
   expect((await readdir(join(data,'recovery'))).some(f=>f.startsWith('work-')||f.startsWith('.backup-')||f.startsWith('.restore-'))).toBe(false);
  }finally{await admin.query('drop database if exists '+targetDb+' with (force)');await removePrivateTree(data,destination);}
 },180000);
+
+
+test.skipIf(!enabled)('restore imports a newer remote release and advances publication order before resume',async()=>{
+ const {reconcileRecovery}=await import('../src/recovery-reconcile.js');
+ const site=await repository.create({domain:'restore-release.example'},actor),old=await version(site.id,'backup'),remote=randomUUID();
+ await pool.query("insert into factory.hosting_addresses(address,host_id,site_id,state) values('203.0.113.99','a',$1,'active')",[site.id]);
+ await pool.query("insert into factory.hosting_sites(site_id,address,revision_id) values($1,'203.0.113.99',$2)",[site.id,old]);
+ const bindings=(await pool.query('select b.*,s.domain,host(b.address) ip from factory.hosting_sites b join public.sites s on s.id=b.site_id')).rows;
+ const read=async(_host:any,id:string)=>{const row=bindings.find(b=>b.site_id===id);return {siteId:id,domain:row.domain,revisionId:id===site.id?remote:row.revision_id,ips:[row.ip],order:'9000'};};
+ await reconcileRecovery(pool,read,store,async()=>[{path:'index.html',bytes:Buffer.from('<h1>New live release</h1>'),mediaType:'text/html'}],async()=>[]);
+ expect((await repository.get(site.id))!.draftId).toBe(remote);
+ const revision=await repository.revision(remote);expect(Buffer.from((await store.read(revision!.manifestId))[0]!.bytes).toString()).toContain('New live release');
+ expect(Number((await pool.query("select nextval(pg_get_serial_sequence('factory.hosting_jobs','id')) n")).rows[0].n)).toBeGreaterThan(9000);
+});
+
+test.skipIf(!enabled)('DNS cooldown is shared by new transport instances and survives process restart',async()=>{
+ const {dnsTransport}=await import('../src/dns-transport.js');let calls=0;
+ const transport:any=async()=>{calls++;return new Response('',{status:429,headers:{'retry-after':'60'}});};
+ const first=dnsTransport(pool,'godaddy','quota-fixture',transport);await first('https://fixture.example');
+ const restarted=dnsTransport(pool,'godaddy','quota-fixture',transport);await expect(restarted('https://fixture.example')).rejects.toMatchObject({code:'UNAVAILABLE'});expect(calls).toBe(1);
+});
+
+
+test.skipIf(!enabled)('model budget is atomic across concurrent requests and persists after restart',async()=>{
+ const {reserveModelBudget}=await import('../src/model-budget.js');
+ const site=await repository.create({domain:'model-budget.example'},actor),job=randomUUID();
+ await pool.query("insert into private.jobs(id,site_id,data) values($1,$2,$3)",[job,site.id,{state:'running'}]);
+ const limits={job:32000,batch:32000},signal=new AbortController().signal;
+ const outcomes=await Promise.allSettled([reserveModelBudget(pool,job,site.id,20000,limits,signal),reserveModelBudget(pool,job,site.id,20000,limits,signal)]);
+ expect(outcomes.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+ expect(Number((await pool.query('select reserved from factory.model_budgets where key=$1',['job:'+job])).rows[0].reserved)).toBe(20000);
+ await expect(reserveModelBudget(pool,job,site.id,20000,limits,signal)).rejects.toMatchObject({code:'NEEDS_ATTENTION'});
+ await pool.query("update private.jobs set data=jsonb_set(data,'{state}','\"cancelled\"') where id=$1",[job]);
+ await expect(reserveModelBudget(pool,job,site.id,1,limits,signal)).rejects.toMatchObject({code:'STALE_LEASE'});
+});
+
+test.skipIf(!enabled)('model budget settles confirmed calls in both scopes and keeps uncertain calls reserved',async()=>{
+ const {budgetedModel}=await import('../src/model-budget.js');
+ const site=await repository.create({domain:'metered-budget.example'},actor),job=randomUUID(),batch=randomUUID();
+ await pool.query("insert into private.batches(id,owner_id,state,data) values($1,$2,'active','{}')",[batch,actor.userId]);
+ await pool.query("insert into private.jobs(id,site_id,batch_id,data) values($1,$2,$3,$4)",[job,site.id,batch,{state:'running'}]);
+ let usage:object|undefined={input_tokens:15,output_tokens:7,total_tokens:22};
+ const run=async()=>{
+  const model=budgetedModel(pool,'fixture',{job:32000,batch:32000},async()=>Response.json({status:'completed',usage,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Ready.'}]}]}));
+  return model.run({mode:'plan',site,instruction:'Choose a topic',styleId:'fixture',baseManifestId:null,conversation:[],operationId:job}, {list:async()=>[],read:async()=>'',write:async()=>{},replace:async()=>{}},new AbortController().signal);
+ };
+ const totals=async()=>(await pool.query('select reserved from factory.model_budgets where key=any($1) order by key',[['batch:'+batch,'job:'+job]])).rows.map(r=>Number(r.reserved));
+ await run();await run();
+ expect(await totals()).toEqual([44,44]);
+ usage=undefined;
+ await run();const [batchTotal,jobTotal]=await totals();expect(batchTotal).toBe(jobTotal);expect(jobTotal).toBeGreaterThan(16044);
+ await expect(run()).rejects.toThrow('Model token budget exhausted');
+ expect(await totals()).toEqual([batchTotal,jobTotal]);
+});
+
+
+test.skipIf(!enabled)('restored service timers start paused before their first tick',async()=>{
+ const site=await repository.create({domain:'held-start.example'},actor);await version(site.id,'held');
+ await pool.query("insert into factory.hosting_addresses(address,host_id) values('203.0.113.98','a')");
+ let calls=0;const external=async()=>{calls++;throw Error('Held services must not perform external work');};
+ const hosting=await createHosting(pool,repository,store,data,{publish:external,dns:{read:external,write:external},propagated:external,health:external},true);
+ const monitoring=await createMonitoring(pool,{dns:external,health:external,certificate:external},true);
+ const servers=await createServers(pool,root,data,{execute:external,fingerprint:external},true);
+ try{
+  await hosting.enqueue(actor,site.id,{address:'203.0.113.98'});
+  await pool.query("update factory.hosting_hosts set status='queued',phase='maintenance',operation=$1 where id='ops'",[{kind:'check',previousStatus:'ready'}]);
+  await Promise.all([hosting.tick(),monitoring.tick(),servers.tick()]);await new Promise(r=>setTimeout(r,3200));
+  expect(calls).toBe(0);expect((await hosting.details(site.id)).jobs[0].status).toBe('queued');
+ }finally{await hosting.close();await monitoring.close();await servers.close();await pool.query("update factory.hosting_hosts set status='ready',phase='ready',operation=null where id='ops'");}
+});

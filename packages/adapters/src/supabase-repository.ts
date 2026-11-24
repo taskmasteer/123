@@ -40,7 +40,7 @@ type DbSite = {
     domain_status: string;
     assigned: string[];
 };
-const siteSelect = `select s.*,coalesce((select array_agg(distinct a.user_id) from (select user_id from public.assignments where site_id=s.id union select a.user_id from private.batch_assignments a join private.batch_rows r on r.batch_id=a.batch_id where r.site_id=s.id) a),'{}') assigned from public.sites s`;
+const siteSelect = `select s.*,coalesce((select array_agg(distinct a.user_id) from (select user_id from public.assignments where site_id=s.id union select a.user_id from private.batch_assignments a join private.batch_rows r on r.batch_id=a.batch_id where r.site_id=s.id) a),'{}') assigned from (select * from public.sites where archived_at is null) s`;
 function site(row: DbSite): Site { return { id: row.id, domain: row.domain, ownerId: row.owner_id, assignedUserIds: row.assigned, input: row.input, revision: row.revision, draftId: row.draft_id, publishedId: row.published_id, generationStatus: row.generation_status, domainStatus: row.domain_status }; }
 const snapshotModes = new WeakMap<Pool, 'direct' | 'session' | 'transaction' | 'unknown'>();
 /** Trusted deployment declaration, never inferred from URL/port or a lock probe. */
@@ -156,7 +156,7 @@ export class SupabaseRepository {
         const domain = normalizeDomain(input.domain);
         if ((input.about?.length ?? 0) > 8000)
             throw new AppError('INVALID_INPUT', 'Слишком длинное описание.');
-        const inserted = await tx.query('insert into public.sites(id,domain,owner_id,input) values($1,$2,$3,$4) on conflict(domain) do nothing returning id', [id, domain, actor.userId, { ...input, domain }]);
+        const inserted = await tx.query('insert into public.sites(id,domain,owner_id,input) values($1,$2,$3,$4) on conflict(domain) where archived_at is null do nothing returning id', [id, domain, actor.userId, { ...input, domain }]);
         if (!inserted.rowCount)
             throw new AppError('DUPLICATE_DOMAIN', 'Домен уже существует.');
         const job: Job = { id, siteId: id, kind: 'generate', stage: 'brief', state: 'queued', checkpointId: null, baseRevision: 0, ...(generation?{generation}:{}) };
@@ -173,16 +173,26 @@ export class SupabaseRepository {
         const filtered = Object.values(filters).some(Boolean), binding = filterBinding(actor, filters);
         const key = cursor === undefined ? null : !filtered && /^[0-9a-f-]{36}$/i.test(cursor) ? cursor : decodeCursor(cursor, binding);
         // Match current() and the displayed job state; stored status is only a no-job fallback.
-        const rows = (await this.pool.query<DbSite>(siteSelect + ` where ($1='admin' or s.owner_id=$2 or exists(select 1 from public.assignments a where a.site_id=s.id and a.user_id=$2) or private.has_batch_assignment(s.id,$2)) and ($3::uuid is null or s.id>$3) and ($5='' or position($5 in s.domain)>0) and ($6='' or coalesce((select j.data->>'state' from private.jobs j where j.site_id=s.id order by case when j.data->>'state' in ('completed','cancelled') then 1 else 0 end,j.id desc limit 1),s.generation_status)=$6) and ($7::uuid is null or exists(select 1 from private.batch_rows b where b.batch_id=$7 and b.site_id=s.id)) order by s.id limit $4`, [actor.role, actor.userId, key, limit + 1, filters.domain ?? '', filters.status ?? '', filters.batchId || null])).rows;
+        const rows = (await this.pool.query<DbSite>(siteSelect + `
+          left join lateral(select j.data->>'state' state from private.jobs j where j.site_id=s.id
+            order by case when j.data->>'state' in ('queued','running','waiting_provider','paused') then 0 else 1 end,j.created_at desc,j.id desc limit 1) current_job on true
+          where ($1='admin' or s.owner_id=$2 or exists(select 1 from public.assignments a where a.site_id=s.id and a.user_id=$2) or private.has_batch_assignment(s.id,$2))
+          and ($3::uuid is null or s.id>$3) and ($5='' or position($5 in s.domain)>0)
+          and ($6='' or ($6='ready' and (s.draft_id is not null or s.published_id is not null))
+            or ($6='working' and current_job.state in ('queued','running','waiting_provider'))
+            or ($6='attention' and current_job.state='needs_attention')
+            or coalesce(current_job.state,s.generation_status)=$6)
+          and ($7::uuid is null or exists(select 1 from private.batch_rows b where b.batch_id=$7 and b.site_id=s.id))
+          order by s.id limit $4`, [actor.role, actor.userId, key, limit + 1, filters.domain ?? '', filters.status ?? '', filters.batchId || null])).rows;
         const page = sitePagePrefix(rows, site, limit);
         return { items: page.map(site), nextCursor: rows.length > page.length ? (filtered ? encodeCursor(page.at(-1)!.id, binding) : page.at(-1)!.id) : null };
     }
     async registryRows(siteIds:string[]) {
         if(siteIds.length>100)throw new AppError('INVALID_INPUT','Слишком большая страница.');
-        const rows=(await this.pool.query("select requested.id site_id,j.data job,e.data->'state' state,case when o.kind='controller' and o.expires_at<=clock_timestamp() then null else o.kind end operation from unnest($1::uuid[]) requested(id) left join lateral(select * from private.jobs where site_id=requested.id order by case when data->>'state' in ('completed','cancelled') then 1 else 0 end,id desc limit 1) j on true left join private.checkpoint_evidence e on e.id=j.checkpoint_id left join private.site_operations o on o.site_id=requested.id",[siteIds])).rows;
+        const rows=(await this.pool.query("select requested.id site_id,j.data job,e.data->'state' state,case when o.kind='controller' and o.expires_at<=clock_timestamp() then null else o.kind end operation from unnest($1::uuid[]) requested(id) left join lateral(select * from private.jobs where site_id=requested.id order by case when data->>'state' in ('queued','running','waiting_provider','paused') then 0 else 1 end,created_at desc,id desc limit 1) j on true left join private.checkpoint_evidence e on e.id=j.checkpoint_id left join private.site_operations o on o.site_id=requested.id",[siteIds])).rows;
         return new Map(rows.map(r=>[r.site_id,{job:r.job as Job|null,state:r.state as Record<string,unknown>|undefined,operation:r.operation as 'job'|'publication'|'controller'|null}]));
     }
-    async current(siteId: string) { return (await this.pool.query('select data from private.jobs where site_id=$1 order by case when data->>\'state\' in (\'completed\',\'cancelled\') then 1 else 0 end,id desc limit 1', [siteId])).rows[0]?.data as Job | undefined ?? null; }
+    async current(siteId: string) { return (await this.pool.query('select data from private.jobs where site_id=$1 order by case when data->>\'state\' in (\'queued\',\'running\',\'waiting_provider\',\'paused\') then 0 else 1 end,created_at desc,id desc limit 1', [siteId])).rows[0]?.data as Job | undefined ?? null; }
     async acquire(actor: Principal, siteId: string): Promise<Admission> {
         return this.transaction(async (tx) => {
             await tx.query('select id from public.sites where id=$1 for update', [siteId]);

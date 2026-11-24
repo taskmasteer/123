@@ -10,9 +10,10 @@ afterEach(cleanDirectories);
 // Screenshot index is private review evidence, never part of a website manifest.
 test('all five original styles render readable English pages with working local anchors', async () => {
   const catalog = await createLocalCatalog(process.cwd(), await directory()); const listing = await catalog.list();
-  expect(listing.styles).toHaveLength(5);
+  const originals=listing.styles.filter(style=>!style.id.startsWith('reference-'));
+  expect(originals).toHaveLength(5);
   const evidence: Record<string, string[]> = {};
-  for (const style of listing.styles) {
+  for (const style of originals) {
     const files = await catalog.load(style.id, style.version); const report = await validateSite(files);
     expect(report.issues, style.id).toEqual([]); expect(report.ok, style.id).toBe(true);
     expect(report.screenshotIds, style.id).toHaveLength(2); evidence[style.id] = report.screenshotIds;

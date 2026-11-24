@@ -66,8 +66,15 @@ export async function migrate(pool: Pool, root: string) {
       alter table factory.hosting_jobs add column if not exists dns_provider text not null default 'namecheap';
       create table if not exists factory.hosting_domains(domain text primary key,provider text not null check(provider in ('namecheap','godaddy')));
     `);
+    await tx.query('create table if not exists factory.model_budgets(key text primary key,reserved bigint not null)');
+    await tx.query(`create table if not exists factory.originality_profiles(
+      site_id uuid not null references public.sites(id) on delete cascade,
+      source text not null,profile jsonb not null,primary key(site_id,source))`);
+    await tx.query('create table if not exists factory.dns_limits(key text primary key,next_at timestamptz not null)');
     await operationsSchema(tx);
+    await tx.query("alter table factory.backups add column if not exists replica jsonb not null default '{}'");
     await tx.query('alter table factory.hosting_jobs add column if not exists retry_count integer not null default 0');
     await tx.query(`create table if not exists factory.auto_publications(site_id uuid primary key references public.sites(id),actor uuid not null references public.users(id),status text not null default 'waiting',error text,created_at timestamptz not null default now());`);
+    await tx.query(`alter table factory.auto_publications add column if not exists retry_count integer not null default 0; alter table factory.auto_publications add column if not exists next_attempt timestamptz not null default now();`);
   } finally { await tx.query('select pg_advisory_unlock(78424519)');tx.release(); }
 }

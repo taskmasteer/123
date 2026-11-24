@@ -30,6 +30,8 @@ export class LocalAuth {
   async bootstrapAvailable(){return !(await this.pool.query('select 1 from factory.accounts limit 1')).rowCount;}
   async register(input:{login:unknown;password:unknown;invite:unknown},bootstrap:boolean){
     const login=loginInput(input.login);if(typeof input.password!=='string')throw new AppError('INVALID_INPUT','Укажите пароль.');
+    // Cheap admission before scrypt; the invite is checked/consumed again under lock.
+    if(!bootstrap||!await this.bootstrapAvailable())await this.checkInvite(input.invite);
     if(this.hashing>=2)throw new AppError('UNAVAILABLE','Повторите через несколько секунд.');
     this.hashing++;let hash:string;try{hash=await passwordHash(input.password);}finally{this.hashing--;}
     const tx=await this.pool.connect(),id=randomUUID();
@@ -55,10 +57,14 @@ export class LocalAuth {
     if(this.hashing>=2)throw new AppError('UNAVAILABLE','Повторите через несколько секунд.');this.hashing++;
     let matches=false;try{matches=await passwordMatches(password,row?.password_hash??'00000000000000000000000000000000:'+ '0'.repeat(128));}finally{this.hashing--;}
     if(!row||!matches)throw new AppError('UNAUTHENTICATED','Неверный логин или пароль.');
-    await this.pool.query('delete from factory.attempts where key=$1',[tokenHash('account:'+login)]);await this.audit(row.id,'account.login');return this.newSession(row.id);
+    await this.pool.query('delete from factory.attempts where key=$1',[tokenHash('account:'+login)]);await this.audit(row.id,'account.login');return this.newSession(row.id,row.password_hash);
   }
-  async newSession(id:string){
-    const session=token(),csrf=token();await this.pool.query("insert into factory.sessions values($1,$2,$3,now()+interval '12 hours')",[tokenHash(session),id,csrf]);
+  async newSession(id:string,expectedHash?:string){
+    const session=token(),csrf=token(),tx=await this.pool.connect();
+    try{await tx.query('begin');const account=(await tx.query('select a.password_hash,m.active from factory.accounts a join public.memberships m on m.user_id=a.id where a.id=$1 for update of a,m',[id])).rows[0];
+      if(!account?.active||expectedHash&&account.password_hash!==expectedHash)throw new AppError('UNAUTHENTICATED','Доступ изменился. Войдите заново.');
+      await tx.query("insert into factory.sessions values($1,$2,$3,now()+interval '12 hours')",[tokenHash(session),id,csrf]);await tx.query('commit');
+    }catch(e){await tx.query('rollback');throw e;}finally{tx.release();}
     return {token:session,csrf,userId:id};
   }
   async session(raw:string){
@@ -79,4 +85,33 @@ export class LocalAuth {
     await this.audit(actor,'invitation.create');return {code,expiresInMinutes:20,expiresAt:new Date(row.expires_at).toISOString()};
   }
   async logout(raw:string){await this.pool.query('delete from factory.sessions where hash=$1',[tokenHash(raw)]);}
+  async sessions(raw:string){
+    const user=await this.verifyUser(raw);
+    return (await this.pool.query('select hash as id,expires_at,hash=$2 as current from factory.sessions where user_id=$1 and expires_at>now() order by expires_at desc',[user.userId,tokenHash(raw)])).rows;
+  }
+  async revokeOtherSessions(raw:string){
+    const user=await this.verifyUser(raw);
+    await this.pool.query('delete from factory.sessions where user_id=$1 and hash<>$2',[user.userId,tokenHash(raw)]);
+    await this.audit(user.userId,'account.sessions.revoke');
+  }
+  async changePassword(raw:string,current:unknown,next:unknown){
+    const user=await this.verifyUser(raw);
+    await this.limit('password:'+user.userId,5);
+    if(typeof current!=='string'||typeof next!=='string')throw new AppError('INVALID_INPUT','Укажите текущий и новый пароль.');
+    if(this.hashing>=2)throw new AppError('UNAVAILABLE','Повторите через несколько секунд.');
+    this.hashing++;
+    try{
+      const old=(await this.pool.query('select password_hash from factory.accounts where id=$1',[user.userId])).rows[0]?.password_hash;
+      if(!old||!await passwordMatches(current,old))throw new AppError('UNAUTHENTICATED','Текущий пароль неверен.');
+      const hash=await passwordHash(next),tx=await this.pool.connect();
+      try{
+        await tx.query('begin');
+        const changed=await tx.query('update factory.accounts set password_hash=$2 where id=$1 and password_hash=$3',[user.userId,hash,old]);
+        if(!changed.rowCount)throw new AppError('CONFLICT','Пароль уже изменён. Войдите заново.');
+        await tx.query('delete from factory.sessions where user_id=$1 and hash<>$2',[user.userId,tokenHash(raw)]);
+        await tx.query("insert into factory.audit(actor,action) values($1,'account.password.change')",[user.userId]);
+        await tx.query('commit');
+      }catch(e){await tx.query('rollback');throw e;}finally{tx.release();}
+    }finally{this.hashing--;}
+  }
 }

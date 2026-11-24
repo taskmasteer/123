@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {protectSecret} from '../dist/apps/server/src/secrets.js';
 const root=resolve('.'),dir=resolve('.local-state/connection-smoke-'+randomUUID()),stage=join(dir,'client');await mkdir(stage,{recursive:true});
-for(const f of ['main.mjs','preload.cjs','connection.mjs','connection-file.mjs','package.json'])await cp(join(root,'apps/client',f),join(stage,f));await cp(join(root,'apps/desktop/dist-web'),join(stage,'ui'),{recursive:true});
+for(const f of ['main.mjs','release-signature.mjs','release-key.pem','preload.cjs','connection.mjs','connection-file.mjs','package.json'])await cp(join(root,'apps/client',f),join(stage,f));await cp(join(root,'apps/desktop/dist-web'),join(stage,'ui'),{recursive:true});
 const config=JSON.parse(await readFile('.local-state/server/config.json','utf8')),cert={pfx:Buffer.from(await protectSecret(config.tlsPfx,true),'base64'),passphrase:await protectSecret(config.tlsPassword,true)};
 const requests=[];const server=createServer(cert,(req,res)=>{requests.push({path:req.url,cookie:req.headers.cookie});res.setHeader('content-type','application/json');if(req.url==='/auth/status')res.end(JSON.stringify({user:null,bootstrap:false}));else if(req.url==='/auth/login'){res.setHeader('set-cookie','__Host-factory=fixture-old-session; Secure; HttpOnly');res.end('{}');}else{res.statusCode=401;res.end(JSON.stringify({error:{message:'Войдите'}}));}});
 await new Promise(r=>server.listen(9445,'127.0.0.1',r));

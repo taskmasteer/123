@@ -11,7 +11,7 @@ export class GoDaddyDns {
     domain=publicationDomain(domain);
     const identity=randomUUID();
     let response:Response;
-    try{response=await this.transport(`https://api.godaddy.com/v3/domains/zones/${encodeURIComponent(domain)}/dns-records${suffix}`,{method,headers:{Authorization:`Bearer ${this.token}`,...(body?{'Content-Type':'application/json','Idempotency-Key':identity}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(25000)});}catch{throw new AppError('UNAVAILABLE','GoDaddy не ответил. Повторите позже.');}
+    try{response=await this.transport(`https://api.godaddy.com/v3/domains/zones/${encodeURIComponent(domain)}/dns-records${suffix}`,{method,headers:{Authorization:`Bearer ${this.token}`,...(body?{'Content-Type':'application/json','Idempotency-Key':identity}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(25000)});}catch(e){if(e instanceof AppError)throw e;throw new AppError('UNAVAILABLE','GoDaddy не ответил. Повторите позже.');}
     if(!response.ok)throw new AppError('UNAVAILABLE',`GoDaddy HTTP ${response.status}. Проверьте доступ к домену и права токена Domains/DNS.`);
     const reader=response.body!.getReader();const chunks:Uint8Array[]=[];let size=0;
     while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>2000000){await reader.cancel();throw new AppError('UNAVAILABLE','Ответ GoDaddy слишком большой.');}chunks.push(value);}
@@ -21,6 +21,7 @@ export class GoDaddyDns {
     domain=publicationDomain(domain);const records:DnsRecord[]=[];let total:number|undefined;
     for(let page=1;page<=100;page++){
       const result=await this.call(domain,`?page=${page}&pageSize=100&totalRequired=true`);
+      if(page===1&&Array.isArray(result.items)&&result.items.length===0&&result.totalPages===undefined&&result.totalItems===undefined)return {domain,records:[]};
       if(!Array.isArray(result.items)||!Number.isInteger(result.totalPages)||result.totalPages<0||result.totalPages>100||!Number.isInteger(result.totalItems))throw new AppError('UNAVAILABLE','Неполный ответ DNS GoDaddy.');
       if(total!==undefined&&total!==result.totalItems)throw new AppError('CONFLICT','DNS GoDaddy изменился во время чтения.');total=result.totalItems;
       for(const r of result.items){

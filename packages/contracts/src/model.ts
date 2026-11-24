@@ -206,6 +206,7 @@ export interface ModelContinuation {
     responseId: string | null;
     /** Prior attempts with unknown token/billing usage; never an estimate of charges. */
     uncertainRequests?: number;
+    retryCycles?: number;
     /** Bounded recovery of truncated provider outputs, persisted across restarts. */
     outputRepairs?: number;
     terminal: 'final' | 'refused' | 'incomplete' | 'failed' | 'cancelled' | 'stalled' | null;

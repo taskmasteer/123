@@ -25,7 +25,7 @@ it('measures 5000 normalized records beyond the old JSON cap, complete stable pa
     let db = await openLocalDatabase(root);
     const before = process.memoryUsage(), timing: Record<string, number> = {};
     try {
-        const source = Buffer.from('domain,about\n' + Array.from({ length: 5000 }, (_, i) => `site-${i}.test,${'description '.repeat(50)}`).join('\n'));
+        const source = Buffer.from('domain,about,mentionedUrl\n' + Array.from({ length: 5000 }, (_, i) => `site-${i}.test,${'description '.repeat(50)},https://example.com/`).join('\n'));
         expect(source.length).toBeGreaterThan(2000000);
         let t = performance.now();
         let batches = new LocalBatches(db), resources = new LocalImportResources(batches);
@@ -100,7 +100,7 @@ it('runs 100 fake generation jobs with two workers, persisted pause/resume and i
     const root = await mkdtemp(join(tmpdir(), 'sf-100-')), db = await openLocalDatabase(root), sites = await createLocalState(root, clock, db), queue = await createLocalQueue(root, clock, db), b = new LocalBatches(db);
     const t = performance.now();
     try {
-        const batch = await b.submitBatch(actor, Array.from({ length: 100 }, (_, i) => ({ rowNumber: i + 2, domain: `fake-${i}.test` })), 'fake100');
+        const batch = await b.submitBatch(actor, Array.from({ length: 100 }, (_, i) => ({ mentionedUrl: 'https://example.com/', rowNumber: i + 2, domain: `fake-${i}.test` })), 'fake100');
         const model = new FakeModel(), deps: WorkerDeps = { sites, queue, clock, revisions: await createLocalRevisions(root, db), artifacts: await createLocalArtifacts(join(root, 'artifacts')), checkpoints: await createCheckpointStore(join(root, 'checkpoints'), clock), model: { async run(request, tools, signal) {
                     if (request.site.domain === 'fake-13.test')
                         throw new AppError('NEEDS_ATTENTION', 'Injected per-row failure');

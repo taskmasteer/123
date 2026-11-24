@@ -3,7 +3,7 @@ import type { ArtifactFile } from '../../contracts/src/model.js';
 
 export const artifactLimits = { fileBytes: 2_000_000, totalBytes: 10_000_000, files: 100 } as const;
 const media: Record<string, string> = {
-  html: 'text/html', css: 'text/css', js: 'text/javascript', svg: 'image/svg+xml',
+  json: 'application/json', txt: 'text/plain', xml: 'application/xml', html: 'text/html', css: 'text/css', js: 'text/javascript', svg: 'image/svg+xml',
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
   gif: 'image/gif', ico: 'image/x-icon', woff: 'font/woff', woff2: 'font/woff2',
 };
@@ -13,6 +13,7 @@ export function artifactPath(path: string): string {
   if (parts.some((part) => !/^[a-z0-9][a-z0-9._-]*$/i.test(part) || part.endsWith('.') ||
       /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(part) ||
       /^(api|node_modules)$/i.test(part))) throw new AppError('INVALID_INPUT', 'Unsafe artifact path.');
+  if(/^(?:package(?:-lock)?|vercel|tsconfig(?:\.[a-z0-9_-]+)?)\.json$/i.test(parts.at(-1)!))throw new AppError('INVALID_INPUT','Only static site files are allowed.');
   const extension = parts.at(-1)!.split('.').at(-1)!;
   if (!media[extension.toLowerCase()]) throw new AppError('INVALID_INPUT', 'Only static site files are allowed.');
   return path;

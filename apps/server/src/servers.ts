@@ -1,3 +1,4 @@
+import {logFailure} from './diagnostics.js';
 import type {Pool} from 'pg';
 import ssh2,{Client} from 'ssh2';
 import {createHash,randomUUID} from 'node:crypto';
@@ -25,7 +26,7 @@ export function validateServer(body:Record<string,unknown>){
   if(!Number.isInteger(port)||port<1||port>65535||!/^[a-z_][a-z0-9_-]{0,31}$/.test(username)||!name||name.length>80)throw new AppError('INVALID_INPUT','Проверьте название, SSH-порт и логин.');
   const additionalIPv4=[...new Set(String(body.additionalIPv4??'').split(/[\s,;]+/).filter(Boolean).map(publicIPv4))].filter(v=>v!==host);
   if(additionalIPv4.length>256)throw new AppError('INVALID_INPUT','За один раз поддерживается до 256 дополнительных IPv4.');
-  const fingerprint=String(body.fingerprint??'').trim();if(fingerprint&&!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint))throw new AppError('INVALID_INPUT','Проверьте SHA256 отпечаток SSH.');
+  const fingerprint=String(body.fingerprint??'').trim();if(!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint))throw new AppError('INVALID_INPUT','Укажите проверенный SHA256 отпечаток SSH из консоли сервера.');
   const auth:Bootstrap=body.authType==='key'?{privateKey:String(body.privateKey??''),...(body.passphrase?{passphrase:String(body.passphrase)}:{})}:{password:String(body.password??'')};
   if(auth.privateKey?auth.privateKey.length>32768||!auth.privateKey.includes('PRIVATE KEY'):!auth.password||auth.password.length>4096)throw new AppError('INVALID_INPUT','Укажите пароль или приватный SSH-ключ.');
   return {host,port,username,name,additionalIPv4,fingerprint,auth};
@@ -39,7 +40,7 @@ async function discoverFingerprint(host:string,port:number){
   });
 }
 export type ProvisionPorts={execute:typeof sshExecute;fingerprint:(host:string,port:number)=>Promise<string>};
-export async function createServers(pool:Pool,root:string,data:string,override?:ProvisionPorts){
+export async function createServers(pool:Pool,root:string,data:string,override?:ProvisionPorts,initiallyPaused=false){
   const execute=override?.execute??sshExecute, fingerprint=override?.fingerprint??discoverFingerprint;
   // Import the existing enrolled VPS without touching its network or publications.
   try{
@@ -47,13 +48,14 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
     const addresses=(await pool.query("select host(address) address from factory.hosting_addresses where host_id='ovh-pilot'")).rows.map(r=>r.address);
     await pool.query(`insert into factory.hosting_hosts(id,name,host,port,username,host_fingerprint,credential,config,status,phase) values('ovh-pilot','OVH · Gravelines',$1,$2,$3,$4,$5,$6,'ready','ready') on conflict do nothing`,[legacy.host,legacy.port,legacy.username,legacy.hostFingerprint,legacy.privateKeyEncrypted,{additionalIPv4:addresses.filter(ip=>ip!==legacy.host),publicKey:legacy.publicKey}]);
   }catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
-  const helper=await readFile(join(root,'scripts/linux/provision.py'),'utf8'),publisher=await readFile(join(root,'scripts/linux/publish.py'));
+  const codeRoot=process.env.SITE_FACTORY_INSTALL_ROOT??root;
+  const helper=await readFile(join(codeRoot,'scripts/linux/provision.py'),'utf8'),publisher=await readFile(join(codeRoot,'scripts/linux/publish.py'));
   const helperCommand="python3 -c \"import base64;exec(base64.b64decode('"+Buffer.from(helper).toString('base64')+"'))\"";
   async function verifyHttp(addresses:string[]){
     if(override)return;
     await Promise.all(addresses.map(async ip=>{try{const response=await fetch(`http://${ip}/__site_factory_connection_check`,{redirect:'error',signal:AbortSignal.timeout(10000)});await response.body?.cancel();if(response.status!==404)throw Error('unexpected response');}catch{throw new AppError('UNAVAILABLE','HTTP недоступен на '+ip+'. Проверьте сетевой firewall провайдера и порт 80.');}}));
   }
-  let closed=false,paused=false,ticking:Promise<void>|null=null;
+  let closed=false,paused=initiallyPaused,ticking:Promise<void>|null=null;
   const list=async()=>(await pool.query(`select h.id,h.name,host(h.host) host,h.port,h.username,h.host_fingerprint,h.status,h.phase,h.error,h.report,h.config-'publicKey' as config,h.created_at,h.updated_at,h.checked_at,h.operation->>'kind' operation,
     coalesce((select jsonb_agg(jsonb_build_object('address',host(a.address),'siteId',a.site_id,'state',a.state,'releaseAfter',a.release_after) order by a.priority,a.address) from factory.hosting_addresses a where a.host_id=h.id),'[]') addresses from factory.hosting_hosts h order by h.created_at`)).rows;
   async function maintain(id:string,body:Record<string,unknown>){
@@ -61,14 +63,15 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
     try{
       await tx.query('begin');await tx.query('select pg_advisory_xact_lock(78424520)');
       const row=(await tx.query('select *,host(host) host from factory.hosting_hosts where id=$1 for update',[id])).rows[0] as HostRow|undefined;
-      if(!row||!['ready','draining','retired'].includes(row.status))throw new AppError('CONFLICT','Сначала завершите текущую настройку сервера.');
-      if((await tx.query("select 1 from factory.hosting_jobs j join factory.hosting_addresses a on a.address=j.address where a.host_id=$1 and j.status in ('queued','running','waiting')",[id])).rowCount)throw new AppError('CONFLICT','Дождитесь завершения публикаций на сервере.');
+      const recoveryRepair=paused&&action==='connection'&&row?.status==='failed'&&row.phase==='maintenance'&&row.operation?.kind==='connection';
+      if(!row||(!recoveryRepair&&!['ready','draining','retired'].includes(row.status)))throw new AppError('CONFLICT','Сначала завершите текущую настройку сервера.');
+      if(!paused&&(await tx.query("select 1 from factory.hosting_jobs j join factory.hosting_addresses a on a.address=j.address where a.host_id=$1 and j.status in ('queued','running','waiting')",[id])).rowCount)throw new AppError('CONFLICT','Дождитесь завершения публикаций на сервере.');
       if(action==='drain'||action==='retire'){
         if(action==='retire'&&(await tx.query('select 1 from factory.hosting_addresses where host_id=$1 and site_id is not null',[id])).rowCount)throw new AppError('CONFLICT','Сначала перенесите сайты и освободите закреплённые IPv4.');
         await tx.query('update factory.hosting_hosts set status=$2,updated_at=now() where id=$1',[id,action==='drain'?'draining':'retired']);await tx.query('commit');return {id};
       }
       if(!['addresses','rotate','connection','check','activate'].includes(action))throw new AppError('INVALID_INPUT','Неизвестная операция сервера.');
-      const operation:HostOperation={kind:action==='activate'?'check':action as HostOperation['kind'],previousStatus:action==='activate'?'ready':row.status==='retired'?'draining':row.status};
+      const operation:HostOperation={kind:action==='activate'?'check':action as HostOperation['kind'],previousStatus:recoveryRepair?row.operation!.previousStatus:action==='activate'?'ready':row.status==='retired'?'draining':row.status};
       if(action==='addresses'){
         const additions=[...new Set(String(body.addresses??'').split(/[\s,;]+/).filter(Boolean).map(publicIPv4))];
         if(!additions.length||additions.length>64)throw new AppError('INVALID_INPUT','Укажите от 1 до 64 выделенных провайдером IPv4.');
@@ -82,7 +85,7 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
         const candidate={name:String(body.name??row.name).trim(),host:publicIPv4(body.host??row.host),port:Number(body.port??row.port),username:String(body.username??row.username)};
         if(!candidate.name||candidate.name.length>80||!Number.isInteger(candidate.port)||candidate.port<1||candidate.port>65535||!/^[a-z_][a-z0-9_-]{0,31}$/.test(candidate.username))throw new AppError('INVALID_INPUT','Проверьте параметры SSH.');
         if(body.fingerprint&&body.fingerprint!==row.host_fingerprint)throw new AppError('CONFLICT','Отпечаток существующего сервера менять этой операцией нельзя.');
-        if(body.password||body.privateKey){const checked=validateServer({...body,...candidate});bootstrap=await protectSecret(JSON.stringify(checked.auth));}
+        if(body.password||body.privateKey){const checked=validateServer({...body,...candidate,fingerprint:row.host_fingerprint});bootstrap=await protectSecret(JSON.stringify(checked.auth));}
         operation.connection=candidate;
       }
       await tx.query("update factory.hosting_hosts set operation=$2,config=$3,bootstrap=$4,status='queued',phase='maintenance',error=null,updated_at=now() where id=$1",[id,operation,row.config,bootstrap]);
@@ -103,13 +106,14 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
   async function credentials(id:string,body:Record<string,unknown>){
     const current=(await pool.query("select *,host(host) host from factory.hosting_hosts where id=$1 and status='failed' and phase='connect'",[id])).rows[0];
     if(!current)throw new AppError('CONFLICT','Данные первого входа можно исправить только при ошибке подключения.');
-    const input=validateServer({...body,host:current.host,port:current.port,name:current.name,additionalIPv4:''});
-    const result=await pool.query("update factory.hosting_hosts set username=$2,bootstrap=$3,status='queued',error=null,updated_at=now() where id=$1 and status='failed' and phase='connect' returning id",[id,input.username,await protectSecret(JSON.stringify(input.auth))]);
+    const input=validateServer({...body,fingerprint:current.host_fingerprint??body.fingerprint,host:current.host,port:current.port,name:current.name,additionalIPv4:''});
+    if(body.fingerprint&&current.host_fingerprint&&body.fingerprint!==current.host_fingerprint)throw new AppError('CONFLICT','Отпечаток существующего сервера менять этой операцией нельзя.');
+    const result=await pool.query("update factory.hosting_hosts set username=$2,bootstrap=$3,host_fingerprint=coalesce(host_fingerprint,$4),status='queued',error=null,updated_at=now() where id=$1 and status='failed' and phase='connect' returning id",[id,input.username,await protectSecret(JSON.stringify(input.auth)),input.fingerprint]);
     if(!result.rowCount)throw new AppError('CONFLICT','Состояние сервера изменилось.');return result.rows[0];
   }
   async function prepare(row:HostRow){
     const phase=async(value:string)=>{row.phase=value;await pool.query('update factory.hosting_hosts set phase=$2,updated_at=now() where id=$1',[row.id,value]);};
-    if(!row.host_fingerprint){row.host_fingerprint=await fingerprint(row.host,row.port);await pool.query('update factory.hosting_hosts set host_fingerprint=$2 where id=$1',[row.id,row.host_fingerprint]);}
+    if(!row.host_fingerprint)throw new AppError('INVALID_INPUT','Укажите проверенный SSH-отпечаток из консоли сервера перед подключением.');
     const host=hostObject(row),sudo=row.username==='root'?'':'sudo -n ';
     const check=sudo+'true';
     const verifySSH=async()=>{
@@ -120,7 +124,7 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
     const run=async(action:string)=>JSON.parse(await execute(host,sudo+helperCommand,JSON.stringify({action,id:row.id,host:row.host,port:row.port,...row.config,...(action==='packages'?{publisher:publisher.toString('base64'),publisherHash:createHash('sha256').update(publisher).digest('hex')}:{})}),900000));
     if(row.phase==='maintenance'&&row.operation){
       const operation=row.operation;
-      const keyScript=await readFile(join(root,'scripts/linux/manage-key.py'));
+      const keyScript=await readFile(join(codeRoot,'scripts/linux/manage-key.py'));
       const keyCommand="python3 -c \"import base64;exec(base64.b64decode('"+keyScript.toString('base64')+"'))\"";
       const manageKey=(connection:LinuxHost,action:string,publicKey:string,source?:string,auth?:Bootstrap)=>execute(connection,keyCommand,JSON.stringify({action,publicKey,source,id:row.id}),30000,auth);
       if(operation.kind==='connection'){
@@ -182,15 +186,15 @@ export async function createServers(pool:Pool,root:string,data:string,override?:
       await pool.query("update factory.hosting_hosts set status='ready',phase='ready',error=null,report=coalesce(report,'{}')||$2::jsonb,checked_at=now(),updated_at=now() where id=$1",[row.id,JSON.stringify(report)]);
     }
   }
-  async function work(){
+  async function work(onlyId?:string){
     const tx=await pool.connect();let locked=false;
     try{locked=(await tx.query('select pg_try_advisory_lock(78424522) ok')).rows[0].ok;if(!locked)return;
-      const row=(await tx.query("select *,host(host) host from factory.hosting_hosts where status in ('queued','running') order by created_at limit 1")).rows[0] as HostRow|undefined;if(!row)return;
+      const row=(await tx.query("select *,host(host) host from factory.hosting_hosts where status in ('queued','running') and ($1::text is null or id=$1 and phase='maintenance' and operation->>'kind'='connection') order by created_at limit 1",[onlyId??null])).rows[0] as HostRow|undefined;if(!row)return;
       await tx.query("update factory.hosting_hosts set status='running',updated_at=now() where id=$1",[row.id]);
       try{await prepare(row);}catch(e){await tx.query("update factory.hosting_hosts set status='failed',error=$2,updated_at=now() where id=$1",[row.id,e instanceof AppError?e.message:'Настройка остановлена. Проверьте доступ SSH, ОС и повторите.']);}
     }finally{if(locked)await tx.query('select pg_advisory_unlock(78424522)');tx.release();}
   }
   const tick=()=>{if(closed||paused)return Promise.resolve();if(!ticking)ticking=work().finally(()=>{ticking=null;});return ticking;};
-  const timer=setInterval(()=>void tick().catch(()=>{}),3000);timer.unref();
-  return {async pause(){paused=true;await ticking;},resume(){paused=false;},list,add,maintain,retry,credentials,tick,async close(){closed=true;clearInterval(timer);await ticking;}};
+  const timer=setInterval(()=>void tick().catch(e=>logFailure('servers.tick',e)),3000);timer.unref();
+  return {async pause(){paused=true;await ticking;},resume(){paused=false;},list,add,maintain,async repairConnection(id:string,body:Record<string,unknown>){if(!paused)throw new AppError('CONFLICT','Используйте обычное обслуживание сервера.');await maintain(id,{...body,action:'connection'});if(!ticking)ticking=work(id).finally(()=>{ticking=null;});await ticking;},retry,credentials,tick,async close(){closed=true;clearInterval(timer);await ticking;}};
 }

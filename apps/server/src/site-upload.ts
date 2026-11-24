@@ -1,3 +1,4 @@
+import {publicationIssues} from '../../worker/src/validation/static.js';
 import {randomUUID} from 'node:crypto';
 import {fromBuffer} from 'yauzl';
 import {AppError,type ArtifactFile,type Principal} from '../../../packages/contracts/src/model.js';
@@ -21,7 +22,10 @@ export async function readSiteZip(bytes:Buffer):Promise<ArtifactFile[]>{
    files.push({path,bytes:Buffer.concat(chunks),mediaType:artifactMediaType(path)});zip.readEntry();
   })().catch(fail);});zip.readEntry();
  }));
- checkArtifacts(files);if(!files.some(f=>f.path==='index.html'))invalid();return files;
+ checkArtifacts(files);if(!files.some(f=>f.path==='index.html'))invalid();
+ const issues=publicationIssues(files);
+ if(issues.length)invalid('Архив содержит ошибку: '+issues.slice(0,3).map(i=>(i.path??'')+' — '+i.message).join('; '));
+ if(!files.find(f=>f.path==='index.html')!.bytes.length)invalid('index.html пуст.');return files;
 }
 
 /** Bounded, actor/site-bound transfer. A lost process expires the transfer, never a live version. */
@@ -34,14 +38,20 @@ export function createSiteUpload(runtime:ServerRuntime){
   const site=await runtime.repository.scoped(actor,siteId,'site:edit');publicationDomain(site.domain);
   if(body.action==='begin'){
    if(!Number.isSafeInteger(body.size)||body.size<1||body.size>11000000)invalid('ZIP должен быть не больше 11 МБ.');
-   if(transfers.size>=4||[...transfers.values()].reduce((n,t)=>n+t.size,0)+body.size>33000000)throw new AppError('CONFLICT','Другие архивы ещё загружаются. Повторите позже.');
+   const active=[...transfers.values()].filter(t=>!t.result);
+   if(active.length>=4||active.reduce((n,t)=>n+t.size,0)+body.size>33000000)throw new AppError('CONFLICT','Другие архивы ещё загружаются. Повторите позже.');
+   // Completed receipts support lost commit responses without consuming upload slots.
+   if(transfers.size>=256){const receipt=[...transfers].find(([,t])=>t.result);if(receipt)transfers.delete(receipt[0]);}
    const id=randomUUID();transfers.set(id,{owner:actor.userId,site:siteId,revision:site.revision,size:body.size,bytes:Buffer.alloc(body.size),offset:0,expires:Date.now()+600000,busy:false});return {id};
   }
   const t=transfers.get(body.id);if(!t||t.owner!==actor.userId||t.site!==siteId)throw new AppError('NOT_FOUND','Загрузка истекла. Выберите ZIP заново.');
   if(t.busy)throw new AppError('CONFLICT','Архив уже обрабатывается.');
+  if(body.action==='abort'){transfers.delete(body.id);return {offset:0};}
   if(body.action==='chunk'){
    if(t.result||typeof body.base64!=='string'||body.base64.length>44000||!Number.isSafeInteger(body.offset))invalid();
-   const chunk=Buffer.from(body.base64,'base64');if(!chunk.length||chunk.toString('base64')!==body.base64||body.offset!==t.offset||t.offset+chunk.length>t.size)invalid('Порядок частей архива нарушен.');
+   const chunk=Buffer.from(body.base64,'base64');if(!chunk.length||chunk.toString('base64')!==body.base64||body.offset<0||body.offset+chunk.length>t.size)invalid('Порядок частей архива нарушен.');
+   if(body.offset<t.offset&&body.offset+chunk.length<=t.offset&&t.bytes.subarray(body.offset,body.offset+chunk.length).equals(chunk))return {offset:t.offset};
+   if(body.offset!==t.offset)invalid('Порядок частей архива нарушен.');
    chunk.copy(t.bytes,t.offset);t.offset+=chunk.length;return {offset:t.offset};
   }
   if(body.action!=='commit')invalid();if(t.result)return t.result;

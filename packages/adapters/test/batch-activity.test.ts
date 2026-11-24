@@ -4,7 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';impor
 import {openLocalDatabase} from '../src/local-database.js';import {LocalBatches} from '../src/local-batches.js';
 test('batch activity includes off-page work and unadmitted rows but stops for terminal or paused batches',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sf-batch-activity-')),db=await openLocalDatabase(root),b=new LocalBatches(db),owner={userId:'owner',role:'user'} as const;
- try{const batch=await b.submitBatch(owner,Array.from({length:6},(_,i)=>({rowNumber:i+2,domain:'activity-'+i+'.test'})),'activity');
+ try{const batch=await b.submitBatch(owner,Array.from({length:6},(_,i)=>({ mentionedUrl: 'https://example.com/', rowNumber:i+2,domain:'activity-'+i+'.test'})),'activity');
  expect(await b.get(owner,batch.batchId)).toMatchObject({activeWork:true});
  db.sql.prepare("update jobs set state='completed',data=json_set(data,'$.state','completed') where id in (select site_id from batch_rows where batch_id=? order by row_number limit 5)").run(batch.batchId);
  expect((await b.page(owner,batch.batchId)).items.every(r=>r.job?.state==='completed')).toBe(true);expect(await b.get(owner,batch.batchId)).toMatchObject({activeWork:true});

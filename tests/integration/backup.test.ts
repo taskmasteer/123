@@ -175,7 +175,7 @@ it('stages a managed independent copy with remapped verified Auth and keeps term
         await expect(target.install(admin, begun.id)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
         expect((await pool.query('select count(*) n from public.sites')).rows[0].n).toBe('0');
         for (const [seq, bytes] of objects) {
-            await target.stageChunk(admin, begun.id, seq, 0, Buffer.from(bytes).toString('base64'));
+            for(let offset=0,index=0;offset<bytes.length;offset+=24000,index++)await target.stageChunk(admin,begun.id,seq,index,Buffer.from(bytes).subarray(offset,offset+24000).toString('base64'));
             await target.finishObject(admin, begun.id, seq);
         }
         const originalQuery = pool.query.bind(pool),preparationPrototype=PostgresRestorePreparation.prototype as any,originalPreparationQuery=preparationPrototype.query;

@@ -5,7 +5,7 @@ export type User={id:string;login:string;csrf:string};
 let csrf='';
 export async function api<T>(path:string,body?:unknown):Promise<T>{
   const response=await appFetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'content-type':'application/json','x-csrf-token':csrf},...(body===undefined?{}:{body:JSON.stringify(body)}),redirect:'error'});
-  const result=await response.json();if(!response.ok)throw new Error(result.error?.message??'Операция не выполнена.');return result;
+  const result=await response.json();if(!response.ok)throw Object.assign(new Error(result.error?.message??'Операция не выполнена.'),{code:result.error?.code,status:response.status});return result;
 }
 export async function logout(){
  // Bound the remote revoke attempt; a disconnected server cannot trap the user.

@@ -125,7 +125,7 @@ export async function validateSite(files: ArtifactFile[], options: { screenshotR
               overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth + 1,
               unreadable: textElements.filter((element) => Number.parseFloat(getComputedStyle(element).fontSize) < 12 || lowContrast(element)).slice(0,8).map(element=>({element:element.tagName.toLowerCase()+(element.id?'#'+element.id:'')+'.'+Array.from(element.classList).join('.'),text:element.textContent?.trim().slice(0,100),fontSize:getComputedStyle(element).fontSize,color:getComputedStyle(element).color,background:getComputedStyle(element).backgroundColor})),
               empty: !document.body.innerText.trim(),
-              form: !!document.querySelector('form,input,textarea,select,[formaction],[form]'),
+              form: !!document.querySelector('form,input:not([type="checkbox" i]),input[name],textarea,select,[formaction],[form]'),
               links: Array.from(document.querySelectorAll('a[href]')).map((anchor) => anchor.getAttribute('href')!),
               ids: Array.from(document.querySelectorAll('[id],a[name]')).map((element) => element.id || element.getAttribute('name')!),
             };

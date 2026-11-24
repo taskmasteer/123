@@ -15,5 +15,5 @@ $env:PLAYWRIGHT_BROWSERS_PATH=Join-Path $projectRoot '.local-state\browsers'
 $env:SITE_FACTORY_SERVER_DATA=$dataRoot
 $env:SITE_FACTORY_SOURCE_ROOT=$projectRoot
 $env:SITE_FACTORY_INSTALL_ROOT=$projectRoot
-& (Join-Path $projectRoot '.local-state\tools\runtime\node.exe') (Join-Path $projectRoot 'dist\apps\server\src\main.js') >> (Join-Path $dataRoot 'server.log') 2>&1
+& (Join-Path $projectRoot '.local-state\tools\runtime\node.exe') (Join-Path $projectRoot 'scripts\server-manage.mjs') serve
 exit $LASTEXITCODE

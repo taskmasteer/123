@@ -19,6 +19,14 @@ vi.mock('../src/validation/static.js', async (importOriginal) => {
 afterEach(cleanDirectories);
 
 describe('static validation', () => {
+  it('preserves a standalone checklist while rejecting fields associated with a form',async()=>{
+    const files=site('<h1>Photo archive</h1><label><input type="checkbox">Made a second copy</label>');
+    expect(validateStatic(files).ok).toBe(true);
+    const report=await validateSite(files);
+    expect(report.issues.map(issue=>issue.code)).not.toContain('form');
+    for(const html of ['<input type="checkbox" name="choice">','<form><input type="checkbox"></form>','<input type="checkbox" form="contact">','<input type="email">'])
+      expect(validateStatic(site(html)).issues.some(issue=>issue.code==='form')).toBe(true);
+  });
   // Catches HTML parser bypasses and content-policy regressions before execution.
   it.each([
     ['form', site('<FORM><input name="email"></FORM>'), 'form'],

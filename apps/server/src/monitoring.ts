@@ -14,15 +14,19 @@ export function certificateExpiry(domain:string,ip:string):Promise<number>{
     });req.on('error',reject);req.on('timeout',()=>req.destroy(Error('timeout')));req.end();
   });
 }
-export async function createMonitoring(pool:Pool,override?:MonitorPorts){
+export async function createMonitoring(pool:Pool,override?:MonitorPorts,initiallyPaused=false){
   const ports=override??{dns:propagated,health:verifyHostedRelease,certificate:certificateExpiry};
-  let paused=false,closed=false,running:Promise<void>|null=null;
+  let paused=initiallyPaused,closed=false,running:Promise<void>|null=null;
   async function check(siteId:string){
     const row=(await pool.query('select b.*,host(b.address) ip,s.domain from factory.hosting_sites b join public.sites s on s.id=b.site_id where b.site_id=$1',[siteId])).rows[0];
     if(!row)return;publicationDomain(row.domain);
     const checks:Record<string,unknown>={};
-    for(const [name,action] of [['dns',()=>ports.dns(row.domain,row.ip).then(ok=>{if(!ok)throw Error('DNS');})],['http',()=>ports.health(row.domain,row.ip,row.revision_id,false)],['https',()=>ports.health(row.domain,row.ip,row.revision_id,true)]] as const){try{await action();checks[name]=true;}catch{checks[name]=false;}}
-    try{checks.certificateExpiresAt=new Date(await ports.certificate(row.domain,row.ip)).toISOString();}catch{checks.certificateExpiresAt=null;}
+    await Promise.all(([
+      ['dns',async()=>{if(!await ports.dns(row.domain,row.ip))throw Error('DNS');return true;}],
+      ['http',async()=>{await ports.health(row.domain,row.ip,row.revision_id,false);return true;}],
+      ['https',async()=>{await ports.health(row.domain,row.ip,row.revision_id,true);return true;}],
+      ['certificateExpiresAt',async()=>new Date(await ports.certificate(row.domain,row.ip)).toISOString()]
+    ] as const).map(async([name,action])=>{try{checks[name]=await action();}catch{checks[name]=name==='certificateExpiresAt'?null:false;}}));
     const expiry=typeof checks.certificateExpiresAt==='string'?Date.parse(checks.certificateExpiresAt):0;
     const status=!checks.dns||!checks.http||!checks.https||!expiry?'failed':expiry-Date.now()<14*86400000?'warning':'healthy';
     // A concurrent deployment must not attach an old result to its new binding.
@@ -33,13 +37,17 @@ export async function createMonitoring(pool:Pool,override?:MonitorPorts){
   async function work(){
     const tx=await pool.connect();let locked=false;
     try{locked=(await tx.query('select pg_try_advisory_lock(78424523) ok')).rows[0].ok;if(!locked)return;
-      const row=(await tx.query(`select s.site_id from factory.hosting_sites s left join factory.hosting_health h using(site_id)
+      const rows=(await tx.query(`select s.site_id from factory.hosting_sites s left join factory.hosting_health h using(site_id)
         where (h.site_id is null or h.next_check<=now() or h.revision_id<>s.revision_id or h.address<>s.address)
         and not exists(select 1 from factory.hosting_jobs j where j.site_id=s.site_id and j.status in ('queued','running','waiting'))
-        order by h.next_check nulls first limit 1`)).rows[0];if(row)await check(row.site_id);
+        order by h.next_check nulls first limit 32`)).rows;
+      for(let offset=0;offset<rows.length&&!paused&&!closed;offset+=8){
+        const results=await Promise.allSettled(rows.slice(offset,offset+8).map(row=>check(row.site_id)));
+        if(results.some(r=>r.status==='rejected'))console.error(new Date().toISOString(),'monitoring.check_failed');
+      }
     }finally{if(locked)await tx.query('select pg_advisory_unlock(78424523)');tx.release();}
   }
   const tick=()=>{if(paused||closed)return Promise.resolve();if(!running)running=work().finally(()=>{running=null;});return running;};
-  const timer=setInterval(()=>void tick().catch(()=>{}),10000);timer.unref();
+  const timer=setInterval(()=>void tick().catch(()=>console.error(new Date().toISOString(),'monitoring.tick_failed')),1000);timer.unref();
   return {check,tick,request:async(id:string)=>{await pool.query('update factory.hosting_health set next_check=now() where site_id=$1',[id]);},async pause(){paused=true;await running;},resume(){paused=false;},async close(){closed=true;clearInterval(timer);await running;}};
 }

@@ -34,13 +34,13 @@ export class NamecheapDns{
   constructor(private config:NamecheapConfig,private transport:typeof fetch=fetch,private allowed:readonly string[]|undefined=pilotDomains){}
   private async call(domain:string,command:string,values:Record<string,string>={}){
     domain=publicationDomain(domain,this.allowed);
-    const parts=domain.split('.');if(parts.length!==2)throw new AppError('INVALID_INPUT','Для пилота нужен корневой домен.');
+    const parts=domain.split('.');if(parts.length<2)throw new AppError('INVALID_INPUT','Нужен корневой домен.');
     if(!isIPv4(this.config.clientIp))throw new AppError('INVALID_INPUT','Нужен исходящий IPv4 управляющего сервера.');
     // Reserve the next slot before awaiting: independent host queues share one limiter.
     const slot=Math.max(Date.now(),NamecheapDns.lastCall+6100);NamecheapDns.lastCall=slot;const wait=slot-Date.now();if(wait>0)await new Promise(r=>setTimeout(r,wait));
-    const body=new URLSearchParams({ApiUser:this.config.username,ApiKey:this.config.apiKey,UserName:this.config.username,ClientIp:this.config.clientIp,Command:command,SLD:parts[0]!,TLD:parts[1]!,...values});
+    const body=new URLSearchParams({ApiUser:this.config.username,ApiKey:this.config.apiKey,UserName:this.config.username,ClientIp:this.config.clientIp,Command:command,SLD:parts[0]!,TLD:parts.slice(1).join('.'),...values});
     let response:Response;
-    try{response=await this.transport('https://api.namecheap.com/xml.response',{method:'POST',body,redirect:'error',signal:AbortSignal.timeout(25000)});}catch{throw new AppError('UNAVAILABLE','Namecheap не ответил. Проверьте сеть и whitelist IPv4.');}
+    try{response=await this.transport('https://api.namecheap.com/xml.response',{method:'POST',body,redirect:'error',signal:AbortSignal.timeout(25000)});}catch(e){if(e instanceof AppError)throw e;throw new AppError('UNAVAILABLE','Namecheap не ответил. Проверьте сеть и whitelist IPv4.');}
     if(!response.ok)throw new AppError('UNAVAILABLE',`Namecheap HTTP ${response.status}.`);
     const reader=response.body!.getReader();const chunks:Uint8Array[]=[];let size=0;
     while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>1024*1024){await reader.cancel();throw new AppError('UNAVAILABLE','Ответ Namecheap слишком большой.');}chunks.push(value);}
