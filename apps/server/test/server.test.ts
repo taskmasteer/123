@@ -22,7 +22,8 @@ export const fixtureModel:ModelPort={identity:'fixture:server',async run(request
       ? '<h1>Measure the tide</h1><ol><li>Find the high water mark on the pier.</li><li>Record the water depth every hour in the same place.</li></ol>'
       : '<h1>Read the night sky</h1><p>Find a bright star above the southern horizon and sketch its position relative to a fixed point.</p>';
     await tools.write('index.html','<!doctype html><html><body><main>'+content+'<section data-mentioned-link="true"><h2>Field notes</h2><p>A companion notebook provides a space for dated observations so you can compare your readings on a later visit.</p><a href="https://example.org/field">Field notebook</a></section></main></body></html>');
-    return {summary:'Fixture page',inputTokens:0,outputTokens:0};
+    // Keep the duplicate fixture subject-valid before exercising originality.
+    return new FakeModel().run(request,tools,signal);
   }
   const result=await new FakeModel().run(request,tools,signal);
   if(request.mode==='generate'&&request.site.input.mentionedUrl){let html=await tools.read('index.html');html=html.replace('</main>',`<section data-mentioned-link="true"><h2>Explore the resource</h2><p>This resource contains practical documentation for building reliable websites. Visit it for further reading and examples relevant to this project.</p><a href="${request.site.input.mentionedUrl}">Read the documentation</a></section></main>`);await tools.write('index.html',html);}
