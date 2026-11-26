@@ -16,7 +16,7 @@ let started=false;
 try {
  writeFileSync(pw,password,{mode:0o600});
  run('initdb',['-D',data,'-U','test_admin','--auth=scram-sha-256','--pwfile='+pw,'--encoding=UTF8','--no-locale']);
- run('pg_ctl',['-D',data,'-l',join(dir,'postgres.log'),'-o',`-h 127.0.0.1 -p ${port}`,'-w','start']); started=true;
+ run('pg_ctl',['-D',data,'-l',join(dir,'postgres.log'),'-o',`-h 127.0.0.1 -p ${port}`+(process.platform==='linux'?' -c unix_socket_directories=':''),'-w','start']); started=true;
  const cert=join(dir,'tls.crt'),key=join(dir,'tls.key');
  await testCertificate(cert,key);
  const env={...process.env,SITE_FACTORY_TEST_TLS_CERT:cert,SITE_FACTORY_TEST_TLS_KEY:key,SITE_FACTORY_TEST_DB:JSON.stringify({host:'127.0.0.1',port,user:'test_admin',password,database:'postgres'})};
