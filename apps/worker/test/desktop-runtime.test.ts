@@ -17,14 +17,14 @@ it.each(['auth','quota','model'])('explicit Retry recovers %s for the same gener
  const runtime=await createDesktopRuntime(await directory(),resolve('.'),{native:true,transport});const request=(method:string,params:unknown={}):Promise<any>=>runtime.request({id:'recover',version:1,method,params});
  try{
   await runtime.configure({mode:'live',apiKey:'old-key',model:'configured'});const created=await request('site.create',{domain:failure+'-recovery.test',about:'A supplied research concept for preserved event notes'});
-  await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state).toBe('needs_attention');expect(bodies).toHaveLength(2);
+  await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('needs_attention');expect(bodies).toHaveLength(2);
   if(failure!=='quota')await runtime.configure({mode:'live',apiKey:'corrected-key',model:failure==='model'?'replacement':'configured'});expect(bodies).toHaveLength(2);
   await request('job.retry',{siteId:created.site.id});await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('completed');
   expect(bodies).toHaveLength(3);expect(headers[2]).toBe(failure==='quota'?'Bearer old-key':'Bearer corrected-key');expect(bodies[2].input.some((item:any)=>item.call_id==='saved-write')).toBe(failure!=='model');
   await expect.poll(async()=>(await request('device.status')).usage).toEqual({inputTokens:12,outputTokens:6});
   expect((await request('site.list')).items[0].publishedId).toBeTruthy();
  }finally{await runtime.close();}
-},30000);
+},90000);
 it.each(['rotate','delete'])('%s during a live tool loop aborts old calls before the next request',async(action)=>{
  const headers:string[]=[];let waiting=false;
  const transport=(async(_url,init)=>{

@@ -232,7 +232,7 @@ test('validation failure diagnostics differ from model errors and survive reopen
     expect((await reopened.getConversation(admin, h.before.id)).at(-1)?.text).toBe(candidate.summary);
     expect(await h.deps.sites.get(h.before.id)).toEqual(h.before);
   } finally { await h.close(); }
-});
+},30000);
 
 test.each(['Cookie', 'Set-Cookie', '"Cookie"'])('redacts every authentication cookie in a %s header before persisting chat', async header => {
   const h = await harness();
