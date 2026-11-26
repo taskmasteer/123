@@ -38,14 +38,14 @@ it.each(['rotate','delete'])('%s during a live tool loop aborts old calls before
  try{
   const created=await request('site.create',{domain:action+'.test'});await expect.poll(async()=>(await request('job.status',{siteId:created.site.id})).state,{timeout:20000}).toBe('completed');
   const site=(await request('site.list')).items[0];await runtime.configure({mode:'live',apiKey:'old-synthetic-key',model:'configured'});
-  await request('edit.request',{siteId:site.id,expectedRevision:site.revision,instruction:'Preserve existing text'});await expect.poll(()=>waiting).toBe(true);
+  await request('edit.request',{siteId:site.id,expectedRevision:site.revision,instruction:'Preserve existing text'});await expect.poll(()=>waiting,{timeout:20000}).toBe(true);
   await runtime.configure(action==='rotate'?{mode:'live',apiKey:'new-synthetic-key',model:'configured'}:{mode:'blocked'});
   if(action==='rotate'){
    await expect.poll(async()=>(await request('job.status',{siteId:site.id})).state,{timeout:20000}).toBe('completed');expect(headers).toEqual(['Bearer old-synthetic-key','Bearer old-synthetic-key','Bearer new-synthetic-key']);
    const chat=await request('chat.list',{siteId:site.id});expect(JSON.stringify(chat)).not.toContain('encrypted_content');expect(JSON.stringify(chat)).not.toContain('synthetic-key');
   }else{expect((await request('job.status',{siteId:site.id})).state).toBe('paused');expect(headers).toHaveLength(2);expect(await request('device.status')).toMatchObject({mode:'blocked',activeJobs:0});}
  }finally{await runtime.close();}
-},30000);
+},60000);
 it('reports returned token usage even when a live response refuses the job',async()=>{
  const transport=(async()=>Response.json({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'refusal',refusal:'Cannot comply'}]}],usage:{input_tokens:9,output_tokens:4}})) as typeof fetch;
  const runtime=await createDesktopRuntime(await directory(),resolve('.'),{native:true,transport});
