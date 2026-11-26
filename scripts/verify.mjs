@@ -8,5 +8,5 @@ try {
   runNode('scripts/test-integration.mjs');
   runNode('node_modules/typescript/bin/tsc',['-p','tsconfig.build.json']);
   runNode('scripts/test-server.mjs',['--isolated']);
-  runNode('node_modules/vite/bin/vite.js',['build'],{cwd:new URL('../apps/desktop',import.meta.url)});
+  runNode('node_modules/vite/bin/vite.js',['build','--config','vite.web.config.ts'],{cwd:new URL('../apps/desktop',import.meta.url)});
 }catch(error){console.error(error.message);process.exitCode=1;}
