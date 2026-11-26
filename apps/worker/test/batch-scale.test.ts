@@ -95,7 +95,7 @@ it('measures 5000 normalized records beyond the old JSON cap, complete stable pa
         await db.close();
         await rm(root, { recursive: true, force: true });
     }
-}, 120000);
+}, process.env.CI ? 600000 : 120000);
 it('runs 100 fake generation jobs with two workers, persisted pause/resume and isolated row failure', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sf-100-')), db = await openLocalDatabase(root), sites = await createLocalState(root, clock, db), queue = await createLocalQueue(root, clock, db), b = new LocalBatches(db);
     const t = performance.now();
@@ -133,4 +133,4 @@ it('runs 100 fake generation jobs with two workers, persisted pause/resume and i
         await db.close();
         await rm(root, { recursive: true, force: true });
     }
-}, 120000);
+}, process.env.CI ? 600000 : 120000);

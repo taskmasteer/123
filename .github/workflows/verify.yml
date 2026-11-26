@@ -32,9 +32,25 @@ jobs:
           $pg = Get-ChildItem 'C:/Program Files/PostgreSQL' -Directory | Sort-Object Name -Descending | Select-Object -First 1
           if (-not $pg) { throw 'PostgreSQL toolchain is required' }
           "SITE_FACTORY_PG_BIN=$($pg.FullName)/bin" >> $env:GITHUB_ENV
-      - run: node node_modules/playwright/cli.js install --with-deps chromium --only-shell
+      - run: node node_modules/playwright/cli.js install --with-deps chromium
         env:
           PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/browsers'
+      - name: Allow sandboxed Playwright browsers on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          browser_root="$GITHUB_WORKSPACE/.local-state/browsers"
+          sudo tee /etc/apparmor.d/site-factory-ci-browsers > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile site-factory-ci-chromium "$browser_root/chromium-*/chrome-linux64/chrome" flags=(unconfined) {
+            userns,
+          }
+          profile site-factory-ci-headless "$browser_root/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/site-factory-ci-browsers
       - run: npm run verify
         env:
           PLAYWRIGHT_BROWSERS_PATH: '${{ github.workspace }}/.local-state/browsers'
