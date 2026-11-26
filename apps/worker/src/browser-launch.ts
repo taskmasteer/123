@@ -4,6 +4,9 @@ import { isAbsolute, join } from 'node:path';
 export function browserLaunchOptions(headless: boolean, environment: NodeJS.ProcessEnv = process.env, platform: string = process.platform): LaunchOptions & {env:Record<string,string>} {
   const env: Record<string,string> = {};
   for (const key of ['SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','LOCALAPPDATA','LANG','LC_ALL']) if (environment[key] !== undefined) env[key]=environment[key];
+  if(platform==='linux'&&!headless) {
+    for(const key of ['DISPLAY','XAUTHORITY'])if(environment[key]!==undefined)env[key]=environment[key];
+  }
   if (environment.SITE_FACTORY_PACKAGED==='1'&&platform==='win32') {
     const root=environment.SITE_FACTORY_RUNTIME_ROOT;
     if(!root||!isAbsolute(root))throw new Error('Ресурсы браузера недоступны. Восстановите или переустановите приложение.');
