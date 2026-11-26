@@ -1,6 +1,13 @@
 import { it, expect } from 'vitest';
 import { resolve, join } from 'node:path';
 import { browserLaunchOptions } from '../src/browser-launch.js';
+it('passes only display access to a visible Linux browser while preserving sandboxing',()=>{
+ const environment={DISPLAY:':99',XAUTHORITY:'/tmp/ci-display',OPENAI_API_KEY:'synthetic-forbidden'};
+ const visible=browserLaunchOptions(false,environment,'linux');
+ expect(visible.chromiumSandbox).toBe(true);
+ expect(visible.env).toEqual({DISPLAY:':99',XAUTHORITY:'/tmp/ci-display'});
+ expect(browserLaunchOptions(true,environment,'linux').env).toEqual({});
+});
 it('packaged Mac browser launches through fixed private owner proxy with no provider environment', () => {
  const root=resolve('.local-state/synthetic-runtime');
  const options=browserLaunchOptions(true,{SITE_FACTORY_PACKAGED:'1',SITE_FACTORY_RUNTIME_ROOT:root,SITE_FACTORY_GUARD_SOCKET:join(root,'private.sock'),SITE_FACTORY_GUARD_TOKEN:'a'.repeat(64),OPENAI_API_KEY:'synthetic-forbidden',HTTPS_PROXY:'synthetic-forbidden',TMPDIR:join(root,'temp')},'darwin');
