@@ -5,4 +5,5 @@ export default defineConfig({test:{
   // Keep assertions unchanged while allowing I/O and cleanup to finish in CI.
   testTimeout:process.env.CI ? 30000 : 5000,
   hookTimeout:process.env.CI ? 30000 : 10000,
+  expect:{poll:{timeout:process.env.CI ? 20000 : 1000}},
 }});
